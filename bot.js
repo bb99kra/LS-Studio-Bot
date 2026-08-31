@@ -1156,7 +1156,279 @@ function buildPackageSelectMenu(userId, lang = 'vi') {
 }
 
 // =========================================================================
-// 7. XỬ LÝ INTERACTIONS (BUTTON, SELECT MENU, SLASH COMMANDS)
+// 6.1 HELPER MODAL BUILDERS & TICKET FACTORIES (DISCORD MODAL SPECS COMPLIANT)
+// =========================================================================
+
+// Helper: Khởi tạo kênh Ticket an toàn với đầy đủ phân quyền và kiểm tra trùng lặp
+async function createTicketChannel({ guild, user, ticketType = '🛒-mua', customTopic = null }) {
+  if (!guild) {
+    throw new Error("Không tìm thấy thông tin máy chủ Discord (Guild)! / Guild not found.");
+  }
+
+  // 1. Kiểm tra quyền ManageChannels của Bot
+  const botMember = guild.members.me || await guild.members.fetchMe().catch(() => null);
+  if (!botMember || !botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+    throw new Error("Bot thiếu quyền `Manage Channels` (Quản Lý Kênh) để tạo Ticket! Vui lòng liên hệ Quản trị viên cấp quyền.");
+  }
+
+  // 2. Kiểm tra Duplicate Ticket: Quét các channel còn tồn tại xem user đã có ticket chưa (bằng topic)
+  const existingTicket = guild.channels.cache.find(c => 
+    c && 
+    !c.deleted &&
+    c.type === ChannelType.GuildText &&
+    c.topic && c.topic.includes(`(${user.id})`)
+  );
+
+  if (existingTicket) {
+    return { existingTicket, ticketChannel: null, staffMentionString: "" };
+  }
+
+  // 3. Xử lý tên kênh an toàn chống ký tự đặc biệt / rỗng
+  const sanitizedUsername = (user.username || 'user').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12);
+  const userSuffix = user.id.slice(-4);
+  const safeName = sanitizedUsername.length >= 2 ? `${sanitizedUsername}-${userSuffix}` : `user-${userSuffix}`;
+  const channelName = `${ticketType}-${safeName}`;
+
+  // 4. Tìm danh mục Ticket
+  const ticketCat = guild.channels.cache.find(c => 
+    c &&
+    !c.deleted &&
+    c.type === ChannelType.GuildCategory && 
+    (
+      (c.name.includes("MUA HÀNG") && c.name.includes("HỖ TRỢ")) ||
+      c.name.includes("MUA HÀNG") ||
+      c.name.includes("HỖ TRỢ") ||
+      c.name.toLowerCase().includes("ticket")
+    )
+  );
+
+  // 5. Lấy tất cả các Role Staff / Developer / Founder / Admin
+  const staffRoles = guild.roles.cache.filter(r => 
+    r.name.includes("Staff") || 
+    r.name.includes("Developer") || 
+    r.name.includes("Founder") || 
+    r.name.includes("Admin")
+  );
+
+  const overwrites = [
+    {
+      id: guild.roles.everyone.id,
+      deny: [PermissionsBitField.Flags.ViewChannel]
+    },
+    {
+      id: user.id,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.AttachFiles,
+        PermissionsBitField.Flags.EmbedLinks,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.AddReactions
+      ]
+    },
+    {
+      id: client.user?.id || (botMember ? botMember.id : client.application?.id),
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ManageChannels,
+        PermissionsBitField.Flags.ManageMessages,
+        PermissionsBitField.Flags.EmbedLinks,
+        PermissionsBitField.Flags.AttachFiles,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.AddReactions
+      ]
+    }
+  ];
+
+  staffRoles.forEach(role => {
+    overwrites.push({
+      id: role.id,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.AttachFiles,
+        PermissionsBitField.Flags.EmbedLinks,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.ManageMessages,
+        PermissionsBitField.Flags.AddReactions
+      ]
+    });
+  });
+
+  const topic = customTopic || `Ticket của @${user.tag || user.username} (${user.id}) • Type: ${ticketType}`;
+
+  const ticketChannel = await guild.channels.create({
+    name: channelName,
+    type: ChannelType.GuildText,
+    parent: ticketCat ? ticketCat.id : null,
+    topic: topic,
+    permissionOverwrites: overwrites
+  });
+
+  const staffMentionString = staffRoles.size > 0 
+    ? Array.from(staffRoles.values()).map(r => `<@&${r.id}>`).join(' ')
+    : "";
+
+  return { existingTicket: null, ticketChannel, staffMentionString, staffRoles };
+}
+
+// Helper: Khởi tạo Modal Đặt Làm Plugin / Mod Custom (Đáp ứng 100% Discord Modal Specs)
+function createCustomOrderModal() {
+  const modal = new ModalBuilder()
+    .setCustomId('modal_custom_order')
+    .setTitle('📝 Đặt Làm Plugin & Mod Custom'); // 32 ký tự <= 45
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new TextInputBuilder()
+      .setCustomId('custom_project_type')
+      .setLabel('Loại sản phẩm (Plugin / Mod Java / Khác)') // 41 ký tự <= 45
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('VD: Plugin Spigot/Paper, Mod Forge/Fabric...') // 45 ký tự <= 100
+      .setRequired(true)
+      .setMaxLength(50)
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new TextInputBuilder()
+      .setCustomId('custom_version')
+      .setLabel('Phiên bản Minecraft / Nền tảng server') // 39 ký tự <= 45
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('VD: Paper 1.20.4, Fabric 1.21, Purpur 1.16.5') // 45 ký tự <= 100
+      .setRequired(true)
+      .setMaxLength(50)
+  );
+
+  const row3 = new ActionRowBuilder().addComponents(
+    new TextInputBuilder()
+      .setCustomId('custom_features')
+      .setLabel('Mô tả tính năng & cơ chế yêu cầu') // 34 ký tự <= 45
+      .setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder('Mô tả chi tiết các lệnh, quyền hạn (permissions) và chức năng mong muốn...') // 77 ký tự <= 100
+      .setRequired(true)
+      .setMinLength(10)
+      .setMaxLength(1500)
+  );
+
+  const row4 = new ActionRowBuilder().addComponents(
+    new TextInputBuilder()
+      .setCustomId('custom_budget_deadline')
+      .setLabel('Ngân sách dự kiến & Thời hạn mong muốn') // 39 ký tự <= 45
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('VD: 200.000 - 500.000 VNĐ, trong 3 ngày...') // 43 ký tự <= 100
+      .setRequired(false)
+      .setMaxLength(100)
+  );
+
+  const row5 = new ActionRowBuilder().addComponents(
+    new TextInputBuilder()
+      .setCustomId('custom_contact')
+      .setLabel('Ghi chú thêm hoặc Liên hệ khác') // 31 ký tự <= 45
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('Zalo / Facebook / Telegram hoặc ghi chú...') // 44 ký tự <= 100
+      .setRequired(false)
+      .setMaxLength(100)
+  );
+
+  modal.addComponents(row1, row2, row3, row4, row5);
+  return modal;
+}
+
+// Helper: Khởi tạo Modal Yêu Cầu Hỗ Trợ Kỹ Thuật (Support Ticket Modal)
+function createSupportTicketModal() {
+  const modal = new ModalBuilder()
+    .setCustomId('modal_support_ticket')
+    .setTitle('🛠️ Yêu Cầu Hỗ Trợ Kỹ Thuật'); // 27 ký tự <= 45
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new TextInputBuilder()
+      .setCustomId('support_issue_title')
+      .setLabel('Tóm tắt vấn đề / Tiêu đề lỗi') // 31 ký tự <= 45
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('VD: Lỗi không nhận lệnh, crash server, config lỗi...') // 54 ký tự <= 100
+      .setRequired(true)
+      .setMaxLength(100)
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new TextInputBuilder()
+      .setCustomId('support_server_env')
+      .setLabel('Phiên bản Server & Môi trường chạy') // 36 ký tự <= 45
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('VD: Paper 1.20.4, Java 17, Purpur 1.16.5...') // 43 ký tự <= 100
+      .setRequired(true)
+      .setMaxLength(50)
+  );
+
+  const row3 = new ActionRowBuilder().addComponents(
+    new TextInputBuilder()
+      .setCustomId('support_description')
+      .setLabel('Mô tả chi tiết lỗi & Log (Stacktrace)') // 39 ký tự <= 45
+      .setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder('Mô tả cách tái hiện lỗi, paste đoạn log lỗi hoặc link mclo.gs / hastebin...') // 77 ký tự <= 100
+      .setRequired(true)
+      .setMinLength(10)
+      .setMaxLength(1500)
+  );
+
+  modal.addComponents(row1, row2, row3);
+  return modal;
+}
+
+// Helper: Khởi tạo Modal Đóng Ticket Kèm Lý Do (Close Ticket with Reason Modal)
+function createCloseTicketReasonModal() {
+  const modal = new ModalBuilder()
+    .setCustomId('modal_close_ticket_reason')
+    .setTitle('🔒 Đóng Ticket Kèm Lý Do'); // 25 ký tự <= 45
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new TextInputBuilder()
+      .setCustomId('close_reason')
+      .setLabel('Lý do đóng ticket / Ghi chú bàn giao') // 38 ký tự <= 45
+      .setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder('VD: Đã hoàn tất hỗ trợ và giao file cho khách hàng...') // 54 ký tự <= 100
+      .setRequired(true)
+      .setMinLength(3)
+      .setMaxLength(500)
+  );
+
+  modal.addComponents(row1);
+  return modal;
+}
+
+// Helper: Khởi tạo Modal Gửi Đánh Giá Dịch Vụ (Feedback & Review Modal)
+function createFeedbackModal() {
+  const modal = new ModalBuilder()
+    .setCustomId('modal_feedback')
+    .setTitle('⭐ Đánh Giá Dịch Vụ - LS STUDIO'); // 33 ký tự <= 45
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new TextInputBuilder()
+      .setCustomId('feedback_rating')
+      .setLabel('Đánh giá chất lượng (1 đến 5 sao)') // 35 ký tự <= 45
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('Nhập số sao (Ví dụ: 5 hoặc ⭐⭐⭐⭐⭐)') // 38 ký tự <= 100
+      .setRequired(true)
+      .setMaxLength(15)
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new TextInputBuilder()
+      .setCustomId('feedback_comment')
+      .setLabel('Nhận xét & Trải nghiệm của bạn') // 32 ký tự <= 45
+      .setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder('Cảm nhận về chất lượng plugin, độ ổn định và hỗ trợ của Staff...') // 65 ký tự <= 100
+      .setRequired(true)
+      .setMinLength(5)
+      .setMaxLength(1000)
+  );
+
+  modal.addComponents(row1, row2);
+  return modal;
+}
+
+// =========================================================================
+// 7. XỬ LÝ INTERACTIONS (BUTTON, SELECT MENU, SLASH COMMANDS, MODALS)
 // =========================================================================
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
@@ -1365,6 +1637,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.editReply({ embeds: [exportEmbed], files: [attachment] });
       }
 
+      // /feedback (Mở Modal gửi nhận xét & đánh giá dịch vụ)
+      if (commandName === 'feedback') {
+        const feedbackModal = createFeedbackModal();
+        return interaction.showModal(feedbackModal);
+      }
+
       // Fallback cho Slash Command chưa hỗ trợ
       return interaction.reply({ 
         content: "❌ Lệnh không xác định hoặc chưa được hỗ trợ!", 
@@ -1429,8 +1707,52 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.update({ embeds: [embed], components: [menuRow, langSwitchRow] });
       }
 
-      // Nút Mở Ticket Mua Hàng / Support / Custom Dev
-      if (customId === 'ticket_buy' || customId === 'ticket_support' || customId === 'ticket_custom') {
+      // Nút Mở Modal Yêu Cầu Custom Dev (Plugin / Mod Java / AI Service)
+      if (customId === 'ticket_custom' || customId === 'btn_open_custom_modal') {
+        if (!guild) {
+          return interaction.reply({ content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
+        }
+        const cooldownRemaining = getRateLimitRemaining(user.id, 5000);
+        if (cooldownRemaining > 0) {
+          return interaction.reply({
+            content: `⏳ Bạn thao tác quá nhanh! Vui lòng đợi **${cooldownRemaining} giây** trước khi mở form tiếp theo.\n*Please wait **${cooldownRemaining}s** before opening form.*`,
+            ephemeral: true
+          });
+        }
+        const modal = createCustomOrderModal();
+        return interaction.showModal(modal);
+      }
+
+      // Nút Mở Modal Hỗ Trợ Kỹ Thuật (Tech Support Modal)
+      if (customId === 'ticket_support') {
+        if (!guild) {
+          return interaction.reply({ content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
+        }
+        const cooldownRemaining = getRateLimitRemaining(user.id, 5000);
+        if (cooldownRemaining > 0) {
+          return interaction.reply({
+            content: `⏳ Bạn thao tác quá nhanh! Vui lòng đợi **${cooldownRemaining} giây** trước khi mở form tiếp theo.\n*Please wait **${cooldownRemaining}s** before opening form.*`,
+            ephemeral: true
+          });
+        }
+        const modal = createSupportTicketModal();
+        return interaction.showModal(modal);
+      }
+
+      // Nút Mở Modal Đóng Kèm Lý Do
+      if (customId === 'btn_close_with_reason') {
+        const modal = createCloseTicketReasonModal();
+        return interaction.showModal(modal);
+      }
+
+      // Nút Mở Modal Gửi Nhận Xét & Đánh Giá
+      if (customId === 'btn_ticket_feedback') {
+        const modal = createFeedbackModal();
+        return interaction.showModal(modal);
+      }
+
+      // Nút Mở Ticket Mua Hàng (Select Menu Dropdown)
+      if (customId === 'ticket_buy') {
         if (!guild) {
           return interaction.reply({ content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
         }
@@ -1456,21 +1778,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.deferReply({ ephemeral: true });
 
         try {
-          // 2.1 Kiểm tra quyền ManageChannels của Bot
-          const botMember = guild.members.me || await guild.members.fetchMe().catch(() => null);
-          if (!botMember || !botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
-            return interaction.editReply({
-              content: "❌ Bot thiếu quyền `Manage Channels` (Quản Lý Kênh) để tạo Ticket! Vui lòng liên hệ Quản trị viên cấp quyền cho Bot."
-            });
-          }
-
-          // 3. Kiểm tra Duplicate Ticket: Quét các channel còn tồn tại xem user đã có ticket chưa (bằng topic)
-          const existingTicket = guild.channels.cache.find(c => 
-            c && 
-            !c.deleted &&
-            c.type === ChannelType.GuildText &&
-            c.topic && c.topic.includes(`(${user.id})`)
-          );
+          const { existingTicket, ticketChannel, staffMentionString } = await createTicketChannel({
+            guild,
+            user,
+            ticketType: '🛒-mua',
+            customTopic: `Ticket của @${user.tag || user.username} (${user.id}) • Type: ticket_buy`
+          });
 
           if (existingTicket) {
             return interaction.editReply({
@@ -1478,165 +1791,42 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
           }
 
-          let ticketType = "🛒-mua";
-          let isBuyTicket = customId === 'ticket_buy';
+          const menuRow = new ActionRowBuilder().addComponents(buildPackageSelectMenu(user.id, 'vi'));
 
-          if (customId === 'ticket_support') {
-            ticketType = "🛠️-support";
-          } else if (customId === 'ticket_custom') {
-            ticketType = "📝-custom";
-          }
+          const langSwitchRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`switch_lang_vi_${user.id}`)
+              .setLabel('🇻🇳 Tiếng Việt')
+              .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
+              .setCustomId(`switch_lang_en_${user.id}`)
+              .setLabel('🇺🇸 English')
+              .setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder()
+              .setCustomId('btn_close_ticket')
+              .setLabel('🔒 Đóng / Close')
+              .setStyle(ButtonStyle.Danger)
+          );
 
-          // Xử lý tên kênh an toàn chống ký tự đặc biệt / rỗng
-          const sanitizedUsername = user.username.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12);
-          const userSuffix = user.id.slice(-4);
-          const safeName = sanitizedUsername.length >= 2 ? `${sanitizedUsername}-${userSuffix}` : `user-${userSuffix}`;
-          const channelName = `${ticketType}-${safeName}`;
-
-          // Tìm danh mục Ticket (Hỗ trợ match linh hoạt 'MUA HÀNG & HỖ TRỢ')
-          const ticketCat = guild.channels.cache.find(c => 
-            c &&
-            !c.deleted &&
-            c.type === ChannelType.GuildCategory && 
-            (
-              (c.name.includes("MUA HÀNG") && c.name.includes("HỖ TRỢ")) ||
-              c.name.includes("MUA HÀNG") ||
-              c.name.includes("HỖ TRỢ") ||
-              c.name.toLowerCase().includes("ticket")
+          const introEmbed = new EmbedBuilder()
+            .setColor("#00E676")
+            .setTitle("🛒 TRUNG TÂM THANH TOÁN & ĐẶT HÀNG / ORDER CENTER")
+            .setDescription(
+              `👋 Chào <@${user.id}>! Cảm ơn bạn đã lựa chọn dịch vụ từ **LS STUDIO**.\n` +
+              `*Welcome <@${user.id}>! Thank you for choosing LS STUDIO.*\n\n` +
+              `👇 **Vui lòng chọn Plugin hoặc Dịch Vụ AI từ Menu bên dưới**:\n` +
+              `*Please select a package or AI service from the dropdown menu below:*\n\n` +
+              `• 🇻🇳 **Tiếng Việt:** Quét mã VietQR MBBank tự động 24/7.\n` +
+              `• 🇺🇸 **English:** Switch to English for PayPal / Global payment options!`
             )
-          );
+            .setFooter({ text: "Staff sẽ hỗ trợ và giao file trực tiếp tại đây! / Staff will assist you here!" })
+            .setTimestamp();
 
-          // Lấy tất cả các Role Staff / Developer / Founder / Admin
-          const staffRoles = guild.roles.cache.filter(r => 
-            r.name.includes("Staff") || 
-            r.name.includes("Developer") || 
-            r.name.includes("Founder") ||
-            r.name.includes("Admin")
-          );
-
-          const overwrites = [
-            {
-              id: guild.roles.everyone.id,
-              deny: [PermissionsBitField.Flags.ViewChannel]
-            },
-            {
-              id: user.id,
-              allow: [
-                PermissionsBitField.Flags.ViewChannel,
-                PermissionsBitField.Flags.SendMessages,
-                PermissionsBitField.Flags.AttachFiles,
-                PermissionsBitField.Flags.EmbedLinks,
-                PermissionsBitField.Flags.ReadMessageHistory,
-                PermissionsBitField.Flags.AddReactions
-              ]
-            },
-            {
-              id: client.user?.id || (botMember ? botMember.id : client.application?.id),
-              allow: [
-                PermissionsBitField.Flags.ViewChannel,
-                PermissionsBitField.Flags.SendMessages,
-                PermissionsBitField.Flags.ManageChannels,
-                PermissionsBitField.Flags.ManageMessages,
-                PermissionsBitField.Flags.EmbedLinks,
-                PermissionsBitField.Flags.AttachFiles,
-                PermissionsBitField.Flags.ReadMessageHistory,
-                PermissionsBitField.Flags.AddReactions
-              ]
-            }
-          ];
-
-          staffRoles.forEach(role => {
-            overwrites.push({
-              id: role.id,
-              allow: [
-                PermissionsBitField.Flags.ViewChannel,
-                PermissionsBitField.Flags.SendMessages,
-                PermissionsBitField.Flags.AttachFiles,
-                PermissionsBitField.Flags.EmbedLinks,
-                PermissionsBitField.Flags.ReadMessageHistory,
-                PermissionsBitField.Flags.ManageMessages,
-                PermissionsBitField.Flags.AddReactions
-              ]
-            });
+          await ticketChannel.send({
+            content: `<@${user.id}> ${staffMentionString}`,
+            embeds: [introEmbed],
+            components: [menuRow, langSwitchRow]
           });
-
-          const ticketChannel = await guild.channels.create({
-            name: channelName,
-            type: ChannelType.GuildText,
-            parent: ticketCat ? ticketCat.id : null,
-            topic: `Ticket của @${user.tag} (${user.id}) • Type: ${customId}`,
-            permissionOverwrites: overwrites
-          });
-
-          const staffMentionString = staffRoles.size > 0 
-            ? Array.from(staffRoles.values()).map(r => `<@&${r.id}>`).join(' ')
-            : "";
-
-          if (isBuyTicket) {
-            const menuRow = new ActionRowBuilder().addComponents(buildPackageSelectMenu(user.id, 'vi'));
-
-            const langSwitchRow = new ActionRowBuilder().addComponents(
-              new ButtonBuilder()
-                .setCustomId(`switch_lang_vi_${user.id}`)
-                .setLabel('🇻🇳 Tiếng Việt')
-                .setStyle(ButtonStyle.Primary),
-              new ButtonBuilder()
-                .setCustomId(`switch_lang_en_${user.id}`)
-                .setLabel('🇺🇸 English')
-                .setStyle(ButtonStyle.Secondary),
-              new ButtonBuilder()
-                .setCustomId('btn_close_ticket')
-                .setLabel('🔒 Đóng / Close')
-                .setStyle(ButtonStyle.Danger)
-            );
-
-            const introEmbed = new EmbedBuilder()
-              .setColor("#00E676")
-              .setTitle("🛒 TRUNG TÂM THANH TOÁN & ĐẶT HÀNG / ORDER CENTER")
-              .setDescription(
-                `👋 Chào <@${user.id}>! Cảm ơn bạn đã lựa chọn dịch vụ từ **LS STUDIO**.\n` +
-                `*Welcome <@${user.id}>! Thank you for choosing LS STUDIO.*\n\n` +
-                `👇 **Vui lòng chọn Plugin hoặc Dịch Vụ AI từ Menu bên dưới**:\n` +
-                `*Please select a package or AI service from the dropdown menu below:*\n\n` +
-                `• 🇻🇳 **Tiếng Việt:** Quét mã VietQR MBBank tự động 24/7.\n` +
-                `• 🇺🇸 **English:** Switch to English for PayPal / Global payment options!`
-              )
-              .setFooter({ text: "Staff sẽ hỗ trợ và giao file trực tiếp tại đây! / Staff will assist you here!" })
-              .setTimestamp();
-
-            await ticketChannel.send({
-              content: `<@${user.id}> ${staffMentionString}`,
-              embeds: [introEmbed],
-              components: [menuRow, langSwitchRow]
-            });
-
-          } else {
-            const supportEmbed = new EmbedBuilder()
-              .setColor(customId === 'ticket_support' ? "#3D5AFE" : "#FF4500")
-              .setTitle(customId === 'ticket_support' ? "🛠️ TICKET HỖ TRỢ KỸ THUẬT / TECH SUPPORT" : "📝 TICKET ĐẶT LÀM PLUGIN HOẶC MOD / CUSTOM DEV")
-              .setDescription(
-                `👋 Chào / Hello <@${user.id}>!\n\n` +
-                (customId === 'ticket_support' 
-                  ? "🇻🇳 **Tiếng Việt:** Vui lòng mô tả chi tiết lỗi phát sinh, phiên bản server (Paper/Purpur/Folia 1.16+) hoặc đính kèm file log lỗi (`latest.log`) để Dev hỗ trợ xử lý ngay!\n\n" +
-                    "🇺🇸 **English:** Please describe your issue, server software (Paper/Purpur/Folia 1.16+), or attach your crash log (`latest.log`) for quick assistance!"
-                  : "🇻🇳 **Tiếng Việt:** Vui lòng mô tả chi tiết ý tưởng Plugin hoặc Mod (Forge/Fabric Java 1.16+), các tính năng mong muốn, thời hạn và ngân sách dự kiến của bạn!\n\n" +
-                    "🇺🇸 **English:** Please describe your Plugin or Mod idea (Forge/Fabric Java 1.16+), required features, expected delivery deadline and budget!")
-              )
-              .setTimestamp();
-
-            const btnRow = new ActionRowBuilder().addComponents(
-              new ButtonBuilder()
-                .setCustomId('btn_close_ticket')
-                .setLabel('🔒 Đóng Ticket / Close')
-                .setStyle(ButtonStyle.Danger)
-            );
-
-            await ticketChannel.send({
-              content: `<@${user.id}> ${staffMentionString}`,
-              embeds: [supportEmbed],
-              components: [btnRow]
-            });
-          }
 
           return interaction.editReply({
             content: `✅ Ticket của bạn đã sẵn sàng tại / Your ticket is ready at: <#${ticketChannel.id}>`
@@ -1868,6 +2058,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             .setCustomId('confirm_close_ticket')
             .setLabel('🔴 Xác Nhận Đóng / Confirm Close')
             .setStyle(ButtonStyle.Danger),
+          new ButtonBuilder()
+            .setCustomId('btn_close_with_reason')
+            .setLabel('📝 Đóng Kèm Lý Do / Close with Reason')
+            .setStyle(ButtonStyle.Primary),
           new ButtonBuilder()
             .setCustomId('cancel_close_ticket')
             .setLabel('⚪ Hủy Bỏ / Cancel')
@@ -2113,6 +2307,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           const btnClose = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
+              .setCustomId('btn_open_custom_modal')
+              .setLabel(isEn ? '📝 Fill Requirements Form' : '📝 Điền Form Yêu Cầu Chi Tiết')
+              .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
               .setCustomId('btn_close_ticket')
               .setLabel(isEn ? '🔒 Close Ticket' : '🔒 Đóng Ticket')
               .setStyle(ButtonStyle.Danger)
@@ -2199,6 +2397,378 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
     }
 
+    // 4. MODAL SUBMISSIONS (XỬ LÝ BIỂU MẪU NHẬP LIỆU CHUẨN DISCORD SPECS)
+    if (interaction.isModalSubmit()) {
+      const { customId, user, guild } = interaction;
+
+      // 4.1 Modal Đặt Làm Plugin / Mod Custom (modal_custom_order)
+      if (customId === 'modal_custom_order') {
+        if (!guild) {
+          return interaction.reply({ 
+            content: "❌ Biểu mẫu này chỉ có thể xử lý bên trong máy chủ Discord!", 
+            ephemeral: true 
+          });
+        }
+
+        // Bóc tách text inputs an toàn qua interaction.fields.getTextInputValue
+        const projectType = interaction.fields.getTextInputValue('custom_project_type')?.trim() || 'Custom Plugin/Mod';
+        const version = interaction.fields.getTextInputValue('custom_version')?.trim() || 'Paper/Purpur 1.20+';
+        const features = interaction.fields.getTextInputValue('custom_features')?.trim() || 'N/A';
+        const budgetDeadline = interaction.fields.getTextInputValue('custom_budget_deadline')?.trim() || 'Thỏa thuận / Flexible';
+        const contact = interaction.fields.getTextInputValue('custom_contact')?.trim() || 'Trực tiếp tại ticket Discord';
+
+        // Hoãn phản hồi (deferReply) chống 3-second timeout vì tạo kênh và thiết lập phân quyền mất 1-2s
+        await interaction.deferReply({ ephemeral: true });
+
+        // Nếu người dùng đang submit từ bên trong một kênh ticket đã có
+        const isInExistingTicket = interaction.channel?.topic?.includes(`(${user.id})`);
+        if (isInExistingTicket) {
+          const detailEmbed = new EmbedBuilder()
+            .setColor("#FF4500")
+            .setTitle("📝 THÔNG TIN YÊU CẦU ĐẶT CODE (CUSTOM DEV)")
+            .setDescription(
+              `Khách hàng <@${user.id}> vừa cập nhật form thông tin chi tiết:\n\n` +
+              `• 📦 **Loại sản phẩm:** \`${projectType}\`\n` +
+              `• ⚙️ **Phiên bản & Nền tảng:** \`${version}\`\n` +
+              `• 💰 **Ngân sách & Thời hạn:** \`${budgetDeadline}\`\n` +
+              `• 📞 **Ghi chú / Liên hệ:** \`${contact}\`\n\n` +
+              `📋 **Chi tiết tính năng yêu cầu:**\n` +
+              `\`\`\`text\n${features}\n\`\`\``
+            )
+            .setFooter({ text: "LS STUDIO • Lead Developer sẽ phản hồi và báo giá sớm nhất!" })
+            .setTimestamp();
+
+          await interaction.channel.send({ embeds: [detailEmbed] });
+          return interaction.editReply({
+            content: "✅ Đã gửi thông tin yêu cầu của bạn vào kênh Ticket thành công! Lead Developer sẽ phản hồi ngay tại đây."
+          });
+        }
+
+        // Nếu submit từ panel kênh chung -> Khởi tạo ticket custom mới
+        try {
+          const { existingTicket, ticketChannel, staffMentionString } = await createTicketChannel({
+            guild,
+            user,
+            ticketType: '📝-custom',
+            customTopic: `Ticket Custom của @${user.tag || user.username} (${user.id}) • Type: custom_dev`
+          });
+
+          if (existingTicket) {
+            return interaction.editReply({
+              content: `⚠️ Bạn đã có một ticket đang mở tại: <#${existingTicket.id}>.`
+            });
+          }
+
+          const orderEmbed = new EmbedBuilder()
+            .setColor("#FF4500")
+            .setTitle("📝 PHIẾU ĐẶT LÀM PLUGIN / MOD CUSTOM - LS STUDIO")
+            .setDescription(
+              `👋 Chào <@${user.id}>! Cảm ơn bạn đã gửi thông tin yêu cầu đặt làm dự án riêng.\n\n` +
+              `📦 **Loại sản phẩm:** \`${projectType}\`\n` +
+              `⚙️ **Phiên bản / Môi trường:** \`${version}\`\n` +
+              `💰 **Ngân sách & Thời hạn dự kiến:** \`${budgetDeadline}\`\n` +
+              `📞 **Ghi chú / Liên hệ khác:** \`${contact}\`\n\n` +
+              `📋 **Mô tả tính năng & gameplay yêu cầu:**\n` +
+              `\`\`\`text\n${features}\n\`\`\`\n` +
+              `*Lead Developer của LS STUDIO sẽ xem xét yêu cầu và trao đổi báo giá trực tiếp tại đây!*`
+            )
+            .setFooter({ text: "LS STUDIO • Uy Tín - Đúng Hẹn - Tối Ưu" })
+            .setTimestamp();
+
+          const btnRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId('btn_ticket_feedback')
+              .setLabel('⭐ Đánh Giá / Feedback')
+              .setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder()
+              .setCustomId('btn_close_ticket')
+              .setLabel('🔒 Đóng Ticket / Close')
+              .setStyle(ButtonStyle.Danger)
+          );
+
+          await ticketChannel.send({
+            content: `<@${user.id}> ${staffMentionString}`,
+            embeds: [orderEmbed],
+            components: [btnRow]
+          });
+
+          return interaction.editReply({
+            content: `✅ Ticket đặt làm Custom của bạn đã sẵn sàng tại: <#${ticketChannel.id}>`
+          });
+
+        } catch (err) {
+          console.error("❌ Lỗi xử lý submit modal custom order:", err);
+          return interaction.editReply({
+            content: `❌ Không thể tạo Ticket do lỗi: \`${err.message}\`. Vui lòng liên hệ Admin!`
+          });
+        }
+      }
+
+      // 4.2 Modal Yêu Cầu Hỗ Trợ Kỹ Thuật (modal_support_ticket)
+      if (customId === 'modal_support_ticket') {
+        if (!guild) {
+          return interaction.reply({ 
+            content: "❌ Biểu mẫu này chỉ có thể xử lý bên trong máy chủ Discord!", 
+            ephemeral: true 
+          });
+        }
+
+        const issueTitle = interaction.fields.getTextInputValue('support_issue_title')?.trim() || 'Hỗ trợ kỹ thuật';
+        const serverEnv = interaction.fields.getTextInputValue('support_server_env')?.trim() || 'Paper/Purpur';
+        const description = interaction.fields.getTextInputValue('support_description')?.trim() || 'N/A';
+
+        await interaction.deferReply({ ephemeral: true });
+
+        // Nếu người dùng đang submit từ bên trong một kênh ticket đã có
+        const isInExistingTicket = interaction.channel?.topic?.includes(`(${user.id})`);
+        if (isInExistingTicket) {
+          const detailEmbed = new EmbedBuilder()
+            .setColor("#3D5AFE")
+            .setTitle("🛠️ CẬP NHẬT THÔNG TIN LỖI / TECH SUPPORT")
+            .setDescription(
+              `Khách hàng <@${user.id}> vừa cập nhật chi tiết vấn đề:\n\n` +
+              `• 📌 **Tiêu đề lỗi:** \`${issueTitle}\`\n` +
+              `• ⚙️ **Môi trường & Phiên bản:** \`${serverEnv}\`\n\n` +
+              `📋 **Chi tiết mô tả & Log:**\n` +
+              `\`\`\`text\n${description}\n\`\`\``
+            )
+            .setFooter({ text: "LS STUDIO Support Team" })
+            .setTimestamp();
+
+          await interaction.channel.send({ embeds: [detailEmbed] });
+          return interaction.editReply({
+            content: "✅ Đã gửi chi tiết lỗi vào kênh Ticket thành công! Kỹ thuật viên sẽ hỗ trợ ngay."
+          });
+        }
+
+        // Tạo ticket hỗ trợ mới
+        try {
+          const { existingTicket, ticketChannel, staffMentionString } = await createTicketChannel({
+            guild,
+            user,
+            ticketType: '🛠️-support',
+            customTopic: `Ticket Support của @${user.tag || user.username} (${user.id}) • Issue: ${issueTitle.slice(0, 30)}`
+          });
+
+          if (existingTicket) {
+            return interaction.editReply({
+              content: `⚠️ Bạn đã có một ticket đang mở tại: <#${existingTicket.id}>.`
+            });
+          }
+
+          const supportEmbed = new EmbedBuilder()
+            .setColor("#3D5AFE")
+            .setTitle("🛠️ PHIẾU HỖ TRỢ KỸ THUẬT - LS STUDIO")
+            .setDescription(
+              `👋 Chào <@${user.id}>! Đội ngũ Kỹ Thuật đã tiếp nhận yêu cầu hỗ trợ của bạn.\n\n` +
+              `📌 **Tiêu đề vấn đề:** \`${issueTitle}\`\n` +
+              `⚙️ **Môi trường & Phiên bản:** \`${serverEnv}\`\n\n` +
+              `📋 **Mô tả chi tiết & Log lỗi:**\n` +
+              `\`\`\`text\n${description}\n\`\`\`\n` +
+              `*Bạn có thể đính kèm thêm file log (\`latest.log\`) hoặc chụp ảnh màn hình trực tiếp tại kênh này.*`
+            )
+            .setFooter({ text: "LS STUDIO Support Team • Hỗ Trợ 24/7" })
+            .setTimestamp();
+
+          const btnRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId('btn_close_ticket')
+              .setLabel('🔒 Đóng Ticket / Close')
+              .setStyle(ButtonStyle.Danger)
+          );
+
+          await ticketChannel.send({
+            content: `<@${user.id}> ${staffMentionString}`,
+            embeds: [supportEmbed],
+            components: [btnRow]
+          });
+
+          return interaction.editReply({
+            content: `✅ Ticket hỗ trợ kỹ thuật của bạn đã sẵn sàng tại: <#${ticketChannel.id}>`
+          });
+
+        } catch (err) {
+          console.error("❌ Lỗi xử lý submit modal support:", err);
+          return interaction.editReply({
+            content: `❌ Không thể tạo Ticket do lỗi: \`${err.message}\`. Vui lòng liên hệ Admin!`
+          });
+        }
+      }
+
+      // 4.3 Modal Đóng Ticket Kèm Lý Do (modal_close_ticket_reason)
+      if (customId === 'modal_close_ticket_reason') {
+        const closeReason = interaction.fields.getTextInputValue('close_reason')?.trim() || 'Không có lý do cụ thể';
+
+        await interaction.deferReply({ ephemeral: true });
+
+        const channel = interaction.channel;
+        if (!channel || !channel.isTextBased()) {
+          return interaction.editReply({ content: "❌ Không thể thực hiện thao tác trên kênh này!" });
+        }
+
+        const closingEmbed = new EmbedBuilder()
+          .setColor("#ED4245")
+          .setTitle("🔒 ĐANG ĐÓNG TICKET & LƯU TRANSCRIPT...")
+          .setDescription(
+            `Ticket đang được đóng bởi <@${user.id}>.\n` +
+            `📝 **Lý do / Ghi chú:** \`${closeReason}\`\n\n` +
+            `Đang tạo file nhật ký hội thoại (Transcript) và lưu trữ. Kênh sẽ tự động xóa sau 5 giây...`
+          );
+
+        await channel.send({ embeds: [closingEmbed] }).catch(() => {});
+
+        const transcriptText = await generateTranscript(channel, closeReason);
+        const transcriptBuffer = Buffer.from(transcriptText, 'utf-8');
+        const fileName = `transcript-${channel.name}.txt`;
+
+        const openerMatch = channel.topic ? channel.topic.match(/\((\d{17,20})\)/) : null;
+        const openerId = openerMatch ? openerMatch[1] : null;
+
+        let dmSent = false;
+        let dmStatusNote = "Không tìm thấy thông tin người mở trong topic";
+        if (openerId) {
+          try {
+            const openerUser = await client.users.fetch(openerId).catch(() => null);
+            if (openerUser) {
+              const dmEmbed = new EmbedBuilder()
+                .setColor("#5865F2")
+                .setTitle("📑 BẢN LƯU NHẬT KÝ TICKET - LS STUDIO")
+                .setDescription(
+                  `👋 Chào <@${openerId}>!\n\n` +
+                  `Ticket **#${channel.name}** của bạn tại **LS STUDIO** đã được đóng bởi <@${user.id}>.\n` +
+                  `📝 **Lý do đóng / Ghi chú:** \`${closeReason}\`\n\n` +
+                  `Đính kèm bên dưới là toàn bộ lịch sử tin nhắn (Transcript) để bạn tiện theo dõi và tra cứu khi cần.`
+                )
+                .setFooter({ text: "LS STUDIO • Hỗ Trợ 24/7" })
+                .setTimestamp();
+
+              const dmAttachment = new AttachmentBuilder(transcriptBuffer, { name: fileName });
+              await openerUser.send({ embeds: [dmEmbed], files: [dmAttachment] });
+              dmSent = true;
+              dmStatusNote = "✅ Đã gửi bản sao qua DM thành công";
+            }
+          } catch (dmErr) {
+            dmSent = false;
+            dmStatusNote = dmErr.code === 50007 ? "⚠️ Khách tắt DM hoặc chặn Bot" : `⚠️ Lỗi gửi DM: ${dmErr.message}`;
+          }
+        }
+
+        // Gửi về kênh nhật ký quản trị
+        try {
+          let logChannel = guild?.channels.cache.find(c => 
+            c.isTextBased() && (
+              c.name.includes("nhật-ký-giao-dịch") || 
+              c.name.includes("nhật-ký") ||
+              c.name.includes("ticket-log") ||
+              c.name.includes("transcripts") ||
+              c.name.includes("log")
+            )
+          );
+
+          if (!logChannel && guild) {
+            const fetchedChannels = await guild.channels.fetch().catch(() => null);
+            if (fetchedChannels) {
+              logChannel = fetchedChannels.find(c => 
+                c && c.isTextBased() && (
+                  c.name.includes("nhật-ký-giao-dịch") || 
+                  c.name.includes("nhật-ký") ||
+                  c.name.includes("ticket-log") ||
+                  c.name.includes("transcripts") ||
+                  c.name.includes("log")
+                )
+              );
+            }
+          }
+
+          if (logChannel) {
+            const logEmbed = new EmbedBuilder()
+              .setColor("#FF5252")
+              .setTitle("📑 NHẬT KÝ ĐÓNG TICKET / TICKET TRANSCRIPT LOG")
+              .addFields(
+                { name: "📁 Kênh / Channel", value: `\`${channel.name}\` (\`${channel.id}\`)`, inline: true },
+                { name: "👤 Người mở / Opener", value: openerId ? `<@${openerId}> (\`${openerId}\`)` : "N/A", inline: true },
+                { name: "🔒 Người đóng / Closed By", value: `<@${user.id}> (\`${user.id}\`)`, inline: true },
+                { name: "📝 Lý do đóng / Reason", value: closeReason, inline: false },
+                { name: "⏰ Thời gian / Time", value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true },
+                { name: "📨 Trạng thái gửi DM Khách", value: dmStatusNote, inline: false }
+              )
+              .setFooter({ text: "LS STUDIO Ticket Security & Audit" })
+              .setTimestamp();
+
+            const fileAttachment = new AttachmentBuilder(transcriptBuffer, { name: fileName });
+            await logChannel.send({ embeds: [logEmbed], files: [fileAttachment] }).catch(err => {
+              console.error("❌ Lỗi gửi log transcript có embed:", err);
+            });
+          }
+        } catch (logErr) {
+          console.error("❌ Lỗi gửi log transcript về admin:", logErr);
+        }
+
+        // Phản hồi editReply trước khi xóa kênh
+        await interaction.editReply({
+          content: "✅ Đã ghi nhận lý do và tiến hành đóng ticket lưu trữ transcript thành công!"
+        });
+
+        // Xóa kênh sau 5s
+        setTimeout(async () => {
+          try {
+            const ch = await guild?.channels.fetch(channel.id).catch(() => null);
+            if (ch && ch.deletable) {
+              ch.messages?.cache?.clear();
+              await ch.delete(`Ticket closed with reason by ${user.tag} (${user.id})`).catch(() => {});
+            }
+          } catch (e) {}
+        }, 5000).unref();
+
+        return;
+      }
+
+      // 4.4 Modal Gửi Đánh Giá Dịch Vụ (modal_feedback)
+      if (customId === 'modal_feedback') {
+        const rating = interaction.fields.getTextInputValue('feedback_rating')?.trim() || '5 sao';
+        const comment = interaction.fields.getTextInputValue('feedback_comment')?.trim() || 'Không có nhận xét';
+
+        await interaction.deferReply({ ephemeral: true });
+
+        const feedbackEmbed = new EmbedBuilder()
+          .setColor("#FFD700")
+          .setTitle("⭐ ĐÁNH GIÁ DỊCH VỤ MỚI / CUSTOMER FEEDBACK")
+          .setDescription(
+            `👤 **Khách hàng:** <@${user.id}> (\`${user.tag || user.username}\`)\n` +
+            `🌟 **Đánh giá:** **${rating}**\n\n` +
+            `💬 **Nhận xét & Trải nghiệm:**\n` +
+            `\`\`\`text\n${comment}\n\`\`\``
+          )
+          .setFooter({ text: "LS STUDIO • Customer Feedback System" })
+          .setTimestamp();
+
+        // Gửi vào kênh đánh giá hoặc log
+        try {
+          const fbChannel = guild?.channels.cache.find(c => 
+            c.isTextBased() && (
+              c.name.includes("đánh-giá") ||
+              c.name.includes("nhận-xét") ||
+              c.name.includes("feedback") ||
+              c.name.includes("nhật-ký-giao-dịch") ||
+              c.name.includes("nhật-ký")
+            )
+          );
+
+          if (fbChannel) {
+            await fbChannel.send({ embeds: [feedbackEmbed] }).catch(err => {
+              console.error("❌ Lỗi gửi embed feedback:", err);
+            });
+          }
+        } catch (fbErr) {
+          console.error("❌ Lỗi tìm kênh gửi feedback:", fbErr);
+        }
+
+        return interaction.editReply({
+          content: "🌟 Cảm ơn bạn rất nhiều đã dành thời gian gửi đánh giá quý báu cho **LS STUDIO**! Chúc bạn có trải nghiệm tuyệt vời! / Thank you for your feedback!"
+        });
+      }
+    }
+
   } catch (error) {
     console.error("❌ Lỗi tương tác bot:", error);
     try {
@@ -2277,6 +2847,11 @@ module.exports = {
   getRateLimitRemaining,
   generateTranscript,
   buildPackageSelectMenu,
+  createCustomOrderModal,
+  createSupportTicketModal,
+  createCloseTicketReasonModal,
+  createFeedbackModal,
+  createTicketChannel,
   ticketCreationLocks,
   userCooldowns,
   activeOrderCodes,

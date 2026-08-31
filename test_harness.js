@@ -22,6 +22,11 @@ const {
   getRateLimitRemaining,
   generateTranscript,
   buildPackageSelectMenu,
+  createCustomOrderModal,
+  createSupportTicketModal,
+  createCloseTicketReasonModal,
+  createFeedbackModal,
+  createTicketChannel,
   ticketCreationLocks,
   userCooldowns,
   isStaffMember
@@ -306,7 +311,8 @@ function createMockInteraction({
   member = null,
   guild = null,
   channel = null,
-  options = {}
+  options = {},
+  fields = {}
 } = {}) {
   const mockUser = user || createMockUser();
   const mockGuild = guild || createMockGuild();
@@ -321,6 +327,7 @@ function createMockInteraction({
     editReplyPayload: null,
     updatePayload: null,
     followUpPayload: null,
+    modalPayload: null,
     respondedAutocomplete: []
   };
 
@@ -340,12 +347,24 @@ function createMockInteraction({
     isButton: () => type === 'button',
     isStringSelectMenu: () => type === 'select',
     isAutocomplete: () => type === 'autocomplete',
+    isModalSubmit: () => type === 'modal',
+    fields: {
+      getTextInputValue: (fieldId) => fields[fieldId] !== undefined ? fields[fieldId] : null
+    },
     get replied() { return state.replied; },
     get deferred() { return state.deferred; },
     options: {
       getUser: (name, required) => options[name] || null,
       getString: (name, required) => options[name] || null,
       getInteger: (name, required) => options[name] || null
+    },
+    showModal: async (modal) => {
+      if (state.deferred || state.replied) {
+        throw new Error("DiscordAPIError[40060]: Interaction has already been acknowledged (Cannot show modal after deferReply/reply)!");
+      }
+      state.replied = true;
+      state.modalPayload = modal;
+      return modal;
     },
     reply: async (payload) => {
       if (state.replied) throw new Error("Interaction already replied!");
@@ -989,6 +1008,222 @@ async function runAllTests() {
     assert(channelNames.some(n => n.includes("mua-plugin")), "Buy plugin ticket channel exists");
     assert(channelNames.some(n => n.includes("hỗ-trợ-kỹ-thuật")), "Tech support ticket channel exists");
     assert(channelNames.some(n => n.includes("đặt-làm-plugin") || n.includes("đặt-custom-plugin") || n.includes("đặt-code-plugin-riêng")), "Custom dev ticket channel exists");
+  });
+
+  // SUITE 8
+  console.log("\n📑 [SUITE 8: Modal Components & Interaction Lifecycles (Discord Specs Compliance)]");
+
+  await runTest("Suite 8", "Modal Constraints: Title <= 45 chars, CustomId <= 100, Max 5 ActionRows, 1 TextInput/Row", async () => {
+    // 1. Custom Order Modal
+    const customModal = createCustomOrderModal();
+    const customData = customModal.toJSON();
+    assert(customData.title.length <= 45, `Custom modal title length (${customData.title.length}) <= 45`);
+    assert(customData.custom_id.length <= 100, `Custom modal custom_id length (${customData.custom_id.length}) <= 100`);
+    assert(customData.components.length <= 5, `Custom modal components rows (${customData.components.length}) <= 5`);
+    for (let i = 0; i < customData.components.length; i++) {
+      const row = customData.components[i];
+      assertEqual(row.components.length, 1, `Row ${i + 1} must contain exactly 1 TextInput`);
+      const input = row.components[0];
+      assert(input.label.length <= 45, `TextInput ${input.custom_id} label length (${input.label.length}) <= 45`);
+      assert(input.custom_id.length <= 100, `TextInput ${input.custom_id} custom_id length <= 100`);
+      if (input.placeholder) {
+        assert(input.placeholder.length <= 100, `TextInput ${input.custom_id} placeholder length (${input.placeholder.length}) <= 100`);
+      }
+    }
+
+    // 2. Support Ticket Modal
+    const supportModal = createSupportTicketModal();
+    const supportData = supportModal.toJSON();
+    assert(supportData.title.length <= 45, `Support modal title length (${supportData.title.length}) <= 45`);
+    assert(supportData.custom_id.length <= 100, `Support modal custom_id length (${supportData.custom_id.length}) <= 100`);
+    assert(supportData.components.length <= 5, `Support modal components rows (${supportData.components.length}) <= 5`);
+    for (let i = 0; i < supportData.components.length; i++) {
+      const row = supportData.components[i];
+      assertEqual(row.components.length, 1, `Row ${i + 1} must contain exactly 1 TextInput`);
+      const input = row.components[0];
+      assert(input.label.length <= 45, `TextInput ${input.custom_id} label length <= 45`);
+      if (input.placeholder) {
+        assert(input.placeholder.length <= 100, `TextInput ${input.custom_id} placeholder length <= 100`);
+      }
+    }
+
+    // 3. Close Ticket Reason Modal
+    const closeReasonModal = createCloseTicketReasonModal();
+    const closeReasonData = closeReasonModal.toJSON();
+    assert(closeReasonData.title.length <= 45, `Close Reason modal title length <= 45`);
+    assert(closeReasonData.components.length === 1, `Close Reason modal components rows == 1`);
+
+    // 4. Feedback Modal
+    const feedbackModal = createFeedbackModal();
+    const feedbackData = feedbackModal.toJSON();
+    assert(feedbackData.title.length <= 45, `Feedback modal title length <= 45`);
+    assert(feedbackData.components.length === 2, `Feedback modal components rows == 2`);
+  });
+
+  await runTest("Suite 8", "Immediate showModal: Buttons & Slash Command invoke showModal without deferReply", async () => {
+    const guild = createMockGuild();
+    const user = createMockUser();
+
+    // 1. Button: ticket_custom
+    userCooldowns.delete(user.id);
+    const intCustom = createMockInteraction({ type: 'button', customId: 'ticket_custom', user, guild });
+    botClient.emit(Events.InteractionCreate, intCustom);
+    await waitForInteraction(intCustom);
+    assertEqual(intCustom._state.deferred, false, "ticket_custom MUST NOT deferReply before showModal");
+    assert(intCustom._state.modalPayload !== null, "ticket_custom must invoke showModal");
+    assertEqual(intCustom._state.modalPayload.data.custom_id, "modal_custom_order", "Modal custom_id matches");
+
+    // 2. Button: ticket_support
+    userCooldowns.delete(user.id);
+    const intSupport = createMockInteraction({ type: 'button', customId: 'ticket_support', user, guild });
+    botClient.emit(Events.InteractionCreate, intSupport);
+    await waitForInteraction(intSupport);
+    assertEqual(intSupport._state.deferred, false, "ticket_support MUST NOT deferReply before showModal");
+    assert(intSupport._state.modalPayload !== null, "ticket_support must invoke showModal");
+    assertEqual(intSupport._state.modalPayload.data.custom_id, "modal_support_ticket", "Modal custom_id matches");
+
+    // 3. Button: btn_open_custom_modal
+    userCooldowns.delete(user.id);
+    const intOpenModal = createMockInteraction({ type: 'button', customId: 'btn_open_custom_modal', user, guild });
+    botClient.emit(Events.InteractionCreate, intOpenModal);
+    await waitForInteraction(intOpenModal);
+    assertEqual(intOpenModal._state.deferred, false, "btn_open_custom_modal MUST NOT deferReply");
+    assert(intOpenModal._state.modalPayload !== null, "btn_open_custom_modal must invoke showModal");
+
+    // 4. Button: btn_close_with_reason
+    const intCloseReason = createMockInteraction({ type: 'button', customId: 'btn_close_with_reason', user, guild });
+    botClient.emit(Events.InteractionCreate, intCloseReason);
+    await waitForInteraction(intCloseReason);
+    assertEqual(intCloseReason._state.deferred, false, "btn_close_with_reason MUST NOT deferReply");
+    assert(intCloseReason._state.modalPayload !== null, "btn_close_with_reason must invoke showModal");
+
+    // 5. Button: btn_ticket_feedback
+    const intFeedbackBtn = createMockInteraction({ type: 'button', customId: 'btn_ticket_feedback', user, guild });
+    botClient.emit(Events.InteractionCreate, intFeedbackBtn);
+    await waitForInteraction(intFeedbackBtn);
+    assertEqual(intFeedbackBtn._state.deferred, false, "btn_ticket_feedback MUST NOT deferReply");
+    assert(intFeedbackBtn._state.modalPayload !== null, "btn_ticket_feedback must invoke showModal");
+
+    // 6. Slash Command: /feedback
+    const intFeedbackCmd = createMockInteraction({ type: 'command', commandName: 'feedback', user, guild });
+    botClient.emit(Events.InteractionCreate, intFeedbackCmd);
+    await waitForInteraction(intFeedbackCmd);
+    assertEqual(intFeedbackCmd._state.deferred, false, "/feedback command MUST NOT deferReply");
+    assert(intFeedbackCmd._state.modalPayload !== null, "/feedback command must invoke showModal");
+  });
+
+  await runTest("Suite 8", "Modal Submit: modal_custom_order creates custom ticket with full fields", async () => {
+    const guild = createMockGuild();
+    const user = createMockUser({ username: 'moddeveloper' });
+    userCooldowns.delete(user.id);
+    ticketCreationLocks.delete(user.id);
+
+    const fields = {
+      custom_project_type: 'Minecraft Fabric Mod 1.21',
+      custom_version: 'Fabric 1.21 Java 21',
+      custom_features: 'Them vat pham custom va gui thong bao ActionBar khi dap block',
+      custom_budget_deadline: '500.000 VNĐ - 3 ngay',
+      custom_contact: 'Discord @moddeveloper'
+    };
+
+    const interaction = createMockInteraction({
+      type: 'modal',
+      customId: 'modal_custom_order',
+      user,
+      guild,
+      fields
+    });
+
+    botClient.emit(Events.InteractionCreate, interaction);
+    await waitForInteraction(interaction);
+
+    assert(interaction._state.deferred, "Modal submit must deferReply");
+    assert(interaction._state.editReplyPayload.content.includes("Ticket đặt làm Custom của bạn đã sẵn sàng"), "Ticket creation confirmation");
+
+    const createdCh = Array.from(guild.channels.cache.values()).find(c => c.name.includes("custom-moddeveloper") || c.name.includes("custom-"));
+    assert(createdCh !== undefined, "Custom ticket channel must be created in guild");
+    assert(createdCh.topic.includes(user.id), "Channel topic must include user ID");
+  });
+
+  await runTest("Suite 8", "Modal Submit: modal_support_ticket creates support ticket channel", async () => {
+    const guild = createMockGuild();
+    const user = createMockUser({ username: 'playerhelp' });
+    userCooldowns.delete(user.id);
+    ticketCreationLocks.delete(user.id);
+
+    const fields = {
+      support_issue_title: 'Lỗi không load database SQLite',
+      support_server_env: 'Paper 1.20.4 Java 17',
+      support_description: 'Khi khoi dong server thi plugin bao loi NullPointerException tai line 45'
+    };
+
+    const interaction = createMockInteraction({
+      type: 'modal',
+      customId: 'modal_support_ticket',
+      user,
+      guild,
+      fields
+    });
+
+    botClient.emit(Events.InteractionCreate, interaction);
+    await waitForInteraction(interaction);
+
+    assert(interaction._state.deferred, "Modal submit must deferReply");
+    assert(interaction._state.editReplyPayload.content.includes("Ticket hỗ trợ kỹ thuật của bạn đã sẵn sàng"), "Support ticket confirmation");
+
+    const createdCh = Array.from(guild.channels.cache.values()).find(c => c.name.includes("support-playerhelp") || c.name.includes("support-"));
+    assert(createdCh !== undefined, "Support ticket channel must be created");
+  });
+
+  await runTest("Suite 8", "Modal Submit: modal_close_ticket_reason logs reason and sends transcript", async () => {
+    const guild = createMockGuild();
+    const user = createMockUser({ username: 'staffmember' });
+    const logCh = createMockChannel({ name: "nhật-ký-giao-dịch", guild });
+    const ticketCh = createMockChannel({ name: "📝-custom-player1", topic: `Ticket của @player1 (${user.id})`, guild });
+
+    const fields = {
+      close_reason: 'Đã hoàn thành bàn giao file Mod Fabric 1.21 và khách hàng xác nhận hoạt động tốt'
+    };
+
+    const interaction = createMockInteraction({
+      type: 'modal',
+      customId: 'modal_close_ticket_reason',
+      user,
+      guild,
+      channel: ticketCh,
+      fields
+    });
+
+    botClient.emit(Events.InteractionCreate, interaction);
+    await waitForInteraction(interaction);
+
+    assert(interaction._state.deferred, "Must deferReply");
+    assert(interaction._state.editReplyPayload.content.includes("Đã ghi nhận lý do và tiến hành đóng ticket"), "Success confirmation");
+  });
+
+  await runTest("Suite 8", "Modal Submit: modal_feedback forwards customer rating and comments", async () => {
+    const guild = createMockGuild();
+    const user = createMockUser({ username: 'happybuyer' });
+    const fbCh = createMockChannel({ name: "đánh-giá-uy-tín", guild });
+
+    const fields = {
+      feedback_rating: '5 sao ⭐⭐⭐⭐⭐',
+      feedback_comment: 'Dịch vụ rất nhiệt tình, plugin chạy mượt mà không lỗi lầm gì!'
+    };
+
+    const interaction = createMockInteraction({
+      type: 'modal',
+      customId: 'modal_feedback',
+      user,
+      guild,
+      fields
+    });
+
+    botClient.emit(Events.InteractionCreate, interaction);
+    await waitForInteraction(interaction);
+
+    assert(interaction._state.deferred, "Must deferReply");
+    assert(interaction._state.editReplyPayload.content.includes("Cảm ơn bạn rất nhiều"), "Feedback confirmation message");
   });
 
   // SUITE 7
