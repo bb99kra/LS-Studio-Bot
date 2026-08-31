@@ -1,6 +1,6 @@
 # 🏰 LS STUDIO - DISCORD BOT & SHOP SYSTEM
 
-Hệ thống Bot và Cấu trúc Server Discord chuyên nghiệp dành cho **LS STUDIO** (Minecraft Plugin Development).
+Hệ thống Bot và Cấu trúc Server Discord chuyên nghiệp dành cho **LS STUDIO** (Minecraft Plugin Development & AI Services).
 
 ---
 
@@ -40,9 +40,67 @@ Hệ thống Bot và Cấu trúc Server Discord chuyên nghiệp dành cho **LS 
 ---
 
 ## ⚡ Các lệnh Slash Commands của Bot:
-- `/ping`: Kiểm tra độ trễ của Bot.
-- `/thongtin`: Xem thông tin thanh toán VietQR & liên hệ.
-- `/khachhang @user`: Cấp role **Khách Hàng** cho người vừa mua plugin để họ xem được kênh tải `.jar`.
+- `/ping`: Kiểm tra độ trễ (latency) của Bot.
+- `/stk`: Lấy thông tin thanh toán MBBank và mã VietQR thanh toán 24/7.
+- `/khachhang @user`: Cấp role **Khách Hàng** cho người vừa mua plugin để cấp quyền vào khu vực VIP tải file `.jar`.
 
-## 🚀 Cách chạy Bot:
-- Chạy trực tiếp: `bash /data/data/com.termux/files/home/LS_Studio_Bot/run.sh`
+---
+
+## 🚀 Hướng dẫn khởi chạy & Triển khai:
+
+### 1. Cài đặt dependencies:
+```bash
+npm install
+```
+
+### 2. Cấu hình Biến môi trường & Token:
+Sao chép file mẫu `.env.example` thành `.env` và điền Token của bạn:
+```bash
+cp .env.example .env
+```
+Nội dung file `.env`:
+```env
+DISCORD_TOKEN=your_discord_bot_token_here
+GUILD_ID=1542476657825419334
+DISCLOUD_TOKEN=your_discloud_token_here
+```
+*(Hoặc sử dụng `token.local.js` làm cơ chế fallback cục bộ - cả hai file đều đã được bảo vệ trong `.gitignore`)*.
+
+### 3. Chạy Bot:
+- **Chạy trực tiếp (Foreground / Local / VPS / Termux):**
+  ```bash
+  npm start
+  # hoặc
+  ./run.sh
+  ```
+
+- **Chạy ngầm (Background với nohup trên Linux / Termux):**
+  ```bash
+  ./start.sh
+  ```
+  *(Log sẽ được ghi tự động vào file `bot.log` cùng thư mục).*
+
+### 4. Công cụ kiểm tra (Inspection Utilities):
+- Kiểm tra danh sách kênh Server LS Studio:
+  ```bash
+  npm run inspect:ls
+  ```
+- Kiểm tra danh sách kênh Server Nguyen SMP:
+  ```bash
+  npm run inspect:nguyen
+  ```
+
+### 5. Kiểm thử & Dry-Run Test Suite (Test Harness):
+- Chạy toàn bộ 47+ kịch bản test (AutoMod, Events, Slash Commands, Buttons, Select Menus, Setup Server Dry-run):
+  ```bash
+  npm test
+  # hoặc
+  node test_harness.js
+  ```
+
+### 6. Triển khai lên Discloud (Cloud Hosting):
+- File cấu hình: `discloud.config`
+- Commit mã nguồn lên Discloud:
+  ```bash
+  npm run discloud:commit [duong_dan_file_zip]
+  ```

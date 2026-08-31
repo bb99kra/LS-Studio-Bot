@@ -1,6 +1,7 @@
 const fs = require('fs');
 const { 
   Client, 
+  Events,
   GatewayIntentBits, 
   EmbedBuilder 
 } = require('discord.js');
@@ -12,7 +13,7 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
 
-client.once('clientReady', async () => {
+client.once(Events.ClientReady, async () => {
   console.log(`🤖 Logged in as ${client.user.tag}! Cập nhật giá LS-GiftCode xuống 30.000đ...`);
 
   try {
@@ -43,20 +44,24 @@ client.once('clientReady', async () => {
         )
         .addFields(
           {
-            name: "👁️ 1. LS-AntiFreeCam & Obfuscator",
-            value: "• **Tính năng:** Ẩn quặng quý và rương đồ khi ngoài tầm nhìn, khắc chế triệt để Freecam, Chest ESP, Baritone đào tự động.\n• **Hỗ trợ:** Paper / Purpur / Folia (1.18 - 1.21+)\n• **Giá:** `150.000 VNĐ`"
+            name: "🛡️ 1. LS-AntiCheat & Cart Addon",
+            value: "• **Giá bản gốc:** `30.000 VNĐ` • `~$1.50 USD` *(Vĩnh viễn)*\n• **Addon Anti-Macro Cart:** `20.000 VNĐ / Tháng` • `~$1.00 USD / Mo`"
           },
           {
-            name: "🚫 2. LS-AntiClient & BrandShield",
-            value: "• **Tính năng:** Phân tích packet nhận diện và chặn các client hack phổ biến (Meteor, LiquidBounce, Aristois, Wurst, Fabric Cheats...).\n• **Hỗ trợ:** Paper / Purpur / Folia (1.18 - 1.21+)\n• **Giá:** `180.000 VNĐ`"
+            name: "👁️ 2. LS-AntiFreeCam & Obfuscator",
+            value: "• **Tính năng:** Ẩn quặng quý và rương đồ khi ngoài tầm nhìn, khắc chế triệt để Freecam, Chest ESP, Baritone đào tự động.\n• **Hỗ trợ:** Paper / Purpur / Folia (1.18 - 1.21+)\n• **Giá:** `59.000 VNĐ` • `~$2.50 USD`"
           },
           {
-            name: "🎁 3. LS-GiftCode & Rewards (Hệ Thống Mã Quà Tặng)",
-            value: "• **Tính năng:** Tạo Giftcode tân thủ, code event, code đền bù; giới hạn lượt nhập theo từng người chơi hoặc toàn server; hẹn giờ hết hạn; phát item/tiền Vault/lệnh console tự động; lưu async MySQL/SQLite cực nhẹ.\n• **Hỗ trợ:** Spigot / Paper / Purpur / Folia (1.16 - 1.21+)\n• **Giá:** `30.000 VNĐ` *(Ưu đãi siêu rẻ)*"
+            name: "🚫 3. LS-AntiClient & BrandShield",
+            value: "• **Tính năng:** Phân tích packet nhận diện và chặn các client hack phổ biến (Meteor, LiquidBounce, Aristois, Wurst, Fabric Cheats...).\n• **Hỗ trợ:** Paper / Purpur / Folia (1.18 - 1.21+)\n• **Giá:** `99.000 VNĐ` • `~$4.00 USD`"
           },
           {
-            name: "👑 4. Combo 2 Plugin Anti (AntiFreeCam + AntiClient)",
-            value: "• Sở hữu cả 2 giải pháp bảo vệ cốt lõi cho server với giá ưu đãi tiết kiệm.\n• **Giá Combo:** `290.000 VNĐ`"
+            name: "🎁 4. LS-GiftCode & Rewards (Hệ Thống Mã Quà Tặng)",
+            value: "• **Tính năng:** Tạo Giftcode tân thủ, code event, code đền bù; giới hạn lượt nhập theo từng người chơi hoặc toàn server; hẹn giờ hết hạn; phát item/tiền Vault/lệnh console tự động; lưu async MySQL/SQLite cực nhẹ.\n• **Hỗ trợ:** Spigot / Paper / Purpur / Folia (1.16 - 1.21+)\n• **Giá:** `30.000 VNĐ` • `~$1.50 USD` *(Ưu đãi siêu rẻ)*"
+          },
+          {
+            name: "👑 5. Combo 2 Plugin Anti (AntiFreeCam + AntiClient)",
+            value: "• Sở hữu cả 2 giải pháp bảo vệ cốt lõi cho server với giá ưu đãi tiết kiệm.\n• **Giá Combo:** `129.000 VNĐ` • `~$5.50 USD`"
           }
         )
         .setFooter({ text: "Mở Ticket tại #🛒・mua-plugin để đặt mua và nhận file ngay!" });
@@ -74,10 +79,12 @@ client.once('clientReady', async () => {
           {
             name: "📦 1. Plugin Có Sẵn",
             value: 
-              "• 👁️ **LS-AntiFreeCam:** `150.000đ`\n" +
-              "• 🚫 **LS-AntiClient:** `180.000đ`\n" +
-              "• 🎁 **LS-GiftCode:** `30.000đ` *(Học sinh / Sinh viên)*\n" +
-              "• 👑 **Combo 2 Plugin Anti:** `290.000đ`"
+              "• 🛡️ **LS-AntiCheat:** `30.000 VNĐ` • `~$1.50 USD`\n" +
+              "• 🛒 **Addon Anti-Macro Cart:** `20.000 VNĐ / Tháng` • `~$1.00 USD / Mo`\n" +
+              "• 👁️ **LS-AntiFreeCam:** `59.000 VNĐ` • `~$2.50 USD`\n" +
+              "• 🚫 **LS-AntiClient:** `99.000 VNĐ` • `~$4.00 USD`\n" +
+              "• 🎁 **LS-GiftCode:** `30.000 VNĐ` • `~$1.50 USD`\n" +
+              "• 👑 **Combo 2 Plugin Anti:** `129.000 VNĐ` • `~$5.50 USD`"
           },
           {
             name: "🛠️ 2. Nhận Code Plugin Theo Yêu Cầu (Custom Dev)",
@@ -100,9 +107,20 @@ client.once('clientReady', async () => {
     console.log("🎉 ĐÃ CẬP NHẬT GIÁ LS-GIFTCODE XUỐNG 30K XONG!");
     process.exit(0);
   } catch (err) {
-    console.error("❌ Lỗi:", err);
+    clearTimeout(watchdog);
+    console.error("❌ Lỗi:", err.message || err);
+    try {
+      await client.destroy();
+    } catch {}
     process.exit(1);
   }
 });
 
-client.login(TOKEN);
+client.login(TOKEN).catch(async (err) => {
+  clearTimeout(watchdog);
+  console.error('❌ Đăng nhập Discord thất bại:', err.message || err);
+  try {
+    await client.destroy();
+  } catch {}
+  process.exit(1);
+});

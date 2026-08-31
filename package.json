@@ -1,19 +1,25 @@
 {
   "name": "ls_studio_bot",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Discord Bot & Shop System for LS Studio",
+  "main": "bot.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node bot.js",
+    "inspect:ls": "node inspect_ls.js",
+    "inspect:nguyen": "node inspect_nguyen_smp.js",
+    "discloud:commit": "node commit_discloud.js",
+    "audit": "node audit_runner.js",
+    "test": "node test_harness.js"
   },
   "keywords": [],
-  "author": "",
+  "author": "LS Studio",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
     "axios": "^1.20.0",
     "discord.js": "^14.27.0",
     "dotenv": "^17.4.2",
+    "form-data": "^4.0.0",
     "pngjs": "^7.0.0"
   }
 }

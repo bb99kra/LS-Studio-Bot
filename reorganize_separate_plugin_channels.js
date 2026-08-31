@@ -1,6 +1,7 @@
 const fs = require('fs');
 const { 
-  Client, 
+  Client,
+  Events, 
   GatewayIntentBits, 
   ChannelType, 
   PermissionsBitField, 
@@ -17,7 +18,32 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
 
-client.once('clientReady', async () => {
+// Watchdog timeout to prevent script hanging indefinitely
+const WATCHDOG_TIMEOUT_MS = 60000;
+const watchdog = setTimeout(async () => {
+  console.error(`⏱️ [WATCHDOG] Quá thời gian thực thi (${WATCHDOG_TIMEOUT_MS / 1000}s). Tự động hủy kết nối Discord và dừng tiến trình.`);
+  try {
+    await client.destroy();
+  } catch {}
+  process.exit(1);
+}, WATCHDOG_TIMEOUT_MS);
+if (watchdog.unref) watchdog.unref();
+
+client.on(Events.Error, (err) => {
+  console.error('❌ Lỗi Discord Client:', err.message || err);
+});
+
+process.on('unhandledRejection', async (reason) => {
+  clearTimeout(watchdog);
+  console.error('❌ Lỗi không kiểm soát (Unhandled Rejection):', reason);
+  try {
+    await client.destroy();
+  } catch {}
+  process.exit(1);
+});
+
+
+client.once(Events.ClientReady, async () => {
   console.log(`🤖 Logged in as ${client.user.tag}! Bắt đầu chia từng kênh riêng biệt không dùng ngoặc đơn...`);
 
   try {
@@ -232,11 +258,26 @@ client.once('clientReady', async () => {
     }
 
     console.log("🎉 ĐÃ HOÀN TẤT CHIA TỪNG KÊNH RIÊNG VÀ XÓA BỎ DẤU NGOẶC ĐƠN 100%!");
+    clearTimeout(watchdog);
+    try {
+      await client.destroy();
+    } catch {}
     process.exit(0);
   } catch (err) {
-    console.error("❌ Lỗi:", err);
+    clearTimeout(watchdog);
+    console.error("❌ Lỗi:", err.message || err);
+    try {
+      await client.destroy();
+    } catch {}
     process.exit(1);
   }
 });
 
-client.login(TOKEN);
+client.login(TOKEN).catch(async (err) => {
+  clearTimeout(watchdog);
+  console.error('❌ Đăng nhập Discord thất bại:', err.message || err);
+  try {
+    await client.destroy();
+  } catch {}
+  process.exit(1);
+});
