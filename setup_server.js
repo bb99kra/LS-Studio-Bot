@@ -6,11 +6,13 @@ const {
   GatewayIntentBits, 
   PermissionsBitField, 
   ChannelType, 
+  OverwriteType,
   EmbedBuilder, 
   ActionRowBuilder, 
   ButtonBuilder, 
   ButtonStyle,
-  Events
+  Events,
+  RESTEvents
 } = require('discord.js');
 
 const tokenLocalPath = path.join(__dirname, 'token.local.js');
@@ -18,13 +20,36 @@ const localConfig = fs.existsSync(tokenLocalPath) ? require(tokenLocalPath) : {}
 const TOKEN = process.env.DISCORD_TOKEN || localConfig.TOKEN || localConfig.DISCORD_TOKEN || '';
 const GUILD_ID = process.env.GUILD_ID || "1542476657825419334";
 
+/**
+ * Setup Server Intents:
+ * Chỉ yêu cầu Guilds & GuildMessages (Non-Privileged).
+ * Không cần GuildMembers hoặc MessageContent (Privileged Intents) vì script chỉ khởi tạo cấu trúc kênh/role/embed.
+ */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.GuildMessages
   ]
+});
+
+// Giám sát Rate Limit từ Discord REST API trong suốt tiến trình Setup
+client.rest.on(RESTEvents.RateLimited, (rateLimitData) => {
+  const {
+    timeToReset = 0,
+    limit = 0,
+    method = 'UNKNOWN',
+    route = 'UNKNOWN',
+    url = '',
+    global: isGlobal = false
+  } = rateLimitData || {};
+  console.warn(
+    `   ⏳ [Setup REST Rate Limit] ${isGlobal ? 'GLOBAL' : 'ROUTE'} | ` +
+    `${String(method).toUpperCase()} ${route || url} | Retry-After: ${timeToReset}ms | Limit: ${limit}`
+  );
+});
+
+client.rest.on(RESTEvents.InvalidRequestWarning, (warningData) => {
+  console.warn(`   ⚠️ [Setup REST Invalid Request] Count: ${warningData?.count}, Reset: ${warningData?.remainingTime}ms`);
 });
 
 // Helper: Tạm dừng để tránh Discord HTTP 429 Rate Limit
@@ -545,6 +570,12 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
         return cat;
       }
 
+      if (currentChannels.size >= 500) {
+        const limitErr = new Error("Máy chủ đã đạt giới hạn tối đa 500 kênh của Discord! Không thể tạo thêm danh mục.");
+        limitErr.code = 30013;
+        throw limitErr;
+      }
+
       cat = await safeApiCall(() => guild.channels.create({
         name: name,
         type: ChannelType.GuildCategory,
@@ -587,10 +618,25 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
         return ch;
       }
 
+      if (currentChannels.size >= 500) {
+        const limitErr = new Error(`Máy chủ đã đạt giới hạn tối đa 500 kênh của Discord! Không thể tạo kênh #${name}.`);
+        limitErr.code = 30013;
+        throw limitErr;
+      }
+
+      let parentIdToUse = parentCategory ? parentCategory.id : undefined;
+      if (parentCategory) {
+        const catChildCount = currentChannels.filter(c => c && c.parentId === parentCategory.id).size;
+        if (catChildCount >= 50) {
+          console.warn(`   ⚠️ Category "${parentCategory.name}" đã đạt 50 kênh! Tạo kênh #${name} ở root level.`);
+          parentIdToUse = undefined;
+        }
+      }
+
       const createOptions = {
         name: name,
         type: ChannelType.GuildText,
-        parent: parentCategory ? parentCategory.id : undefined,
+        parent: parentIdToUse,
         topic: topic || undefined,
         reason: "LS Studio Setup - Channel Creation"
       };
@@ -599,7 +645,18 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
         createOptions.permissionOverwrites = customOverwrites;
       }
 
-      ch = await safeApiCall(() => guild.channels.create(createOptions));
+      try {
+        ch = await safeApiCall(() => guild.channels.create(createOptions));
+      } catch (createErr) {
+        if (createErr.code === 30005 && parentIdToUse) {
+          console.warn(`   ⚠️ Gặp lỗi 30005 khi gán parent category cho #${name}. Đang thử tạo không parent...`);
+          createOptions.parent = undefined;
+          ch = await safeApiCall(() => guild.channels.create(createOptions));
+        } else {
+          throw createErr;
+        }
+      }
+
       console.log(`   + Đã tạo Text Channel mới: #${name}`);
       currentChannels.set(ch.id, ch);
       return ch;
@@ -645,10 +702,25 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
         return ch;
       }
 
+      if (currentChannels.size >= 500) {
+        const limitErr = new Error(`Máy chủ đã đạt giới hạn tối đa 500 kênh của Discord! Không thể tạo Voice Channel ${name}.`);
+        limitErr.code = 30013;
+        throw limitErr;
+      }
+
+      let parentIdToUse = parentCategory ? parentCategory.id : undefined;
+      if (parentCategory) {
+        const catChildCount = currentChannels.filter(c => c && c.parentId === parentCategory.id).size;
+        if (catChildCount >= 50) {
+          console.warn(`   ⚠️ Category "${parentCategory.name}" đã đạt 50 kênh! Tạo voice channel ${name} ở root level.`);
+          parentIdToUse = undefined;
+        }
+      }
+
       const createOptions = {
         name: name,
         type: ChannelType.GuildVoice,
-        parent: parentCategory ? parentCategory.id : undefined,
+        parent: parentIdToUse,
         userLimit: userLimit !== undefined ? userLimit : undefined,
         bitrate: bitrate !== undefined ? bitrate : undefined,
         rtcRegion: rtcRegion !== undefined ? rtcRegion : undefined,
@@ -659,7 +731,18 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
         createOptions.permissionOverwrites = customOverwrites;
       }
 
-      ch = await safeApiCall(() => guild.channels.create(createOptions));
+      try {
+        ch = await safeApiCall(() => guild.channels.create(createOptions));
+      } catch (createErr) {
+        if (createErr.code === 30005 && parentIdToUse) {
+          console.warn(`   ⚠️ Gặp lỗi 30005 khi gán parent category cho Voice Channel ${name}. Đang thử tạo không parent...`);
+          createOptions.parent = undefined;
+          ch = await safeApiCall(() => guild.channels.create(createOptions));
+        } else {
+          throw createErr;
+        }
+      }
+
       console.log(`   + Đã tạo Voice Channel mới: ${name}`);
       currentChannels.set(ch.id, ch);
       return ch;
@@ -1820,6 +1903,37 @@ if (require.main === module) {
 
   client.on(Events.Error, (err) => {
     console.error('❌ Lỗi Discord Client:', err.message || err);
+  });
+
+  client.on(Events.Warn, (info) => {
+    console.warn('⚠️ [Discord Warning]:', info);
+  });
+
+  client.on(Events.ShardError, (error, shardId) => {
+    console.error(`❌ [Discord Shard ${shardId} Error]:`, error?.message || error);
+  });
+
+  client.on(Events.ShardDisconnect, (event, shardId) => {
+    const code = event?.code || 0;
+    const reason = event?.reason || 'No reason provided';
+    console.warn(`🔌 [Discord Shard ${shardId} Disconnected] Code ${code}: ${reason}`);
+    if (code === 4004) {
+      console.error('💥 [CRITICAL 4004] Discord Token không hợp lệ. Vui lòng kiểm tra lại DISCORD_TOKEN!');
+    } else if (code === 4014) {
+      console.error('💥 [CRITICAL 4014] Disallowed Intents: Gateway intents bị từ chối.');
+    }
+  });
+
+  client.on(Events.ShardReconnecting, (shardId) => {
+    console.log(`🔄 [Discord Shard ${shardId} Reconnecting] Đang kết nối lại Gateway...`);
+  });
+
+  client.on(Events.ShardResume, (shardId, replayedEvents) => {
+    console.log(`✅ [Discord Shard ${shardId} Resumed] Gateway khôi phục thành công (${replayedEvents} events).`);
+  });
+
+  client.on(Events.Invalidated, () => {
+    console.error('❌ [Discord Session Invalidated] Phiên kết nối Gateway đã bị vô hiệu hóa.');
   });
 
   let isExiting = false;

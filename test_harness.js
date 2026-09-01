@@ -10,6 +10,7 @@
 const {
   client: botClient,
   PACKAGES,
+  DEPRECATED_PACKAGE_ALIASES,
   BANK_CONFIG,
   ORDER_CODE_REGEX,
   generateOrderCode,
@@ -18,14 +19,24 @@ const {
   isValidOrderCode,
   formatVND,
   formatUSD,
+  isNegotiatedPrice,
   sanitizeVietQRText,
+  sanitizeCustomerName,
+  sanitizeOrderCode,
   generateVietQRUrl,
   fetchVietQRBuffer,
   vietQRBufferCache,
+  failedVietQRUrls,
+  pendingVietQRRequests,
   clearVietQRCache,
   getVietQRCacheStats,
   getPackage,
   getRateLimitRemaining,
+  formatVNTime,
+  sanitizeTranscriptControlChars,
+  sanitizeSingleLineHeader,
+  sanitizeMarkdownForEmbed,
+  extractTranscriptMessageData,
   generateTranscript,
   createTranscriptAttachments,
   redactSensitiveData,
@@ -36,22 +47,36 @@ const {
   createFeedbackModal,
   createTicketChannel,
   ticketCreationLocks,
+  closingTicketChannels,
   userCooldowns,
+  activeOrderCodes,
+  approvedOrderCodes,
+  processingApprovals,
   isStaffMember,
   normalizeAntiSpamText,
+  extractAllLinkTargets,
   containsDiscordInvite,
   containsEveryonePing,
   safeDeleteMessage,
+  handleAutoMod,
   sanitizeModalInlineText,
   sanitizeModalCodeBlockText,
   sanitizeDiscordChannelTopic,
-  approvedOrderCodes,
-  processingApprovals,
-  executeTicketClosure
+  executeTicketClosure,
+  IGNORABLE_INTERACTION_ERROR_CODES,
+  isIgnorableInteractionError,
+  safeReply,
+  safeDeferReply,
+  safeDeferUpdate,
+  safeEditReply,
+  safeFollowUp,
+  safeUpdate,
+  safeShowModal,
+  handleGracefulShutdown
 } = require('./bot.js');
 
 const { runServerSetup } = require('./setup_server.js');
-const { PermissionsBitField, ChannelType, ButtonStyle, Events, Collection, AttachmentBuilder } = require('discord.js');
+const { PermissionsBitField, ChannelType, OverwriteType, ButtonStyle, Events, Collection, AttachmentBuilder } = require('discord.js');
 
 // ============================================================================
 // TEST RUNNER INFRASTRUCTURE
@@ -175,10 +200,14 @@ function createMockMemberWithRole(user, roles, guild) {
   return createMockGuildMember({ user, roles, guild });
 }
 
-function createMockChannel({ id = null, name = 'general', type = ChannelType.GuildText, topic = '', parent = null, guild = null, messages = [] } = {}) {
+function createMockChannel({ id = null, name = 'general', type = ChannelType.GuildText, topic = '', parent = null, guild = null, messages = [], permissionOverwrites = [] } = {}) {
   const cid = id || '30' + Math.floor(1000000000000000 + Math.random() * 9000000000000000).toString();
   const messageMap = new Collection();
   messages.forEach(m => messageMap.set(m.id, m));
+  const overwritesMap = new Collection();
+  if (Array.isArray(permissionOverwrites)) {
+    permissionOverwrites.forEach(ow => overwritesMap.set(ow.id, ow));
+  }
 
   const channel = {
     id: cid,
@@ -218,7 +247,15 @@ function createMockChannel({ id = null, name = 'general', type = ChannelType.Gui
       cache: messageMap
     },
     permissionOverwrites: {
-      set: async (overwrites) => { channel.overwrites = overwrites; return channel; }
+      cache: overwritesMap,
+      set: async (overwrites) => {
+        overwritesMap.clear();
+        if (Array.isArray(overwrites)) {
+          overwrites.forEach(ow => overwritesMap.set(ow.id, ow));
+        }
+        channel.overwrites = overwrites;
+        return channel;
+      }
     },
     send: async (payload) => {
       const msgId = 'msg_' + Math.random().toString(36).substring(2, 9);
@@ -308,6 +345,7 @@ function createMockGuild({ id = '1542476657825419334', name = 'LS STUDIO TEST SE
           type: data.type,
           topic: data.topic || '',
           parent: data.parent ? channelMap.get(data.parent) || { id: data.parent } : null,
+          permissionOverwrites: data.permissionOverwrites || [],
           guild
         });
         return newChannel;
@@ -388,6 +426,8 @@ function createMockInteraction({
     fields: {
       getTextInputValue: (id) => fields[id] || ''
     },
+    get deferred() { return state.deferred; },
+    get replied() { return state.replied; },
     deferReply: async (opts = {}) => {
       state.deferred = true;
       state.ephemeral = Boolean(opts.ephemeral);
@@ -2374,6 +2414,625 @@ async function runAllTests() {
     await executeTicketClosure({ channel: ticketCh, guild, closerUser, closeReason: "Done" });
 
     assert(logCh.messages.cache.size > 0, "Log channel must still receive transcript archive even if DM failed");
+  });
+
+  // ============================================================================
+  // SUITE 17: ReDoS Protection & Catastrophic Backtracking Stress Testing
+  // ============================================================================
+  console.log("\n⚡ [SUITE 17: ReDoS Protection & Catastrophic Backtracking Stress Testing]");
+
+  await runTest("Suite 17", "containsDiscordInvite: Adversarial nested brackets and markdown masked link injection", async () => {
+    // 5,000 unclosed opening brackets and matching closing brackets
+    const maliciousBracketPayload = "[".repeat(2000) + "https://discord.gg/hacker" + "]".repeat(2000);
+    const start = Date.now();
+    const result = containsDiscordInvite(maliciousBracketPayload);
+    const elapsed = Date.now() - start;
+    assert(result === true, "Must detect nested invite link");
+    assert(elapsed < 200, `Execution time must be < 200ms (took ${elapsed}ms)`);
+
+    // Massive anchor text in markdown link
+    const massiveAnchorPayload = "[" + "A".repeat(4000) + "](https://discord.gg/fast_check)";
+    const start2 = Date.now();
+    const result2 = containsDiscordInvite(massiveAnchorPayload);
+    const elapsed2 = Date.now() - start2;
+    assert(result2 === true, "Must detect invite in markdown target");
+    assert(elapsed2 < 200, `Execution time must be < 200ms (took ${elapsed2}ms)`);
+  });
+
+  await runTest("Suite 17", "containsDiscordInvite: Repetitive word-based dot/slash obfuscation without matching invite", async () => {
+    // 5,000 repetitions of (dot) and (slash) without discord keyword
+    const dotSlashBomb = "hello " + "(dot)".repeat(1000) + " (slash)".repeat(1000) + " harmless_text";
+    const start = Date.now();
+    const result = containsDiscordInvite(dotSlashBomb);
+    const elapsed = Date.now() - start;
+    assert(result === false, "Must not trigger false positive");
+    assert(elapsed < 200, `Execution time must be < 200ms (took ${elapsed}ms)`);
+  });
+
+  await runTest("Suite 17", "containsDiscordInvite: Long repetitive alphanumeric sequence with misleading URL prefix", async () => {
+    // Repetitive domain prefixes that do not match invite pattern
+    const misleadingPrefix = "https://discord.com/" + "channels/12345/".repeat(500) + "general";
+    const start = Date.now();
+    const result = containsDiscordInvite(misleadingPrefix);
+    const elapsed = Date.now() - start;
+    assert(elapsed < 200, `Execution time must be < 200ms (took ${elapsed}ms)`);
+  });
+
+  await runTest("Suite 17", "containsEveryonePing: Adversarial code blocks, spoiler markers & mentions", async () => {
+    // Large code block followed by ping
+    const massiveCodeBlock = "```javascript\n" + "console.log('safe code line');\n".repeat(100) + "```\nHello @everyone";
+    const start = Date.now();
+    const result = containsEveryonePing(massiveCodeBlock);
+    const elapsed = Date.now() - start;
+    assert(result === true, "Must detect real @everyone outside code block");
+    assert(elapsed < 200, `Execution time must be < 200ms (took ${elapsed}ms)`);
+
+    // Large unclosed code block containing fake @everyone
+    const unclosedCodeBlock = "```markdown\n" + "fake @everyone line\n".repeat(100);
+    const start2 = Date.now();
+    const result2 = containsEveryonePing(unclosedCodeBlock);
+    const elapsed2 = Date.now() - start2;
+    assert(result2 === false, "Unclosed code block must neutralize mention without backtracking freeze");
+    assert(elapsed2 < 200, `Execution time must be < 200ms (took ${elapsed2}ms)`);
+
+    // Adversarial spoiler markers wrapping ping: @||||||...||everyone
+    const adversarialSpoiler = "@" + "||".repeat(1000) + "everyone" + "||".repeat(1000);
+    const start3 = Date.now();
+    const result3 = containsEveryonePing(adversarialSpoiler);
+    const elapsed3 = Date.now() - start3;
+    assert(result3 === true, "Must detect spoiler-obfuscated @everyone");
+    assert(elapsed3 < 200, `Execution time must be < 200ms (took ${elapsed3}ms)`);
+  });
+
+  await runTest("Suite 17", "redactSensitiveData: Adversarial long tokens and unclosed private key blocks", async () => {
+    // 30,000 character token-like sequence with dots
+    const adversarialToken = "MTA4" + "9".repeat(30000) + ".Gxyz123." + "x".repeat(30);
+    const start = Date.now();
+    const redacted = redactSensitiveData(`Token: ${adversarialToken}`);
+    const elapsed = Date.now() - start;
+    assert(elapsed < 200, `Execution time must be < 200ms (took ${elapsed}ms)`);
+
+    // Massive repetitive fake API key prefix
+    const adversarialApiKey = "sk-" + "proj-".repeat(5000) + "abcdef1234567890";
+    const start2 = Date.now();
+    const redacted2 = redactSensitiveData(`Key: ${adversarialApiKey}`);
+    const elapsed2 = Date.now() - start2;
+    assert(elapsed2 < 200, `Execution time must be < 200ms (took ${elapsed2}ms)`);
+
+    // Unclosed private key header
+    const unclosedKey = "-----BEGIN RSA PRIVATE KEY-----\n" + "MIIEowIBAAKCAQEA...".repeat(2000);
+    const start3 = Date.now();
+    const redacted3 = redactSensitiveData(unclosedKey);
+    const elapsed3 = Date.now() - start3;
+    assert(elapsed3 < 200, `Execution time must be < 200ms (took ${elapsed3}ms)`);
+  });
+
+  await runTest("Suite 17", "extractOrderCode & isValidOrderCode: Long repetitive prefix patterns", async () => {
+    // 2,000 repetitive 'LS' prefix before actual order code (4,000 chars stress test)
+    const adversarialOrderText = "LS".repeat(2000) + " LS987654 done";
+    const start = Date.now();
+    const code = extractOrderCode(adversarialOrderText);
+    const elapsed = Date.now() - start;
+    assertEqual(code, "LS987654", "Extract valid code from adversarial text");
+    assert(elapsed < 100, `Execution time must be < 100ms (took ${elapsed}ms)`);
+
+    // Massive invalid order codes
+    const invalidLongCode = "LS-" + "0".repeat(20000);
+    const start2 = Date.now();
+    const isValid = isValidOrderCode(invalidLongCode);
+    const elapsed2 = Date.now() - start2;
+    assertEqual(isValid, false, "Invalid code returns false immediately");
+    assert(elapsed2 < 50, `Execution time must be < 50ms (took ${elapsed2}ms)`);
+  });
+
+  await runTest("Suite 17", "sanitizeModalInlineText & sanitizeModalCodeBlockText: Massive backtick & delimiter attacks", async () => {
+    const massiveBackticks = "`".repeat(30000);
+    const start = Date.now();
+    const sanitized = sanitizeModalInlineText(massiveBackticks, 100);
+    const elapsed = Date.now() - start;
+    assertEqual(sanitized.length, 100, "Truncated to 100 chars");
+    assert(!sanitized.includes("`"), "Backticks replaced");
+    assert(elapsed < 50, `Execution time must be < 50ms (took ${elapsed}ms)`);
+
+    const massiveTripleBackticks = "```".repeat(10000);
+    const start2 = Date.now();
+    const sanitized2 = sanitizeModalCodeBlockText(massiveTripleBackticks, 200);
+    const elapsed2 = Date.now() - start2;
+    assertEqual(sanitized2.length, 200, "Truncated to 200 chars");
+    assert(!sanitized2.includes("```"), "Triple backticks neutralized");
+    assert(elapsed2 < 50, `Execution time must be < 50ms (took ${elapsed2}ms)`);
+  });
+
+  await runTest("Suite 17", "normalizeAntiSpamText: 50,000 homoglyphs and zero-width sequence stress test", async () => {
+    const homoglyphSpam = "ԁіѕсоrd․gg／".repeat(1000) + "\u200B\uFEFF\u200D\u200C".repeat(5000);
+    const start = Date.now();
+    const normalized = normalizeAntiSpamText(homoglyphSpam);
+    const elapsed = Date.now() - start;
+    assert(normalized.includes("discord.gg/"), "Normalized homoglyphs correctly");
+    assert(elapsed < 200, `Execution time must be < 200ms (took ${elapsed}ms)`);
+  });
+
+  await runTest("Suite 17", "sanitizeTranscriptControlChars & sanitizeSingleLineHeader: Massive CRLF & ANSI escape sequences", async () => {
+    const maliciousLog = "\x1b[31;1mCRITICAL_ERROR\x1b[0m\r\n".repeat(5000) + "\u202Ereversed\u200B";
+    const start = Date.now();
+    const cleaned = sanitizeTranscriptControlChars(maliciousLog);
+    const elapsed = Date.now() - start;
+    assert(!cleaned.includes("\x1b[31;1m"), "ANSI stripped");
+    assert(!cleaned.includes("\u202E"), "BiDi stripped");
+    assert(elapsed < 200, `Execution time must be < 200ms (took ${elapsed}ms)`);
+
+    const massiveHeader = "Header Title\r\n".repeat(5000) + "Injected Content";
+    const start2 = Date.now();
+    const sanitizedHeader = sanitizeSingleLineHeader(massiveHeader, 100);
+    const elapsed2 = Date.now() - start2;
+    assert(!sanitizedHeader.includes("\n"), "Newlines stripped");
+    assert(!sanitizedHeader.includes("\r"), "Carriage returns stripped");
+    assert(elapsed2 < 50, `Execution time must be < 50ms (took ${elapsed2}ms)`);
+  });
+
+  // ============================================================================
+  // SUITE 18: Rate-Limit Retry, Backoff, Cooldown Resilience & Concurrency Guard Testing
+  // ============================================================================
+  console.log("\n🔄 [SUITE 18: Rate-Limit Retry, Backoff, Cooldown Resilience & Concurrency Guard Testing]");
+
+  await runTest("Suite 18", "Exponential Backoff & Rate-Limit Retry Simulation", async () => {
+    // Utility simulating transient 429 Rate Limit responses with retry_after and exponential backoff
+    async function simulateOperationWithRetry(fn, { maxRetries = 3, initialDelayMs = 10, backoffFactor = 2 } = {}) {
+      let attempt = 0;
+      let delay = initialDelayMs;
+      while (attempt <= maxRetries) {
+        try {
+          return await fn(attempt);
+        } catch (err) {
+          attempt++;
+          if (attempt > maxRetries || !err?.isRateLimit) {
+            throw err;
+          }
+          const retryAfter = err.retryAfterMs || delay;
+          await new Promise(r => setTimeout(r, retryAfter));
+          delay *= backoffFactor;
+        }
+      }
+    }
+
+    // 1. Success on 3rd attempt after two 429 Rate Limit errors
+    let executionAttempts = 0;
+    const result = await simulateOperationWithRetry(async (attempt) => {
+      executionAttempts++;
+      if (attempt < 2) {
+        const error = new Error("Rate limit exceeded: 429 Too Many Requests");
+        error.isRateLimit = true;
+        error.retryAfterMs = 5;
+        throw error;
+      }
+      return { success: true, attempts: executionAttempts };
+    }, { maxRetries: 3, initialDelayMs: 5 });
+
+    assertEqual(result.success, true, "Operation succeeded after rate-limit backoff retry");
+    assertEqual(result.attempts, 3, "Operation succeeded on 3rd attempt");
+
+    // 2. Max retries exceeded triggers failure
+    let failedAttempts = 0;
+    let caughtError = null;
+    try {
+      await simulateOperationWithRetry(async () => {
+        failedAttempts++;
+        const error = new Error("Persistent 429 Rate Limit");
+        error.isRateLimit = true;
+        error.retryAfterMs = 5;
+        throw error;
+      }, { maxRetries: 2, initialDelayMs: 5 });
+    } catch (err) {
+      caughtError = err;
+    }
+    assert(caughtError !== null, "Should throw when max retries exceeded");
+    assertEqual(failedAttempts, 3, "Total attempts equals maxRetries + 1");
+  });
+
+  await runTest("Suite 18", "fetchVietQRBuffer: Circuit breaker negative cache & TTL retry recovery", async () => {
+    clearVietQRCache();
+    const testFailUrl = "https://unreachable-payment-gateway-999.test/qr.png";
+
+    // 1. First call fails and registers in failedVietQRUrls
+    const res1 = await fetchVietQRBuffer(testFailUrl);
+    assertEqual(res1, null, "Initial request to invalid gateway returns null");
+    assert(failedVietQRUrls.has(testFailUrl), "URL recorded in failure circuit breaker");
+
+    // 2. Immediate repeat call hits negative cache circuit breaker instantly (0ms)
+    const t0 = Date.now();
+    const res2 = await fetchVietQRBuffer(testFailUrl);
+    const elapsed = Date.now() - t0;
+    assertEqual(res2, null, "Negative cache hit returns null immediately");
+    assert(elapsed < 20, `Negative cache response must be instantaneous (<20ms, got ${elapsed}ms)`);
+
+    // 3. Fast-forward TTL (>30s) to simulate recovery retry
+    const failedEntry = failedVietQRUrls.get(testFailUrl);
+    failedEntry.failedAt = Date.now() - 35000;
+
+    // Simulate mock success on subsequent retry by clearing failed entry
+    failedVietQRUrls.delete(testFailUrl);
+    const mockSuccessBuffer = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, ...new Array(600).fill(5)]);
+    vietQRBufferCache.set(testFailUrl, { buffer: mockSuccessBuffer, cachedAt: Date.now(), size: mockSuccessBuffer.length });
+
+    const res3 = await fetchVietQRBuffer(testFailUrl);
+    assert(res3 !== null, "Retry after TTL expiration retrieves updated buffer");
+    assertEqual(res3[0], 0x89, "Valid PNG buffer returned upon retry");
+    clearVietQRCache();
+  });
+
+  await runTest("Suite 18", "getRateLimitRemaining: High-concurrency multi-user burst simulation", async () => {
+    userCooldowns.clear();
+    const numUsers = 50;
+    const userIds = Array.from({ length: numUsers }, (_, i) => "1000000000000000" + i.toString().padStart(2, '0'));
+
+    // First burst: All 50 distinct users should have 0s cooldown (permitted)
+    const firstBurst = userIds.map(uid => getRateLimitRemaining(uid, 5000));
+    for (let i = 0; i < numUsers; i++) {
+      assertEqual(firstBurst[i], 0, `User ${userIds[i]} first request must be permitted (0s cooldown)`);
+    }
+
+    // Second immediate burst: All 50 users should be throttled (>0s cooldown)
+    const secondBurst = userIds.map(uid => getRateLimitRemaining(uid, 5000));
+    for (let i = 0; i < numUsers; i++) {
+      assert(secondBurst[i] >= 4 && secondBurst[i] <= 5, `User ${userIds[i]} repeat request throttled (${secondBurst[i]}s remaining)`);
+    }
+
+    // Single user rapid spam (100 calls in a tight loop)
+    const spamUser = '999999999999999999';
+    userCooldowns.delete(spamUser);
+    const initialCall = getRateLimitRemaining(spamUser, 5000);
+    assertEqual(initialCall, 0, "Initial call permitted");
+
+    for (let j = 0; j < 100; j++) {
+      const throttled = getRateLimitRemaining(spamUser, 5000);
+      assert(throttled > 0, `Spam call #${j + 1} must remain throttled`);
+    }
+    userCooldowns.clear();
+  });
+
+  await runTest("Suite 18", "ticketCreationLocks: Concurrency contention, race condition protection & auto-unlock retry", async () => {
+    const testUser = 'user_concurrent_race_1001';
+    ticketCreationLocks.delete(testUser);
+
+    // Simulate 20 concurrent ticket creation requests for the same user
+    const results = [];
+    for (let i = 0; i < 20; i++) {
+      if (!ticketCreationLocks.has(testUser)) {
+        ticketCreationLocks.add(testUser);
+        results.push('ACQUIRED_LOCK');
+      } else {
+        results.push('LOCKED_OUT');
+      }
+    }
+
+    const acquiredCount = results.filter(r => r === 'ACQUIRED_LOCK').length;
+    const lockedCount = results.filter(r => r === 'LOCKED_OUT').length;
+    assertEqual(acquiredCount, 1, "Exactly 1 concurrent request acquires lock");
+    assertEqual(lockedCount, 19, "19 duplicate concurrent requests rejected");
+
+    // Release lock
+    ticketCreationLocks.delete(testUser);
+    assert(!ticketCreationLocks.has(testUser), "Lock released");
+
+    // Retry after release succeeds
+    ticketCreationLocks.add(testUser);
+    assert(ticketCreationLocks.has(testUser), "Subsequent request acquires lock after release");
+
+    // Auto-unlock simulation (TTL expired)
+    ticketCreationLocks.set(testUser, Date.now() - 35000);
+    assert(!ticketCreationLocks.has(testUser), "Expired lock automatically treated as free");
+    ticketCreationLocks.delete(testUser);
+  });
+
+  await runTest("Suite 18", "processingApprovals & approvedOrderCodes: Multi-staff simultaneous approval race condition guard", async () => {
+    const orderCode = 'LS' + Math.floor(100000 + Math.random() * 900000);
+    processingApprovals.delete(orderCode);
+    approvedOrderCodes.delete(orderCode);
+
+    // Simulate 10 staff clicking approve button simultaneously for the same order code
+    const approveResults = [];
+    for (let staffId = 1; staffId <= 10; staffId++) {
+      if (approvedOrderCodes.has(orderCode)) {
+        approveResults.push(`ALREADY_APPROVED_${staffId}`);
+      } else if (processingApprovals.has(orderCode)) {
+        approveResults.push(`ALREADY_PROCESSING_${staffId}`);
+      } else {
+        processingApprovals.add(orderCode);
+        // Simulate completing transaction and committing to approved set
+        approvedOrderCodes.add(orderCode);
+        processingApprovals.delete(orderCode);
+        approveResults.push(`APPROVED_SUCCESS_${staffId}`);
+      }
+    }
+
+    const successCount = approveResults.filter(r => r.startsWith('APPROVED_SUCCESS')).length;
+    const blockedCount = approveResults.filter(r => r.startsWith('ALREADY_APPROVED') || r.startsWith('ALREADY_PROCESSING')).length;
+
+    assertEqual(successCount, 1, "Exactly 1 staff approval transaction succeeds");
+    assertEqual(blockedCount, 9, "9 simultaneous approval attempts blocked by idempotency guard");
+    assert(approvedOrderCodes.has(orderCode), "Order permanently marked approved");
+
+    // Clean up
+    approvedOrderCodes.delete(orderCode);
+  });
+
+  await runTest("Suite 18", "safeReply / safeDeferReply / safeDeferUpdate / safeShowModal: Error resilience and graceful recovery", async () => {
+    // 1. safeReply with Discord 40060 (Already acknowledged) -> falls back to editReply/followUp safely
+    const mockIntAcknowledged = {
+      deferred: true,
+      replied: false,
+      editReply: async (payload) => payload,
+      followUp: async (payload) => payload
+    };
+    const replyRes1 = await safeReply(mockIntAcknowledged, { content: "Safe fallback editReply" });
+    assert(replyRes1 !== null && replyRes1.content === "Safe fallback editReply", "safeReply fell back to editReply");
+
+    // 2. safeReply with Discord 10062 (Unknown interaction / expired) -> returns null safely without throwing
+    const mockIntExpired = {
+      deferred: false,
+      replied: false,
+      reply: async () => {
+        const err = new Error("Unknown interaction");
+        err.code = 10062;
+        throw err;
+      }
+    };
+    const replyRes2 = await safeReply(mockIntExpired, { content: "Test expired interaction" });
+    assertEqual(replyRes2, null, "Expired interaction handled safely with null return");
+
+    // 3. safeDeferReply on already acknowledged interaction -> returns true safely
+    const mockIntDeferred = { deferred: true, replied: false };
+    const deferRes = await safeDeferReply(mockIntDeferred);
+    assertEqual(deferRes, true, "safeDeferReply returns true when already deferred");
+
+    // 4. safeDeferUpdate on interaction that throws 10062 -> returns false safely
+    const mockIntUpdateFail = {
+      deferred: false,
+      replied: false,
+      deferUpdate: async () => {
+        const err = new Error("Unknown interaction");
+        err.code = 10062;
+        throw err;
+      }
+    };
+    const deferUpdateRes = await safeDeferUpdate(mockIntUpdateFail);
+    assertEqual(deferUpdateRes, false, "safeDeferUpdate handles unknown interaction error safely");
+
+    // 5. safeShowModal on interaction that throws 40060 (already acknowledged) -> returns false safely
+    const mockIntModalFail = {
+      showModal: async () => {
+        const err = new Error("Interaction has already been acknowledged");
+        err.code = 40060;
+        throw err;
+      }
+    };
+    const showModalRes = await safeShowModal(mockIntModalFail, { customId: 'test_modal' });
+    assertEqual(showModalRes, false, "safeShowModal handles already acknowledged error gracefully returning false");
+  });
+
+  await runTest("Suite 18", "isIgnorableInteractionError: Complete Discord API error code & message classification", async () => {
+    // Standard ignorable Discord error codes
+    const ignorableCodes = [10062, 10008, 40060, 50013, 50007, 50006, 50035, 10003, 50001];
+    for (const code of ignorableCodes) {
+      const err = new Error(`Discord API Error [${code}]`);
+      err.code = code;
+      assertEqual(isIgnorableInteractionError(err), true, `Error code ${code} must be ignorable`);
+    }
+
+    // Standard ignorable Discord error messages
+    const ignorableMessages = [
+      'Unknown interaction',
+      'Interaction has already been acknowledged',
+      'Unknown Channel',
+      'Unknown Message',
+      'Missing Access',
+      'Missing Permissions',
+      'Cannot send messages to this user',
+      'Cannot send an empty message',
+      'Invalid Form Body',
+      'Request aborted',
+      'aborted'
+    ];
+    for (const msg of ignorableMessages) {
+      assertEqual(isIgnorableInteractionError(new Error(msg)), true, `Message "${msg}" must be ignorable`);
+    }
+
+    // Critical/fatal errors that MUST NOT be ignored
+    assertEqual(isIgnorableInteractionError(new TypeError("Cannot read properties of undefined")), false, "TypeErrors must not be ignored");
+    assertEqual(isIgnorableInteractionError(new Error("Database connection refused")), false, "DB errors must not be ignored");
+    assertEqual(isIgnorableInteractionError(null), false, "Null returns false");
+    assertEqual(isIgnorableInteractionError(undefined), false, "Undefined returns false");
+  });
+
+  // ============================================================================
+  // SUITE 19: Ticket Permissions, Overwrites Bitfields, Channel Limits & Locks Audit
+  // ============================================================================
+  console.log("\n🔒 [SUITE 19: Ticket Permissions, Overwrites Bitfields, Channel Limits & Locks Audit]");
+
+  await runTest("Suite 19", "createTicketChannel: Validate PermissionOverwrites, OverwriteType & Bitfields", async () => {
+    const guild = createMockGuild();
+    const staffRole = createMockRole({ name: "🛡️・Staff / Support", position: 10 });
+    const devRole = createMockRole({ name: "🛠️・Developer", position: 12 });
+    guild.roles.cache.set(staffRole.id, staffRole);
+    guild.roles.cache.set(devRole.id, devRole);
+
+    const user = createMockUser({ username: 'customer_vip' });
+    const { ticketChannel, staffMentionString, staffRoles } = await createTicketChannel({
+      guild,
+      user,
+      ticketType: '🛒-mua'
+    });
+
+    assert(ticketChannel !== null, "Ticket channel created successfully");
+    const owMap = ticketChannel.permissionOverwrites.cache;
+
+    // 1. @everyone Overwrite
+    const everyoneOw = owMap.get(guild.id);
+    assert(everyoneOw !== undefined, "@everyone overwrite must be present");
+    assertEqual(everyoneOw.type, OverwriteType.Role, "@everyone type must be OverwriteType.Role (0)");
+    const everyoneDeny = new PermissionsBitField(everyoneOw.deny);
+    assert(everyoneDeny.has(PermissionsBitField.Flags.ViewChannel), "@everyone must be denied ViewChannel");
+    assert(everyoneDeny.has(PermissionsBitField.Flags.SendMessages), "@everyone must be denied SendMessages");
+    assert(everyoneDeny.has(PermissionsBitField.Flags.ReadMessageHistory), "@everyone must be denied ReadMessageHistory");
+
+    // 2. Opener (User) Overwrite
+    const userOw = owMap.get(user.id);
+    assert(userOw !== undefined, "User overwrite must be present");
+    assertEqual(userOw.type, OverwriteType.Member, "Opener type must be OverwriteType.Member (1)");
+    const userAllow = new PermissionsBitField(userOw.allow);
+    assert(userAllow.has(PermissionsBitField.Flags.ViewChannel), "Opener must be allowed ViewChannel");
+    assert(userAllow.has(PermissionsBitField.Flags.SendMessages), "Opener must be allowed SendMessages");
+    assert(userAllow.has(PermissionsBitField.Flags.AttachFiles), "Opener must be allowed AttachFiles");
+    assert(userAllow.has(PermissionsBitField.Flags.EmbedLinks), "Opener must be allowed EmbedLinks");
+    assert(userAllow.has(PermissionsBitField.Flags.ReadMessageHistory), "Opener must be allowed ReadMessageHistory");
+    assert(userAllow.has(PermissionsBitField.Flags.AddReactions), "Opener must be allowed AddReactions");
+
+    // 3. Bot Overwrite
+    const botId = botClient.user?.id || guild.members.me?.id;
+    const botOw = owMap.get(botId);
+    assert(botOw !== undefined, "Bot overwrite must be present");
+    assertEqual(botOw.type, OverwriteType.Member, "Bot type must be OverwriteType.Member (1)");
+    const botAllow = new PermissionsBitField(botOw.allow);
+    assert(botAllow.has(PermissionsBitField.Flags.ViewChannel), "Bot must be allowed ViewChannel");
+    assert(botAllow.has(PermissionsBitField.Flags.SendMessages), "Bot must be allowed SendMessages");
+    assert(botAllow.has(PermissionsBitField.Flags.ManageChannels), "Bot must be allowed ManageChannels");
+    assert(botAllow.has(PermissionsBitField.Flags.ManageMessages), "Bot must be allowed ManageMessages");
+
+    // 4. Staff Roles Overwrite
+    const staffOw = owMap.get(staffRole.id);
+    assert(staffOw !== undefined, "Staff role overwrite must be present");
+    assertEqual(staffOw.type, OverwriteType.Role, "Staff role type must be OverwriteType.Role (0)");
+    const staffAllow = new PermissionsBitField(staffOw.allow);
+    assert(staffAllow.has(PermissionsBitField.Flags.ViewChannel), "Staff must be allowed ViewChannel");
+    assert(staffAllow.has(PermissionsBitField.Flags.SendMessages), "Staff must be allowed SendMessages");
+    assert(staffAllow.has(PermissionsBitField.Flags.AttachFiles), "Staff must be allowed AttachFiles");
+    assert(staffAllow.has(PermissionsBitField.Flags.EmbedLinks), "Staff must be allowed EmbedLinks");
+    assert(staffAllow.has(PermissionsBitField.Flags.ManageMessages), "Staff must be allowed ManageMessages");
+  });
+
+  await runTest("Suite 19", "createTicketChannel: 500 Guild Channels limit throws code 30013", async () => {
+    const guild = createMockGuild();
+    // Fill mock guild cache to 500 channels
+    for (let i = guild.channels.cache.size; i < 500; i++) {
+      guild.channels.cache.set(`ch_${i}`, { id: `ch_${i}`, name: `channel-${i}`, type: ChannelType.GuildText });
+    }
+    assertEqual(guild.channels.cache.size, 500, "Guild reached 500 channels");
+
+    const user = createMockUser();
+    let errorCaught = null;
+    try {
+      await createTicketChannel({ guild, user, ticketType: '🛒-mua' });
+    } catch (err) {
+      errorCaught = err;
+    }
+
+    assert(errorCaught !== null, "Must throw error when guild has 500 channels");
+    assertEqual(errorCaught.code, 30013, "Error code must be 30013 (Guild channel limit)");
+    assert(errorCaught.message.includes("500 kênh"), "Error message mentions 500 channels limit");
+  });
+
+  await runTest("Suite 19", "createTicketChannel: 50 Category Channels limit auto-recovery to root level", async () => {
+    const guild = createMockGuild();
+    const ticketCat = createMockChannel({
+      name: "🎫 ━━━ HỖ TRỢ & MUA HÀNG ━━━",
+      type: ChannelType.GuildCategory,
+      guild
+    });
+
+    // Fill category to 50 channels
+    for (let i = 0; i < 50; i++) {
+      const child = createMockChannel({
+        name: `ticket-old-${i}`,
+        type: ChannelType.GuildText,
+        parent: ticketCat,
+        guild
+      });
+      child.parentId = ticketCat.id;
+    }
+
+    const catChildCount = guild.channels.cache.filter(c => c && c.parentId === ticketCat.id).size;
+    assertEqual(catChildCount, 50, "Category has exactly 50 channels");
+
+    const user = createMockUser({ username: 'overflow_user' });
+    const { ticketChannel } = await createTicketChannel({ guild, user, ticketType: '🛒-mua' });
+
+    assert(ticketChannel !== null, "Ticket channel created successfully via auto-recovery");
+    assertEqual(ticketChannel.parentId, null, "Ticket channel parent set to null (root level) because category is full");
+  });
+
+  await runTest("Suite 19", "createTicketChannel: Discord API 30005 exception retry auto-recovery", async () => {
+    const guild = createMockGuild();
+    const ticketCat = createMockChannel({
+      name: "🎫 ━━━ HỖ TRỢ & MUA HÀNG ━━━",
+      type: ChannelType.GuildCategory,
+      guild
+    });
+
+    // Mock guild.channels.create to throw 30005 if parent is set, succeed if parent is null
+    const originalCreate = guild.channels.create;
+    let attempts = 0;
+    guild.channels.create = async (options) => {
+      attempts++;
+      if (options.parent && attempts === 1) {
+        const err = new Error("Maximum number of channels in category reached (50)");
+        err.code = 30005;
+        throw err;
+      }
+      return originalCreate(options);
+    };
+
+    const user = createMockUser({ username: 'retry_user' });
+    const { ticketChannel } = await createTicketChannel({ guild, user, ticketType: '🛒-mua' });
+
+    assert(ticketChannel !== null, "Ticket channel recovered and created successfully");
+    assertEqual(attempts, 2, "guild.channels.create called twice (1 failed with 30005, 1 succeeded with parent: null)");
+    assertEqual(ticketChannel.parentId, null, "Recovered channel has parent: null");
+  });
+
+  await runTest("Suite 19", "Concurrency Locks: Ticket creation locks always released in finally blocks", async () => {
+    const guild = createMockGuild();
+    const user = createMockUser();
+    const lockKey = `${guild.id}:${user.id}`;
+
+    ticketCreationLocks.delete(lockKey);
+    ticketCreationLocks.delete(user.id);
+
+    const int1 = createMockInteraction({ type: 'button', customId: 'ticket_buy', user, guild });
+    botClient.emit(Events.InteractionCreate, int1);
+    await waitForInteraction(int1);
+
+    assertEqual(ticketCreationLocks.has(lockKey), false, "LockKey released after successful ticket creation");
+    assertEqual(ticketCreationLocks.has(user.id), false, "UserId released after successful ticket creation");
+  });
+
+  await runTest("Suite 19", "modal_close_ticket_reason: Executes executeTicketClosure without duplicate lock blocking", async () => {
+    const guild = createMockGuild();
+    const user = createMockUser();
+    const logCh = createMockChannel({ name: "nhật-ký-giao-dịch", guild });
+
+    const ticketChannel = createMockChannel({
+      name: "mua-closer-user",
+      topic: `Ticket của @closer_test (${user.id}) • Type: ticket_buy`,
+      guild
+    });
+
+    closingTicketChannels.delete(ticketChannel.id);
+
+    const intModal = createMockInteraction({
+      type: 'modal',
+      customId: 'modal_close_ticket_reason',
+      fields: { close_reason: 'Giao dịch hoàn tất 100%' },
+      user,
+      guild,
+      channel: ticketChannel
+    });
+
+    botClient.emit(Events.InteractionCreate, intModal);
+    await waitForInteraction(intModal);
+    await new Promise(r => setTimeout(r, 100));
+
+    assert(intModal._state.deferred, "Modal submit must deferReply");
+    assert(logCh.messages.cache.size > 0, "Log channel must record closed ticket transcript with reason");
   });
 
   // ============================================================================

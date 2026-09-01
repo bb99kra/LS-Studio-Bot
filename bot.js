@@ -8,6 +8,7 @@ const {
   GatewayIntentBits,
   PermissionsBitField,
   ChannelType,
+  OverwriteType,
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
@@ -19,6 +20,7 @@ const {
   TextInputStyle,
   ActivityType,
   REST,
+  RESTEvents,
   Routes,
   SlashCommandBuilder,
   Events,
@@ -72,9 +74,64 @@ if (!_initialBankValidation.valid) {
   console.warn(`⚠️ [BANK_CONFIG Warning] ${_initialBankValidation.reason}`);
 }
 
+// =========================================================================
+// 0.1 CẤU TRÚC DỮ LIỆU EXPIRING LOCK MAP (AUTO-TTL & CONCURRENCY GUARD)
+// =========================================================================
+/**
+ * Cấu trúc Map tự động hết hạn (TTL) và tương thích ngược với Set (.add, .has, .delete)
+ * Chống rò rỉ bộ nhớ, chống deadlock và bảo vệ tài nguyên trên Discloud 100MB RAM
+ */
+class ExpiringLockMap extends Map {
+  constructor(ttlMs = 30000, maxSize = 1000) {
+    super();
+    this.ttlMs = ttlMs;
+    this.maxSize = maxSize;
+  }
+  add(key) {
+    if (this.size >= this.maxSize) {
+      this.pruneExpired();
+      if (this.size >= this.maxSize) {
+        const oldest = this.keys().next().value;
+        if (oldest !== undefined) this.delete(oldest);
+      }
+    }
+    this.set(key, Date.now());
+    return this;
+  }
+  has(key) {
+    if (!super.has(key)) return false;
+    const time = super.get(key);
+    if (typeof time === 'number' && Date.now() - time > this.ttlMs) {
+      super.delete(key);
+      return false;
+    }
+    return true;
+  }
+  get(key) {
+    if (!super.has(key)) return undefined;
+    const time = super.get(key);
+    if (typeof time === 'number' && Date.now() - time > this.ttlMs) {
+      super.delete(key);
+      return undefined;
+    }
+    return time;
+  }
+  pruneExpired(now = Date.now()) {
+    for (const [k, time] of super.entries()) {
+      if (typeof time === 'number' && now - time > this.ttlMs) {
+        super.delete(k);
+      }
+    }
+  }
+}
+
+// Giới hạn dung lượng bộ nhớ RAM Discloud (100MB RAM Optimization)
+const MAX_ACTIVE_ORDERS = 10000;
+const MAX_APPROVED_ORDERS = 1000;
+
 // Pool theo dõi mã đơn hàng trong RAM chống trùng lặp (Collision Guard) & chống duyệt trùng (Idempotency)
-const activeOrderCodes = new Map(); // orderCode -> { createdAt: number, pkgKey?: string, buyerId?: string }
-const processingApprovals = new Set(); // orderCode đang trong tiến trình duyệt
+const activeOrderCodes = new Map(); // orderCode -> { createdAt: number, pkgKey?: string, buyerId?: string, guildId?: string }
+const processingApprovals = new ExpiringLockMap(60000, 200); // orderCode đang trong tiến trình duyệt (TTL 60s)
 const approvedOrderCodes = new Set(); // orderCode đã duyệt thành công
 
 // Regex chuẩn nhận diện & bóc tách mã đơn hàng (hỗ trợ LS123456, LS-123456, LS 123456)
@@ -99,6 +156,12 @@ function generateUniqueOrderCode() {
     code = `LS${highEntropyHex}`;
   }
 
+  // Quản lý bộ nhớ: Giới hạn dung lượng activeOrderCodes (FIFO eviction)
+  if (activeOrderCodes.size >= MAX_ACTIVE_ORDERS) {
+    const oldestKey = activeOrderCodes.keys().next().value;
+    if (oldestKey !== undefined) activeOrderCodes.delete(oldestKey);
+  }
+
   // Lưu mã vào memory pool
   activeOrderCodes.set(code, { createdAt: Date.now() });
   return code;
@@ -113,7 +176,8 @@ function generateOrderCode() {
 function extractOrderCode(text) {
   if (text === null || text === undefined) return null;
   const str = typeof text === 'string' ? text : String(text);
-  const match = str.match(ORDER_CODE_REGEX);
+  const input = str.length > 10000 ? str.slice(0, 10000) : str;
+  const match = input.match(ORDER_CODE_REGEX);
   return match ? sanitizeOrderCode(match[1]) : null;
 }
 
@@ -121,6 +185,7 @@ function extractOrderCode(text) {
 function isValidOrderCode(code) {
   if (code === null || code === undefined) return false;
   const str = typeof code === 'string' ? code : String(code);
+  if (str.length > 50) return false;
   const cleaned = str
     .replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2066-\u2069\x00-\x1F\x7F-\x9F]/g, '')
     .trim()
@@ -166,7 +231,8 @@ function isNegotiatedPrice(amount) {
  */
 function sanitizeVietQRText(text, maxLength = 50) {
   if (text === null || text === undefined || typeof text === 'boolean') return '';
-  const str = typeof text === 'string' ? text : String(text);
+  const rawStr = typeof text === 'string' ? text : String(text);
+  const str = rawStr.length > 500 ? rawStr.slice(0, 500) : rawStr;
   if (!str.trim()) return '';
   
   const parsedMax = typeof maxLength === 'number' && Number.isFinite(maxLength) && maxLength > 0 ? Math.floor(maxLength) : 50;
@@ -199,7 +265,8 @@ function sanitizeVietQRText(text, maxLength = 50) {
  */
 function sanitizeCustomerName(name, maxLength = 32, fallback = 'Khách Hàng') {
   if (name === null || name === undefined) return fallback;
-  const str = typeof name === 'string' ? name : String(name);
+  const rawStr = typeof name === 'string' ? name : String(name);
+  const str = rawStr.length > 500 ? rawStr.slice(0, 500) : rawStr;
   const cleaned = str
     .normalize('NFKC')
     .replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2066-\u2069\x00-\x1F\x7F-\x9F]/g, '')
@@ -222,7 +289,8 @@ function sanitizeCustomerName(name, maxLength = 32, fallback = 'Khách Hàng') {
  */
 function sanitizeOrderCode(rawCode) {
   if (rawCode === null || rawCode === undefined) return null;
-  const str = typeof rawCode === 'string' ? rawCode : String(rawCode);
+  const rawStr = typeof rawCode === 'string' ? rawCode : String(rawCode);
+  const str = rawStr.length > 50 ? rawStr.slice(0, 50) : rawStr;
   const cleaned = str
     .replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2066-\u2069\x00-\x1F\x7F-\x9F]/g, '')
     .trim()
@@ -241,7 +309,8 @@ function sanitizeOrderCode(rawCode) {
  */
 function sanitizeModalInlineText(text, maxLength = 100, fallback = '') {
   if (text === null || text === undefined) return fallback;
-  let str = typeof text === 'string' ? text : String(text);
+  const rawStr = typeof text === 'string' ? text : String(text);
+  let str = rawStr.length > 2000 ? rawStr.slice(0, 2000) : rawStr;
   if (!str.trim()) return fallback;
   str = str.replace(/`/g, "'");
   str = str.replace(/\r?\n|\r/g, ' ');
@@ -261,7 +330,8 @@ function sanitizeModalInlineText(text, maxLength = 100, fallback = '') {
  */
 function sanitizeModalCodeBlockText(text, maxLength = 1024, fallback = '') {
   if (text === null || text === undefined) return fallback;
-  let str = typeof text === 'string' ? text : String(text);
+  const rawStr = typeof text === 'string' ? text : String(text);
+  let str = rawStr.length > 10000 ? rawStr.slice(0, 10000) : rawStr;
   if (!str.trim()) return fallback;
   str = str.replace(/```/g, "'''");
   str = str.replace(/@(everyone|here)/gi, '@ $1');
@@ -276,7 +346,8 @@ function sanitizeModalCodeBlockText(text, maxLength = 1024, fallback = '') {
  */
 function sanitizeDiscordChannelTopic(text, maxLength = 1024) {
   if (text === null || text === undefined) return '';
-  let str = typeof text === 'string' ? text : String(text);
+  const rawStr = typeof text === 'string' ? text : String(text);
+  let str = rawStr.length > 4000 ? rawStr.slice(0, 4000) : rawStr;
   str = str.replace(/```/g, "'''").trim();
   if (str.length > maxLength) {
     str = str.slice(0, maxLength);
@@ -292,7 +363,8 @@ function sanitizeDiscordChannelTopic(text, maxLength = 1024) {
  */
 function sanitizeTranscriptControlChars(text) {
   if (text === null || text === undefined) return '';
-  const str = typeof text === 'string' ? text : String(text);
+  const rawStr = typeof text === 'string' ? text : String(text);
+  const str = rawStr.length > 50000 ? rawStr.slice(0, 50000) : rawStr;
   return str
     // 1. Chuẩn hóa ký tự xuống dòng (\r\n, \r, \u2028, \u2029) thành \n chuẩn
     // Chống Carriage Return Injection (\r) ghi đè dòng trước trên terminal/cat logs
@@ -358,7 +430,8 @@ function sanitizeMarkdownForEmbed(text, maxLen = 1000) {
  */
 function redactSensitiveData(text) {
   if (!text || typeof text !== 'string') return text || '';
-  return text
+  const input = text.length > 10000 ? text.slice(0, 10000) : text;
+  return input
     // 1. Discord Bot Token & MFA tokens
     .replace(/\b(?:[a-zA-Z0-9_-]{24,28}\.[a-zA-Z0-9_-]{6,7}\.[a-zA-Z0-9_-]{27,38}|mfa\.[a-zA-Z0-9_-]{70,})\b/g, '***[REDACTED_DISCORD_TOKEN]***')
     // 2. Discord Webhook URL with secret token: https://discord.com/api/webhooks/12345/abcdef...
@@ -483,6 +556,7 @@ const pendingVietQRRequests = new Map(); // qrUrl -> Promise<Buffer|null>
 // Circuit Breaker / Negative Cache cho các URL lỗi/offline để tránh spam request liên tục khi ngân hàng/VietQR bảo trì
 const failedVietQRUrls = new Map(); // qrUrl -> { failedAt: number, reason: string }
 const VIETQR_FAILURE_TTL = 30 * 1000; // 30 giây cooldown nếu VietQR offline
+const VIETQR_FAILED_MAX_SIZE = 100; // Tối đa 100 URL lỗi trong RAM chống tràn bộ nhớ
 
 function getVietQRCacheStats() {
   return {
@@ -503,6 +577,16 @@ function clearVietQRCache() {
 // Aliases cho tên chuẩn
 const getVietQRBufferCacheStats = getVietQRCacheStats;
 const clearVietQRBufferCache = clearVietQRCache;
+
+// Helper: Lưu negative cache có giới hạn kích thước chống rò rỉ RAM
+function recordFailedVietQRUrl(url, reason) {
+  if (!url) return;
+  if (failedVietQRUrls.size >= VIETQR_FAILED_MAX_SIZE) {
+    const oldestKey = failedVietQRUrls.keys().next().value;
+    if (oldestKey !== undefined) failedVietQRUrls.delete(oldestKey);
+  }
+  failedVietQRUrls.set(url, { failedAt: Date.now(), reason: String(reason || 'Unknown error') });
+}
 
 // Xây dựng URL VietQR chuẩn RFC 3986 với URLSearchParams và sanitize an toàn
 function generateVietQRUrl({ bankId, accountNo, template = 'compact2', amount = null, addInfo = null, accountName = null } = {}) {
@@ -580,13 +664,13 @@ async function fetchVietQRBuffer(qrUrl) {
       // 1. Kiểm tra content-type bắt buộc phải là image (tránh nhận nhầm HTML/JSON error từ CDN)
       if (contentType && !contentType.startsWith('image/')) {
         console.warn(`⚠️ [VietQR Warning] Phản hồi từ ${qrUrl} không phải ảnh (${contentType}). Chuyển sang fallback URL.`);
-        failedVietQRUrls.set(qrUrl, { failedAt: Date.now(), reason: `Invalid contentType: ${contentType}` });
+        recordFailedVietQRUrl(qrUrl, `Invalid contentType: ${contentType}`);
         return null;
       }
 
       if (!res.data || res.data.length < 500) {
         console.warn(`⚠️ [VietQR Warning] Dữ liệu ảnh quá nhỏ (${res.data?.length || 0} bytes).`);
-        failedVietQRUrls.set(qrUrl, { failedAt: Date.now(), reason: 'Payload too small' });
+        recordFailedVietQRUrl(qrUrl, 'Payload too small');
         return null;
       }
 
@@ -600,7 +684,7 @@ async function fetchVietQRBuffer(qrUrl) {
 
       if (!isPng && !isJpeg && !isGif && !isWebp) {
         console.warn(`⚠️ [VietQR Warning] Định dạng Magic Bytes không phải ảnh từ ${qrUrl}. Có thể là HTML error page trả về status 200.`);
-        failedVietQRUrls.set(qrUrl, { failedAt: Date.now(), reason: 'Invalid magic bytes' });
+        recordFailedVietQRUrl(qrUrl, 'Invalid magic bytes');
         return null;
       }
 
@@ -621,7 +705,7 @@ async function fetchVietQRBuffer(qrUrl) {
       return buffer;
     } catch (err) {
       console.warn(`⚠️ [VietQR Network Warning] Không thể tải buffer từ ${qrUrl} (${err.message}). Tự động fallback sang Direct URL.`);
-      failedVietQRUrls.set(qrUrl, { failedAt: Date.now(), reason: err.message });
+      recordFailedVietQRUrl(qrUrl, err.message);
       return null;
     } finally {
       pendingVietQRRequests.delete(qrUrl);
@@ -854,6 +938,16 @@ process.on('uncaughtExceptionMonitor', (error, origin) => {
 // =========================================================================
 // 2. CLIENT INITIALIZATION & INTENTS
 // =========================================================================
+/**
+ * Gateway Intents Audit & Validation:
+ * - GatewayIntentBits.Guilds (Non-Privileged): Cần thiết cho cấu trúc Guild, Kênh, Role, Ticket.
+ * - GatewayIntentBits.GuildMessages (Non-Privileged): Cần thiết cho MessageCreate & MessageUpdate (AutoMod).
+ * - GatewayIntentBits.GuildMembers (Privileged): Cần thiết cho GuildMemberAdd (Chào mừng + Tự cấp role) & GuildMemberRemove (Tạm biệt).
+ * - GatewayIntentBits.MessageContent (Privileged): Cần thiết cho AutoMod (quét link mời Discord & chống ping @everyone/@here).
+ * 
+ * Lưu ý: Các Privileged Intents (GuildMembers, MessageContent) BẮT BUỘC phải được bật trong
+ * Discord Developer Portal (Applications -> Bot -> Privileged Gateway Intents).
+ */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -905,7 +999,42 @@ const client = new Client({
   })
 });
 
-// Bắt các sự kiện lỗi từ Discord Client
+// =========================================================================
+// 2.1. DISCORD REST EVENTS & RATE LIMIT MONITORING
+// =========================================================================
+// Lắng nghe sự kiện rateLimited trên client.rest để giám sát chi tiết rate-limit của Discord API
+client.rest.on(RESTEvents.RateLimited, (rateLimitData) => {
+  const {
+    timeToReset = 0,
+    limit = 0,
+    method = 'UNKNOWN',
+    route = 'UNKNOWN',
+    url = '',
+    global: isGlobal = false,
+    majorParameter = ''
+  } = rateLimitData || {};
+
+  const routeOrUrl = route !== 'UNKNOWN' ? route : (url || 'UNKNOWN');
+  console.warn(
+    `⏳ [REST Rate Limit Hit] ${isGlobal ? '🌐 GLOBAL' : '📍 ROUTE'} | ` +
+    `Method: ${String(method).toUpperCase()} | Route: ${routeOrUrl} | ` +
+    `Retry-After: ${timeToReset}ms | Bucket Limit: ${limit} | MajorParam: ${majorParameter || 'N/A'}`
+  );
+});
+
+// Giám sát các yêu cầu không hợp lệ có nguy cơ bị Cloudflare tạm khóa IP (10,000 invalid requests / 10 phút)
+client.rest.on(RESTEvents.InvalidRequestWarning, (warningData) => {
+  const { count = 0, remainingTime = 0 } = warningData || {};
+  console.warn(
+    `⚠️ [REST Invalid Request Warning] Phát hiện ${count} yêu cầu không hợp lệ (401/403/429). ` +
+    `Thời gian reset: ${remainingTime}ms (Cảnh báo nguy cơ Cloudflare IP Block nếu vượt ngưỡng)`
+  );
+});
+
+// =========================================================================
+// 2.2. DISCORD GATEWAY RESILIENCE & WEBSOCKET EVENT HANDLERS
+// =========================================================================
+// Bắt các sự kiện lỗi và cảnh báo từ Discord Client
 client.on(Events.Error, (error) => {
   console.error('❌ [Discord Client Error]:', error);
 });
@@ -916,6 +1045,49 @@ client.on(Events.Warn, (info) => {
 
 client.on(Events.ShardError, (error, shardId) => {
   console.error(`❌ [Discord Shard ${shardId} Error]:`, error);
+});
+
+// Xử lý khi Shard WebSocket bị ngắt kết nối và giải mã mã đóng kết nối (Gateway Close Codes)
+client.on(Events.ShardDisconnect, (event, shardId) => {
+  const code = event?.code || 0;
+  const reason = event?.reason || 'No reason provided';
+  console.warn(`🔌 [Discord Shard ${shardId} Disconnected] WebSocket closed with code ${code}: ${reason}`);
+
+  if (code === 4004) {
+    console.error('💥 [CRITICAL 4004] Discord Token không hợp lệ. Vui lòng kiểm tra lại DISCORD_TOKEN trong .env hoặc token.local.js!');
+  } else if (code === 4014) {
+    console.error(
+      '💥 [CRITICAL 4014 - Disallowed Intents] Bot yêu cầu Privileged Intents (GuildMembers / MessageContent) ' +
+      'nhưng chưa được bật trong Discord Developer Portal (Bot -> Privileged Gateway Intents)!'
+    );
+  } else if (code === 4013) {
+    console.error('💥 [CRITICAL 4013] Cấu hình Gateway Intents không hợp lệ.');
+  } else if (code === 4011) {
+    console.error('💥 [CRITICAL 4011] Sharding required: Bot tham gia trên 2500 máy chủ và bắt buộc cấu hình Sharding.');
+  } else if (code === 4010) {
+    console.error('💥 [CRITICAL 4010] Shard ID không hợp lệ.');
+  }
+});
+
+// Ghi nhận tiến trình kết nối lại WebSocket
+client.on(Events.ShardReconnecting, (shardId) => {
+  console.log(`🔄 [Discord Shard ${shardId} Reconnecting] Đang kết nối lại Discord Gateway WebSocket...`);
+});
+
+// Ghi nhận khi Shard phục hồi phiên làm việc thành công (Session Resume)
+client.on(Events.ShardResume, (shardId, replayedEvents) => {
+  console.log(`✅ [Discord Shard ${shardId} Resumed] Kết nối Gateway đã khôi phục thành công (Replayed ${replayedEvents} events).`);
+});
+
+// Ghi nhận khi Shard đã sẵn sàng
+client.on(Events.ShardReady, (shardId, unavailableGuilds) => {
+  const unavailCount = unavailableGuilds ? unavailableGuilds.size : 0;
+  console.log(`🚀 [Discord Shard ${shardId} Ready] Shard đã sẵn sàng hoạt động${unavailCount > 0 ? ` (${unavailCount} guilds unavailable)` : ''}.`);
+});
+
+// Ghi nhận khi phiên làm việc bị vô hiệu hóa
+client.on(Events.Invalidated, () => {
+  console.error('❌ [Discord Session Invalidated] Phiên kết nối Gateway đã bị vô hiệu hóa.');
 });
 
 // =========================================================================
@@ -953,17 +1125,16 @@ async function registerCommands(clientId) {
     console.warn('⚠️ Chưa cấu hình DISCORD_TOKEN hợp lệ. Bỏ qua đăng ký Slash Commands.');
     return;
   }
-  const rest = new REST({ version: '10' }).setToken(TOKEN);
   try {
     console.log('🔄 Đang đồng bộ Slash Commands...');
     if (GUILD_ID) {
-      await rest.put(
+      await client.rest.put(
         Routes.applicationGuildCommands(clientId, GUILD_ID),
         { body: commands }
       );
       console.log(`✅ Guild Slash Commands đã sẵn sàng cho Guild ID: ${GUILD_ID}!`);
     } else {
-      await rest.put(
+      await client.rest.put(
         Routes.applicationCommands(clientId),
         { body: commands }
       );
@@ -1080,8 +1251,9 @@ const HOMOGLYPH_REGEX = new RegExp(Object.keys(HOMOGLYPH_MAP).join('|'), 'gi');
  */
 function normalizeAntiSpamText(text) {
   if (!text || typeof text !== 'string') return '';
+  const input = text.length > 10000 ? text.slice(0, 10000) : text;
   
-  let normalized = text.normalize('NFKC');
+  let normalized = input.normalize('NFKC');
 
   normalized = normalized.replace(HOMOGLYPH_REGEX, (matched) => {
     const lower = matched.toLowerCase();
@@ -1108,20 +1280,25 @@ function normalizeAntiSpamText(text) {
  */
 function extractAllLinkTargets(rawText) {
   if (!rawText || typeof rawText !== 'string') return [];
-  const targets = [rawText];
+  const input = rawText.length > 10000 ? rawText.slice(0, 10000) : rawText;
+  const targets = [input];
 
   // Bóc tách Markdown Masked Links: [label](url) hoặc [label](<url>)
   const markdownLinkRegex = /\[([^\]]*)\]\(\s*<?([^\s>)]+)>?\s*(?:"[^"]*")?\)/gi;
   let match;
-  while ((match = markdownLinkRegex.exec(rawText)) !== null) {
+  let count = 0;
+  while ((match = markdownLinkRegex.exec(input)) !== null && count < 10) {
     if (match[1]) targets.push(match[1]); // Visible anchor text
     if (match[2]) targets.push(match[2]); // Hidden URL target
+    count++;
   }
 
   // Bóc tách URL trong dấu <url>
-  const angleBracketRegex = /<\s*(https?:\/\/[^\s>]+|[a-zA-Z0-9_\-\.]+\.[a-zA-Z]{2,}\/[^\s>]+)\s*>/gi;
-  while ((match = angleBracketRegex.exec(rawText)) !== null) {
+  const angleBracketRegex = /<\s*(https?:\/\/[^\s>]+|[a-zA-Z0-9_\-]+(?:\.[a-zA-Z0-9_\-]+)*\.[a-zA-Z]{2,}\/[^\s>]+)\s*>/gi;
+  count = 0;
+  while ((match = angleBracketRegex.exec(input)) !== null && count < 10) {
     if (match[1]) targets.push(match[1]);
+    count++;
   }
 
   return targets;
@@ -1156,8 +1333,9 @@ async function safeDeleteMessage(msg) {
  */
 function containsDiscordInvite(rawContent) {
   if (!rawContent || typeof rawContent !== 'string') return false;
+  const input = rawContent.length > 10000 ? rawContent.slice(0, 10000) : rawContent;
 
-  const targetTexts = extractAllLinkTargets(rawContent);
+  const targetTexts = extractAllLinkTargets(input);
 
   const invitePatternStandard = /(?:https?:\/\/)?(?:www\s*[\.\(\[\{]\s*)?(?:(?:discord\s*(?:app)?\s*[\.\(\[\{]\s*(?:gg|com\s*[\/\\]+\s*(?:invite|servers)|io|me|li|link|gift))|(?:dsc|invite)\s*[\.\(\[\{]\s*gg|dis\s*[\.\(\[\{]\s*gd)\s*[\/\\]+\s*[a-zA-Z0-9_\-\+]+/i;
   
@@ -1208,6 +1386,10 @@ function containsEveryonePing(message) {
 
   let text = typeof message === 'string' ? message : message.content;
   if (!text || typeof text !== 'string') return false;
+
+  if (text.length > 10000) {
+    text = text.slice(0, 10000);
+  }
 
   // 1. Loại bỏ code block (```...```) và inline code (`...`) TRƯỚC KHI normalize (Phòng chống false positive trong code)
   text = text.replace(/```[\s\S]*?(?:```|$)/g, ' ');
@@ -1435,33 +1617,11 @@ client.on(Events.GuildMemberRemove, async (member) => {
 // =========================================================================
 // 🔒 BẢO VỆ CONCURRENCY, RATE LIMIT & CHỐNG RÒ RỈ BỘ NHỚ (MEMORY LEAKS)
 // =========================================================================
-/**
- * Cấu trúc Map tự động hết hạn (TTL) và tương thích ngược với Set (.add, .has, .delete)
- * Chống rò rỉ bộ nhớ và chống deadlock vĩnh viễn khi tạo Ticket
- */
-class ExpiringLockMap extends Map {
-  constructor(ttlMs = 30000) {
-    super();
-    this.ttlMs = ttlMs;
-  }
-  add(key) {
-    this.set(key, Date.now());
-    return this;
-  }
-  has(key) {
-    if (!super.has(key)) return false;
-    const time = super.get(key);
-    if (Date.now() - time > this.ttlMs) {
-      super.delete(key);
-      return false;
-    }
-    return true;
-  }
-}
 
-const ticketCreationLocks = new ExpiringLockMap(30000);
-const closingTicketChannels = new Set(); // Kênh ticket đang trong tiến trình đóng & xuất transcript
+const ticketCreationLocks = new ExpiringLockMap(30000, 500);
+const closingTicketChannels = new ExpiringLockMap(60000, 200); // Kênh ticket đang trong tiến trình đóng & xuất transcript (TTL 60s, Auto-expiry)
 const userCooldowns = new Map();
+const MAX_USER_COOLDOWNS = 1000;
 
 /**
  * Tính thời gian cooldown/rate limit còn lại
@@ -1494,15 +1654,15 @@ function getRateLimitRemaining(targetOrGuildId, userIdOrCooldown = 5000, maybeCo
     return Math.ceil((cooldownMs - (now - lastTime)) / 1000);
   }
 
-  // Bảo vệ giới hạn dung lượng bộ nhớ (Max 5,000 entries) chống memory explosion khi bị spam
-  if (userCooldowns.size > 5000) {
+  // Bảo vệ giới hạn dung lượng bộ nhớ (Max 1,000 entries) tối ưu cho Discloud 100MB RAM
+  if (userCooldowns.size >= MAX_USER_COOLDOWNS) {
     for (const [k, time] of userCooldowns.entries()) {
       if (now - time > 60000) {
         userCooldowns.delete(k);
       }
     }
-    if (userCooldowns.size > 5000) {
-      const oldestKeys = Array.from(userCooldowns.keys()).slice(0, 1000);
+    if (userCooldowns.size >= MAX_USER_COOLDOWNS) {
+      const oldestKeys = Array.from(userCooldowns.keys()).slice(0, 200);
       for (const k of oldestKeys) userCooldowns.delete(k);
     }
   }
@@ -1511,38 +1671,116 @@ function getRateLimitRemaining(targetOrGuildId, userIdOrCooldown = 5000, maybeCo
   return 0;
 }
 
-// Định kỳ dọn dẹp các mục cooldown, locks & mã đơn hàng đã hết hạn để tránh rò rỉ bộ nhớ (Memory Leak Prevention)
+/**
+ * Dọn dẹp cache bộ nhớ chủ động và giải phóng RAM cho Discloud 100MB limit
+ * @param {'soft'|'hard'|'critical'} level - Mức độ dọn dẹp cache
+ */
+function flushMemoryCaches(level = 'soft') {
+  const now = Date.now();
+  
+  // 1. Dọn dẹp VietQR buffers
+  if (level === 'hard' || level === 'critical') {
+    vietQRBufferCache.clear();
+    failedVietQRUrls.clear();
+    pendingVietQRRequests.clear();
+  } else {
+    for (const [url, item] of vietQRBufferCache.entries()) {
+      if (now - (item.cachedAt || 0) > 3 * 60 * 1000) {
+        vietQRBufferCache.delete(url);
+      }
+    }
+  }
+
+  // 2. Dọn dẹp tin nhắn trong cache của các kênh Discord
+  if (client?.channels?.cache) {
+    for (const channel of client.channels.cache.values()) {
+      if (channel?.messages?.cache) {
+        channel.messages.cache.clear();
+      }
+    }
+  }
+
+  // 3. Dọn dẹp Member Cache khi chạm ngưỡng Critical
+  if ((level === 'hard' || level === 'critical') && client?.guilds?.cache) {
+    for (const guild of client.guilds.cache.values()) {
+      if (guild?.members?.cache) {
+        for (const [id] of guild.members.cache.entries()) {
+          if (id !== client.user?.id) {
+            guild.members.cache.delete(id);
+          }
+        }
+      }
+    }
+  }
+
+  // 4. Kích hoạt V8 Garbage Collection nếu cờ --expose-gc khả dụng
+  if (global.gc) {
+    try {
+      global.gc();
+    } catch (_) {}
+  }
+}
+
+/**
+ * Lấy thông số chi tiết về RAM footprint và số lượng phần tử trong các cấu trúc bộ nhớ
+ */
+function getMemoryFootprint() {
+  const mem = process.memoryUsage();
+  return {
+    rssMB: +(mem.rss / 1024 / 1024).toFixed(2),
+    heapTotalMB: +(mem.heapTotal / 1024 / 1024).toFixed(2),
+    heapUsedMB: +(mem.heapUsed / 1024 / 1024).toFixed(2),
+    externalMB: +(mem.external / 1024 / 1024).toFixed(2),
+    arrayBuffersMB: +(mem.arrayBuffers / 1024 / 1024).toFixed(2),
+    collections: {
+      activeOrders: activeOrderCodes.size,
+      approvedOrders: approvedOrderCodes.size,
+      processingApprovals: processingApprovals.size,
+      ticketLocks: ticketCreationLocks.size,
+      closingTickets: closingTicketChannels.size,
+      userCooldowns: userCooldowns.size,
+      vietQRCache: vietQRBufferCache.size,
+      failedVietQR: failedVietQRUrls.size,
+      pendingRequests: pendingVietQRRequests.size
+    }
+  };
+}
+
+// Định kỳ dọn dẹp các mục cooldown, locks & mã đơn hàng đã hết hạn để tránh rò rỉ bộ nhớ (Discloud 100MB Watchdog)
 let cleanupInterval = setInterval(() => {
   const now = Date.now();
-  // 1. Dọn dẹp cooldowns quá hạn
+  
+  // 1. Dọn dẹp user cooldowns quá hạn (>60s)
   for (const [key, time] of userCooldowns.entries()) {
     if (now - time > 60000) {
       userCooldowns.delete(key);
     }
   }
 
-  // 2. Dọn dẹp các lock tạo ticket bị treo quá TTL (30s)
-  for (const [lockKey, lockTime] of ticketCreationLocks.entries()) {
-    if (now - lockTime > ticketCreationLocks.ttlMs) {
-      ticketCreationLocks.delete(lockKey);
-    }
-  }
+  // 2. Dọn dẹp lock tạo ticket, ticket closing & processing approvals quá hạn TTL
+  ticketCreationLocks.pruneExpired(now);
+  closingTicketChannels.pruneExpired(now);
+  processingApprovals.pruneExpired(now);
 
-  // 3. Dọn dẹp mã đơn hàng cũ hơn 48 giờ
-  const ORDER_TTL = 48 * 60 * 60 * 1000;
+  // 3. Dọn dẹp mã đơn hàng cũ hơn 24 giờ & giới hạn dung lượng Map
+  const ORDER_TTL = 24 * 60 * 60 * 1000;
   for (const [code, data] of activeOrderCodes.entries()) {
     if (now - (data.createdAt || 0) > ORDER_TTL) {
       activeOrderCodes.delete(code);
     }
   }
+  if (activeOrderCodes.size > MAX_ACTIVE_ORDERS) {
+    const toRemove = Array.from(activeOrderCodes.keys()).slice(0, 200);
+    for (const c of toRemove) activeOrderCodes.delete(c);
+  }
 
   // 4. Giới hạn approvedOrderCodes chống rò rỉ RAM dài hạn (Discloud 100MB RAM Guard)
-  if (approvedOrderCodes.size > 1000) {
-    const toRemove = Array.from(approvedOrderCodes).slice(0, 200);
+  if (approvedOrderCodes.size > MAX_APPROVED_ORDERS) {
+    const toRemove = Array.from(approvedOrderCodes).slice(0, 100);
     for (const c of toRemove) approvedOrderCodes.delete(c);
   }
 
-  // 5. Dọn dẹp cache ảnh VietQR & failure cache quá hạn
+  // 5. Dọn dẹp cache ảnh VietQR & negative failure cache quá hạn
   for (const [url, item] of vietQRBufferCache.entries()) {
     if (now - (item.cachedAt || 0) > VIETQR_CACHE_TTL) {
       vietQRBufferCache.delete(url);
@@ -1554,19 +1792,20 @@ let cleanupInterval = setInterval(() => {
     }
   }
 
-  // 6. Cảnh báo và bảo vệ bộ nhớ Discloud (100MB limit)
+  // 6. Two-Tier Discloud 100MB RAM Watchdog & Auto-Garbage Collection
   const mem = process.memoryUsage();
-  if (mem.rss > 85 * 1024 * 1024) {
-    const rssMB = (mem.rss / 1024 / 1024).toFixed(1);
-    const heapUsedMB = (mem.heapUsed / 1024 / 1024).toFixed(1);
-    console.warn(`⚠️ [Discloud RAM Guard] Cảnh báo RSS cao: ${rssMB}MB (Heap: ${heapUsedMB}MB). Đang kích hoạt dọn dẹp...`);
-    vietQRBufferCache.clear();
-    failedVietQRUrls.clear();
-    if (global.gc) {
-      try { global.gc(); } catch (_) {}
-    }
+  const rssMB = +(mem.rss / 1024 / 1024).toFixed(1);
+  const heapUsedMB = +(mem.heapUsed / 1024 / 1024).toFixed(1);
+
+  if (mem.rss >= 80 * 1024 * 1024) {
+    console.warn(`🚨 [Discloud 100MB RAM Guard] Critical RSS Memory: ${rssMB}MB (Heap: ${heapUsedMB}MB). Đang kích hoạt Hard Cache Flush & GC...`);
+    flushMemoryCaches('critical');
+  } else if (mem.rss >= 65 * 1024 * 1024) {
+    console.warn(`⚠️ [Discloud 100MB RAM Guard] High RSS Memory: ${rssMB}MB (Heap: ${heapUsedMB}MB). Đang kích hoạt Soft Cache Flush...`);
+    flushMemoryCaches('soft');
   }
-}, 5 * 60 * 1000).unref();
+}, 60 * 1000);
+if (cleanupInterval?.unref) cleanupInterval.unref();
 
 // =========================================================================
 // 5. HELPER: XỬ LÝ TIMEZONE, TRÍCH XUẤT TRANSCRIPT & GIỚI HẠN FILE KÍCH THƯỚC LỚN
@@ -2395,19 +2634,27 @@ function buildPackageSelectMenu(userId, lang = 'vi') {
   return menu;
 }
 
-// Helper: Khởi tạo kênh Ticket an toàn với đầy đủ phân quyền và kiểm tra trùng lặp
+// Helper: Khởi tạo kênh Ticket an toàn với đầy đủ phân quyền, kiểm tra trùng lặp và phục hồi lỗi giới hạn kênh Discord
 async function createTicketChannel({ guild, user, ticketType = '🛒-mua', customTopic = null }) {
   if (!guild) {
     throw new Error("Không tìm thấy thông tin máy chủ Discord (Guild)! / Guild not found.");
   }
 
-  // 1. Kiểm tra quyền ManageChannels của Bot
+  // 1. Kiểm tra giới hạn 500 kênh tối đa của Guild (Discord Guild Channel Limit)
+  const totalGuildChannels = guild.channels?.cache ? guild.channels.cache.size : 0;
+  if (totalGuildChannels >= 500) {
+    const limitErr = new Error("Máy chủ đã đạt giới hạn tối đa 500 kênh của Discord! Vui lòng liên hệ Quản trị viên xóa bớt các kênh cũ.");
+    limitErr.code = 30013;
+    throw limitErr;
+  }
+
+  // 2. Kiểm tra quyền ManageChannels của Bot
   const botMember = guild.members.me || await guild.members.fetchMe().catch(() => null);
   if (!botMember || !botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
     throw new Error("Bot thiếu quyền `Manage Channels` (Quản Lý Kênh) để tạo Ticket! Vui lòng liên hệ Quản trị viên cấp quyền.");
   }
 
-  // 2. Kiểm tra Duplicate Ticket: Quét các channel còn tồn tại xem user đã có ticket chưa (bằng topic)
+  // 3. Kiểm tra Duplicate Ticket: Quét các channel còn tồn tại xem user đã có ticket chưa (bằng topic)
   const existingTicket = guild.channels.cache.find(c => 
     c && 
     !c.deleted &&
@@ -2419,13 +2666,13 @@ async function createTicketChannel({ guild, user, ticketType = '🛒-mua', custo
     return { existingTicket, ticketChannel: null, staffMentionString: "" };
   }
 
-  // 3. Xử lý tên kênh an toàn chống ký tự đặc biệt / rỗng
+  // 4. Xử lý tên kênh an toàn chống ký tự đặc biệt / rỗng
   const sanitizedUsername = (user.username || 'user').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12);
   const userSuffix = user.id.slice(-4);
   const safeName = sanitizedUsername.length >= 2 ? `${sanitizedUsername}-${userSuffix}` : `user-${userSuffix}`;
   const channelName = `${ticketType}-${safeName}`;
 
-  // 4. Tìm danh mục Ticket
+  // 5. Tìm danh mục Ticket và kiểm tra giới hạn 50 kênh / category (Discord Category Limit)
   const ticketCat = guild.channels.cache.find(c => 
     c &&
     !c.deleted &&
@@ -2438,9 +2685,30 @@ async function createTicketChannel({ guild, user, ticketType = '🛒-mua', custo
     )
   );
 
-  // 5. Lấy tất cả các Role Staff / Developer / Founder / Admin
+  let targetParentId = null;
+  if (ticketCat) {
+    const catChildCount = guild.channels.cache.filter(c => c && !c.deleted && c.parentId === ticketCat.id).size;
+    if (catChildCount < 50) {
+      targetParentId = ticketCat.id;
+    } else {
+      console.warn(`⚠️ [Category Limit] Danh mục "${ticketCat.name}" đã đạt 50 kênh! Tìm kiếm danh mục ticket khác còn chỗ...`);
+      const altCat = guild.channels.cache.find(c =>
+        c && !c.deleted && c.id !== ticketCat.id && c.type === ChannelType.GuildCategory &&
+        (c.name.includes("MUA HÀNG") || c.name.includes("HỖ TRỢ") || c.name.toLowerCase().includes("ticket")) &&
+        guild.channels.cache.filter(ch => ch && !ch.deleted && ch.parentId === c.id).size < 50
+      );
+      if (altCat) {
+        targetParentId = altCat.id;
+      } else {
+        console.warn(`⚠️ [Category Limit] Không còn danh mục Ticket nào dưới 50 kênh. Tự động fallback tạo ticket ở root level (không parent).`);
+        targetParentId = null;
+      }
+    }
+  }
+
+  // 6. Lấy tất cả các Role Staff / Developer / Founder / Admin
   let staffRoles = guild.roles.cache.filter(r => 
-    r && r.name && (
+    r && r.name && !r.managed && r.id !== guild.id && (
       r.name.includes("Staff") || 
       r.name.includes("Developer") || 
       r.name.includes("Founder") || 
@@ -2452,7 +2720,7 @@ async function createTicketChannel({ guild, user, ticketType = '🛒-mua', custo
     const fetchedRoles = await guild.roles.fetch().catch(() => null);
     if (fetchedRoles) {
       staffRoles = fetchedRoles.filter(r => 
-        r && r.name && (
+        r && r.name && !r.managed && r.id !== guild.id && (
           r.name.includes("Staff") || 
           r.name.includes("Developer") || 
           r.name.includes("Founder") || 
@@ -2469,10 +2737,16 @@ async function createTicketChannel({ guild, user, ticketType = '🛒-mua', custo
   const overwrites = [
     {
       id: everyoneRoleId,
-      deny: [PermissionsBitField.Flags.ViewChannel]
+      type: OverwriteType.Role,
+      deny: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory
+      ]
     },
     {
       id: targetUserId,
+      type: OverwriteType.Member,
       allow: [
         PermissionsBitField.Flags.ViewChannel,
         PermissionsBitField.Flags.SendMessages,
@@ -2484,6 +2758,7 @@ async function createTicketChannel({ guild, user, ticketType = '🛒-mua', custo
     },
     {
       id: botUserId,
+      type: OverwriteType.Member,
       allow: [
         PermissionsBitField.Flags.ViewChannel,
         PermissionsBitField.Flags.SendMessages,
@@ -2500,6 +2775,7 @@ async function createTicketChannel({ guild, user, ticketType = '🛒-mua', custo
   staffRoles.forEach(role => {
     overwrites.push({
       id: role.id,
+      type: OverwriteType.Role,
       allow: [
         PermissionsBitField.Flags.ViewChannel,
         PermissionsBitField.Flags.SendMessages,
@@ -2515,13 +2791,32 @@ async function createTicketChannel({ guild, user, ticketType = '🛒-mua', custo
   const safeUsername = sanitizeCustomerName(user?.tag || user?.username, 32, 'user');
   const topic = sanitizeDiscordChannelTopic(customTopic || `Ticket của @${safeUsername} (${user?.id || 'id'}) • Type: ${ticketType}`);
 
-  const ticketChannel = await guild.channels.create({
-    name: channelName,
-    type: ChannelType.GuildText,
-    parent: ticketCat ? ticketCat.id : null,
-    topic: topic,
-    permissionOverwrites: overwrites
-  });
+  let ticketChannel;
+  try {
+    ticketChannel = await guild.channels.create({
+      name: channelName,
+      type: ChannelType.GuildText,
+      parent: targetParentId,
+      topic: topic,
+      permissionOverwrites: overwrites,
+      reason: `LS Studio - Ticket created for ${user?.tag || user?.id}`
+    });
+  } catch (createErr) {
+    // Tự động phục hồi khi category bị vượt quá 50 kênh từ phía Discord API (Code 30005)
+    if (createErr.code === 30005 && targetParentId) {
+      console.warn(`⚠️ [Channel Limit Recovery] Discord trả về lỗi 30005 (Category 50 limit). Tự động fallback tạo ticket ở root level không có parent.`);
+      ticketChannel = await guild.channels.create({
+        name: channelName,
+        type: ChannelType.GuildText,
+        parent: null,
+        topic: topic,
+        permissionOverwrites: overwrites,
+        reason: `LS Studio - Ticket created for ${user?.tag || user?.id} (Fallback root level)`
+      });
+    } else {
+      throw createErr;
+    }
+  }
 
   const staffMentionString = staffRoles.size > 0 
     ? Array.from(staffRoles.values()).map(r => `<@&${r.id}>`).join(' ')
@@ -3342,9 +3637,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         ticketCreationLocks.add(lockKey);
         ticketCreationLocks.add(user.id);
-        await safeDeferReply(interaction, { ephemeral: true });
 
         try {
+          await safeDeferReply(interaction, { ephemeral: true });
           const { existingTicket, ticketChannel, staffMentionString } = await createTicketChannel({
             guild,
             user,
@@ -4198,7 +4493,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (closingTicketChannels.has(channel.id)) {
           return safeReply(interaction, { content: "⏳ Kênh ticket này đang trong tiến trình đóng và lưu transcript...", ephemeral: true });
         }
-        closingTicketChannels.add(channel.id);
 
         await safeDeferReply(interaction, { ephemeral: true });
 
@@ -4311,11 +4605,27 @@ function handleGracefulShutdown(signal) {
     cleanupInterval = null;
   }
   ticketCreationLocks.clear();
+  closingTicketChannels.clear();
+  processingApprovals.clear();
+  approvedOrderCodes.clear();
+  activeOrderCodes.clear();
   userCooldowns.clear();
   vietQRBufferCache.clear();
   failedVietQRUrls.clear();
   pendingVietQRRequests.clear();
-  client.destroy();
+
+  if (client && typeof client.destroy === 'function') {
+    try {
+      client.destroy();
+    } catch (_) {}
+  }
+
+  if (global.gc) {
+    try {
+      global.gc();
+    } catch (_) {}
+  }
+
   console.log('✅ Đã giải phóng bộ nhớ, ngắt kết nối Discord và thoát tiến trình sạch sẽ.');
   process.exit(0);
 }
@@ -4377,6 +4687,7 @@ module.exports = {
   createCloseTicketReasonModal,
   createFeedbackModal,
   createTicketChannel,
+  ExpiringLockMap,
   ticketCreationLocks,
   closingTicketChannels,
   userCooldowns,
@@ -4393,6 +4704,12 @@ module.exports = {
   pendingVietQRRequests,
   clearVietQRCache,
   getVietQRCacheStats,
+  flushMemoryCaches,
+  getMemoryFootprint,
+  MAX_ACTIVE_ORDERS,
+  MAX_APPROVED_ORDERS,
+  MAX_USER_COOLDOWNS,
+  VIETQR_FAILED_MAX_SIZE,
   safeDeleteMessage,
   handleAutoMod,
   IGNORABLE_INTERACTION_ERROR_CODES,
