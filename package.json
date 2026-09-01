@@ -4,7 +4,8 @@
   "description": "Discord Bot & Shop System for LS Studio",
   "main": "bot.js",
   "scripts": {
-    "start": "node bot.js",
+    "start": "node --max-old-space-size=80 bot.js",
+    "start:prod": "node --max-old-space-size=80 --optimize-for-size bot.js",
     "inspect:ls": "node inspect_ls.js",
     "inspect:nguyen": "node inspect_nguyen_smp.js",
     "discloud:commit": "node commit_discloud.js",

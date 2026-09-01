@@ -1,20 +1,31 @@
-require('dotenv').config({ path: path.join(__dirname, '.env') });
-const fs = require('fs');
 const path = require('path');
+const fs = require('fs');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { PNG } = require('pngjs');
+
+// Safety limits for memory management (optimized for memory-constrained environments e.g., 80-100MB Node heaps)
+const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB max input file size
+const MAX_IMAGE_DIMENSION = 4096; // 4096px max width / height
+const MAX_TOTAL_PIXELS = 4096 * 4096; // 16,777,216 max pixels (~67MB RGBA buffer)
+const MIN_PNG_FILE_SIZE = 29; // 8 bytes signature + 12 bytes IHDR chunk wrapper + 9 bytes min IHDR payload
 
 /**
  * Searches for an existing file from a list of candidate paths.
+ * Safely probes filesystem without leaking descriptors.
  * @param {string[]} candidates
  * @returns {string|null}
  */
 function findCandidateFile(candidates) {
+  if (!Array.isArray(candidates)) return null;
   for (const candidate of candidates) {
-    if (!candidate) continue;
+    if (!candidate || typeof candidate !== 'string') continue;
     try {
       const resolved = path.resolve(candidate);
-      if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
-        return resolved;
+      if (fs.existsSync(resolved)) {
+        const stats = fs.statSync(resolved);
+        if (stats.isFile() && stats.size > 0 && stats.size <= MAX_FILE_SIZE_BYTES) {
+          return resolved;
+        }
       }
     } catch {
       // Ignore filesystem access errors during path probing
@@ -25,11 +36,11 @@ function findCandidateFile(candidates) {
 
 /**
  * Determines a suitable writable output directory.
- * @param {string|null} customDir
+ * @param {string|null} [customDir]
  * @returns {string}
  */
 function resolveOutputDir(customDir) {
-  if (customDir) {
+  if (customDir && typeof customDir === 'string') {
     const resolved = path.resolve(customDir);
     fs.mkdirSync(resolved, { recursive: true });
     return resolved;
@@ -60,67 +71,178 @@ function resolveOutputDir(customDir) {
 
 /**
  * Safely reads and decodes a PNG file with dimension and size validation.
+ * Protected against decompression bombs and corrupted streams.
  * @param {string} filePath
  * @returns {{ png: PNG, buffer: Buffer }}
  */
 function readPngSafe(filePath) {
-  if (!filePath || !fs.existsSync(filePath)) {
+  if (!filePath || typeof filePath !== 'string' || !fs.existsSync(filePath)) {
     throw new Error(`Tệp hình ảnh không tồn tại: ${filePath}`);
   }
 
-  const stats = fs.statSync(filePath);
+  let stats;
+  try {
+    stats = fs.statSync(filePath);
+  } catch (err) {
+    throw new Error(`Không thể đọc thông tin tệp "${filePath}": ${err.message}`);
+  }
+
+  if (!stats.isFile()) {
+    throw new Error(`Đường dẫn không phải là tệp thông thường: ${filePath}`);
+  }
+
   if (stats.size === 0) {
     throw new Error(`Tệp hình ảnh rỗng (0 bytes): ${filePath}`);
   }
 
-  const buffer = fs.readFileSync(filePath);
+  if (stats.size > MAX_FILE_SIZE_BYTES) {
+    const sizeMb = (stats.size / (1024 * 1024)).toFixed(2);
+    throw new Error(`Dung lượng tệp "${filePath}" (${sizeMb} MB) vượt quá giới hạn an toàn (${MAX_FILE_SIZE_BYTES / (1024 * 1024)} MB).`);
+  }
+
+  let buffer;
+  try {
+    buffer = fs.readFileSync(filePath);
+  } catch (err) {
+    throw new Error(`Không thể đọc dữ liệu tệp "${filePath}": ${err.message}`);
+  }
+
+  if (buffer.length < MIN_PNG_FILE_SIZE) {
+    throw new Error(`Tệp quá nhỏ để là ảnh PNG hợp lệ (${buffer.length} bytes, yêu cầu tối thiểu ${MIN_PNG_FILE_SIZE} bytes): ${filePath}`);
+  }
+
+  // Verify PNG signature: 89 50 4E 47 0D 0A 1A 0A
+  const isPngHeader =
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4E &&
+    buffer[3] === 0x47 &&
+    buffer[4] === 0x0D &&
+    buffer[5] === 0x0A &&
+    buffer[6] === 0x1A &&
+    buffer[7] === 0x0A;
+
+  if (!isPngHeader) {
+    throw new Error(`Tệp không có định dạng PNG hợp lệ (sai PNG signature header): ${filePath}`);
+  }
+
+  // Pre-parse IHDR chunk to prevent PNG decompression bombs (OOM) before decoding
+  const chunkType = buffer.subarray(12, 16).toString('ascii');
+  if (chunkType !== 'IHDR') {
+    throw new Error(`Tệp PNG không hợp lệ (chunk đầu tiên phải là IHDR, nhận được "${chunkType}"): ${filePath}`);
+  }
+
+  const ihdrWidth = buffer.readUInt32BE(16);
+  const ihdrHeight = buffer.readUInt32BE(20);
+
+  if (!Number.isSafeInteger(ihdrWidth) || !Number.isSafeInteger(ihdrHeight) || ihdrWidth <= 0 || ihdrHeight <= 0) {
+    throw new Error(`Kích thước ảnh PNG trong IHDR không hợp lệ (${ihdrWidth}x${ihdrHeight}) trong: ${filePath}`);
+  }
+
+  if (ihdrWidth > MAX_IMAGE_DIMENSION || ihdrHeight > MAX_IMAGE_DIMENSION) {
+    throw new Error(`Kích thước ảnh PNG (${ihdrWidth}x${ihdrHeight}) vượt quá giới hạn tối đa cho phép (${MAX_IMAGE_DIMENSION}x${MAX_IMAGE_DIMENSION}): ${filePath}`);
+  }
+
+  if (ihdrWidth * ihdrHeight > MAX_TOTAL_PIXELS) {
+    throw new Error(`Tổng số điểm ảnh (${(ihdrWidth * ihdrHeight).toLocaleString()} pixels) vượt quá giới hạn an toàn (${MAX_TOTAL_PIXELS.toLocaleString()} pixels) để tránh tràn bộ nhớ: ${filePath}`);
+  }
+
   let png;
   try {
     png = PNG.sync.read(buffer);
   } catch (err) {
-    throw new Error(`Không thể giải mã PNG từ "${filePath}": ${err.message}`);
+    throw new Error(`Không thể giải mã dữ liệu PNG từ "${filePath}" (ảnh có thể bị lỗi, hỏng chunk hoặc dữ liệu nén bị cắt xén): ${err.message}`);
   }
 
-  if (!png || png.width <= 0 || png.height <= 0 || !png.data || png.data.length < png.width * png.height * 4) {
-    throw new Error(`Dữ liệu PNG không hợp lệ hoặc kích thước lỗi (${png?.width}x${png?.height}) trong: ${filePath}`);
+  if (
+    !png ||
+    !Number.isInteger(png.width) ||
+    !Number.isInteger(png.height) ||
+    png.width <= 0 ||
+    png.height <= 0 ||
+    !Buffer.isBuffer(png.data) ||
+    png.data.length !== png.width * png.height * 4
+  ) {
+    throw new Error(`Dữ liệu PNG sau giải mã không hợp lệ hoặc kích thước dữ liệu lỗi (${png?.width}x${png?.height}) trong: ${filePath}`);
   }
 
   return { png, buffer };
 }
 
 /**
- * Safely encodes and writes a PNG to disk, ensuring directory existence.
+ * Safely encodes and writes a PNG to disk, ensuring directory existence and safe error handling.
  * @param {string} filePath
  * @param {PNG} pngInstance
+ * @param {object} [options={}]
+ * @returns {string}
  */
-function writePngSafe(filePath, pngInstance) {
-  if (!filePath || !pngInstance) {
+function writePngSafe(filePath, pngInstance, options = {}) {
+  if (!filePath || typeof filePath !== 'string' || !pngInstance) {
     throw new Error('Đường dẫn tệp hoặc đối tượng PNG không hợp lệ.');
   }
 
-  const dir = path.dirname(filePath);
-  fs.mkdirSync(dir, { recursive: true });
+  if (
+    !Number.isInteger(pngInstance.width) ||
+    !Number.isInteger(pngInstance.height) ||
+    pngInstance.width <= 0 ||
+    pngInstance.height <= 0 ||
+    pngInstance.width > MAX_IMAGE_DIMENSION ||
+    pngInstance.height > MAX_IMAGE_DIMENSION ||
+    !Buffer.isBuffer(pngInstance.data) ||
+    pngInstance.data.length !== pngInstance.width * pngInstance.height * 4
+  ) {
+    throw new Error(`Đối tượng PNG không hợp lệ để ghi (${pngInstance?.width}x${pngInstance?.height}).`);
+  }
 
-  const buffer = PNG.sync.write(pngInstance);
-  fs.writeFileSync(filePath, buffer);
+  const dir = path.dirname(filePath);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    throw new Error(`Không thể tạo thư mục lưu trữ "${dir}": ${err.message}`);
+  }
+
+  let buffer;
+  try {
+    buffer = PNG.sync.write(pngInstance, options);
+  } catch (err) {
+    throw new Error(`Lỗi mã hóa PNG khi xuất tệp "${filePath}": ${err.message}`);
+  }
+
+  try {
+    fs.writeFileSync(filePath, buffer);
+  } catch (err) {
+    throw new Error(`Không thể ghi tệp ảnh ra đĩa "${filePath}": ${err.message}`);
+  }
+
   return filePath;
 }
 
 /**
- * Resizes a PNG image using Bilinear Interpolation with coordinate clamping.
+ * Resizes a PNG image using Bilinear Interpolation with alpha-premultiplied precision.
  * @param {PNG} src - Source PNG
  * @param {number} targetW - Target width (> 0)
  * @param {number} targetH - Target height (> 0)
  * @returns {PNG}
  */
 function resizePNG(src, targetW, targetH) {
-  if (!src || src.width <= 0 || src.height <= 0) {
+  if (!src || !Number.isInteger(src.width) || !Number.isInteger(src.height) || src.width <= 0 || src.height <= 0 || !Buffer.isBuffer(src.data)) {
     throw new Error('Ảnh nguồn không hợp lệ để resize.');
   }
 
-  const tw = Math.max(1, Math.round(targetW));
-  const th = Math.max(1, Math.round(targetH));
+  const tw = Number.isFinite(targetW) && targetW > 0 ? Math.max(1, Math.round(targetW)) : 0;
+  const th = Number.isFinite(targetH) && targetH > 0 ? Math.max(1, Math.round(targetH)) : 0;
+
+  if (tw <= 0 || th <= 0 || tw > MAX_IMAGE_DIMENSION || th > MAX_IMAGE_DIMENSION || (tw * th) > MAX_TOTAL_PIXELS) {
+    throw new Error(`Kích thước đích không hợp lệ hoặc vượt ngưỡng an toàn (${targetW}x${targetH}). Tối đa ${MAX_IMAGE_DIMENSION}x${MAX_IMAGE_DIMENSION}.`);
+  }
+
   const dst = new PNG({ width: tw, height: th });
+
+  // Direct fast copy if dimensions match exactly
+  if (tw === src.width && th === src.height) {
+    src.data.copy(dst.data);
+    return dst;
+  }
 
   const xRatio = src.width / tw;
   const yRatio = src.height / th;
@@ -143,25 +265,41 @@ function resizePNG(src, targetW, targetH) {
       const cx0 = Math.max(0, Math.min(src.width - 1, x0));
       const cx1 = Math.max(0, Math.min(src.width - 1, x1));
 
-      const idx00 = (src.width * cy0 + cx0) << 2;
-      const idx10 = (src.width * cy0 + cx1) << 2;
-      const idx01 = (src.width * cy1 + cx0) << 2;
-      const idx11 = (src.width * cy1 + cx1) << 2;
+      const idx00 = (src.width * cy0 + cx0) * 4;
+      const idx10 = (src.width * cy0 + cx1) * 4;
+      const idx01 = (src.width * cy1 + cx0) * 4;
+      const idx11 = (src.width * cy1 + cx1) * 4;
 
       const w00 = (1 - dx) * (1 - dy);
       const w10 = dx * (1 - dy);
       const w01 = (1 - dx) * dy;
       const w11 = dx * dy;
 
-      const dstIdx = (tw * y + x) << 2;
+      const dstIdx = (tw * y + x) * 4;
 
-      for (let c = 0; c < 4; c++) {
-        const val =
-          w00 * src.data[idx00 + c] +
-          w10 * src.data[idx10 + c] +
-          w01 * src.data[idx01 + c] +
-          w11 * src.data[idx11 + c];
-        dst.data[dstIdx + c] = Math.round(Math.max(0, Math.min(255, val)));
+      // Sample alphas
+      const a00 = src.data[idx00 + 3] / 255;
+      const a10 = src.data[idx10 + 3] / 255;
+      const a01 = src.data[idx01 + 3] / 255;
+      const a11 = src.data[idx11 + 3] / 255;
+
+      const outA = w00 * a00 + w10 * a10 + w01 * a01 + w11 * a11;
+
+      if (outA > 0.0001) {
+        for (let c = 0; c < 3; c++) {
+          const premulC =
+            w00 * src.data[idx00 + c] * a00 +
+            w10 * src.data[idx10 + c] * a10 +
+            w01 * src.data[idx01 + c] * a01 +
+            w11 * src.data[idx11 + c] * a11;
+          dst.data[dstIdx + c] = Math.round(Math.max(0, Math.min(255, premulC / outA)));
+        }
+        dst.data[dstIdx + 3] = Math.round(Math.max(0, Math.min(255, outA * 255)));
+      } else {
+        dst.data[dstIdx] = 0;
+        dst.data[dstIdx + 1] = 0;
+        dst.data[dstIdx + 2] = 0;
+        dst.data[dstIdx + 3] = 0;
       }
     }
   }
@@ -179,30 +317,45 @@ function resizePNG(src, targetW, targetH) {
  * @returns {PNG}
  */
 function placeOnCanvas(src, canvasW, canvasH, paddingRatio = 0.85, bgColor = [0, 0, 0, 0]) {
-  if (!src || src.width <= 0 || src.height <= 0) {
+  if (!src || !Number.isInteger(src.width) || !Number.isInteger(src.height) || src.width <= 0 || src.height <= 0 || !Buffer.isBuffer(src.data)) {
     throw new Error('Ảnh logo không hợp lệ.');
   }
 
-  const cw = Math.max(1, Math.round(canvasW));
-  const ch = Math.max(1, Math.round(canvasH));
+  const cw = Number.isFinite(canvasW) && canvasW > 0 ? Math.max(1, Math.round(canvasW)) : 0;
+  const ch = Number.isFinite(canvasH) && canvasH > 0 ? Math.max(1, Math.round(canvasH)) : 0;
+
+  if (cw <= 0 || ch <= 0 || cw > MAX_IMAGE_DIMENSION || ch > MAX_IMAGE_DIMENSION || (cw * ch) > MAX_TOTAL_PIXELS) {
+    throw new Error(`Kích thước canvas không hợp lệ hoặc vượt ngưỡng an toàn (${canvasW}x${canvasH}). Tối đa ${MAX_IMAGE_DIMENSION}x${MAX_IMAGE_DIMENSION}.`);
+  }
+
   const dst = new PNG({ width: cw, height: ch });
 
-  const bgR = Math.max(0, Math.min(255, bgColor[0] || 0));
-  const bgG = Math.max(0, Math.min(255, bgColor[1] || 0));
-  const bgB = Math.max(0, Math.min(255, bgColor[2] || 0));
-  const bgA = Math.max(0, Math.min(255, bgColor[3] !== undefined ? bgColor[3] : 0));
+  const bgR = Array.isArray(bgColor) && Number.isFinite(bgColor[0]) ? Math.max(0, Math.min(255, Math.round(bgColor[0]))) : 0;
+  const bgG = Array.isArray(bgColor) && Number.isFinite(bgColor[1]) ? Math.max(0, Math.min(255, Math.round(bgColor[1]))) : 0;
+  const bgB = Array.isArray(bgColor) && Number.isFinite(bgColor[2]) ? Math.max(0, Math.min(255, Math.round(bgColor[2]))) : 0;
+  const bgA = Array.isArray(bgColor) && Number.isFinite(bgColor[3]) ? Math.max(0, Math.min(255, Math.round(bgColor[3]))) : 0;
 
-  // Initialize canvas background
-  for (let i = 0; i < cw * ch; i++) {
-    const idx = i << 2;
-    dst.data[idx] = bgR;
-    dst.data[idx + 1] = bgG;
-    dst.data[idx + 2] = bgB;
-    dst.data[idx + 3] = bgA;
+  // Initialize canvas background if not transparent black
+  if (bgR !== 0 || bgG !== 0 || bgB !== 0 || bgA !== 0) {
+    const totalPixels = cw * ch;
+    for (let i = 0; i < totalPixels; i++) {
+      const idx = i * 4;
+      dst.data[idx] = bgR;
+      dst.data[idx + 1] = bgG;
+      dst.data[idx + 2] = bgB;
+      dst.data[idx + 3] = bgA;
+    }
   }
 
   // Calculate scaled dimensions to preserve aspect ratio
-  const safePadding = Math.max(0.01, Math.min(1.0, paddingRatio));
+  const safePadding = typeof paddingRatio === 'number' && Number.isFinite(paddingRatio)
+    ? Math.max(0.01, Math.min(1.0, logoPaddingRatioSafe(paddingRatio)))
+    : 0.85;
+
+  function logoPaddingRatioSafe(val) {
+    return Math.max(0.01, Math.min(1.0, val));
+  }
+
   const maxW = cw * safePadding;
   const maxH = ch * safePadding;
   const scale = Math.min(maxW / src.width, maxH / src.height);
@@ -224,26 +377,36 @@ function placeOnCanvas(src, canvasW, canvasH, paddingRatio = 0.85, bgColor = [0,
       const targetX = x + offsetX;
       if (targetX >= cw) continue;
 
-      const srcIdx = (scaledW * y + x) << 2;
-      const dstIdx = (cw * targetY + targetX) << 2;
+      const srcIdx = (scaledW * y + x) * 4;
+      const dstIdx = (cw * targetY + targetX) * 4;
 
       const srcAlpha = resized.data[srcIdx + 3] / 255;
       if (srcAlpha <= 0) continue;
 
       const dstAlpha = dst.data[dstIdx + 3] / 255;
-      const outAlpha = srcAlpha + dstAlpha * (1 - srcAlpha);
 
-      if (outAlpha > 0) {
-        dst.data[dstIdx] = Math.round(
-          (resized.data[srcIdx] * srcAlpha + dst.data[dstIdx] * dstAlpha * (1 - srcAlpha)) / outAlpha
-        );
-        dst.data[dstIdx + 1] = Math.round(
-          (resized.data[srcIdx + 1] * srcAlpha + dst.data[dstIdx + 1] * dstAlpha * (1 - srcAlpha)) / outAlpha
-        );
-        dst.data[dstIdx + 2] = Math.round(
-          (resized.data[srcIdx + 2] * srcAlpha + dst.data[dstIdx + 2] * dstAlpha * (1 - srcAlpha)) / outAlpha
-        );
-        dst.data[dstIdx + 3] = Math.round(Math.min(255, outAlpha * 255));
+      if (srcAlpha >= 1.0) {
+        // Fast path for fully opaque pixel
+        dst.data[dstIdx] = resized.data[srcIdx];
+        dst.data[dstIdx + 1] = resized.data[srcIdx + 1];
+        dst.data[dstIdx + 2] = resized.data[srcIdx + 2];
+        dst.data[dstIdx + 3] = 255;
+      } else {
+        const invSrcAlpha = 1 - srcAlpha;
+        const outAlpha = srcAlpha + dstAlpha * invSrcAlpha;
+
+        if (outAlpha > 0) {
+          dst.data[dstIdx] = Math.round(
+            Math.max(0, Math.min(255, (resized.data[srcIdx] * srcAlpha + dst.data[dstIdx] * dstAlpha * invSrcAlpha) / outAlpha))
+          );
+          dst.data[dstIdx + 1] = Math.round(
+            Math.max(0, Math.min(255, (resized.data[srcIdx + 1] * srcAlpha + dst.data[dstIdx + 1] * dstAlpha * invSrcAlpha) / outAlpha))
+          );
+          dst.data[dstIdx + 2] = Math.round(
+            Math.max(0, Math.min(255, (resized.data[srcIdx + 2] * srcAlpha + dst.data[dstIdx + 2] * dstAlpha * invSrcAlpha) / outAlpha))
+          );
+          dst.data[dstIdx + 3] = Math.round(Math.max(0, Math.min(255, outAlpha * 255)));
+        }
       }
     }
   }
@@ -367,4 +530,8 @@ module.exports = {
   resizePNG,
   placeOnCanvas,
   generateAllVariants,
+  MAX_FILE_SIZE_BYTES,
+  MAX_IMAGE_DIMENSION,
+  MAX_TOTAL_PIXELS,
+  MIN_PNG_FILE_SIZE,
 };

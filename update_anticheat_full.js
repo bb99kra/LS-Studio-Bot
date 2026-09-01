@@ -1,4 +1,6 @@
+const path = require('path');
 const fs = require('fs');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { 
   Client,
   Events, 
@@ -6,12 +8,17 @@ const {
   EmbedBuilder 
 } = require('discord.js');
 
-const TOKEN = process.env.DISCORD_TOKEN || (fs.existsSync('./token.local.js') ? require('./token.local.js').TOKEN : 'YOUR_BOT_TOKEN_HERE');
-const LS_STUDIO_GUILD_ID = "1542476657825419334";
+const tokenLocalPath = path.join(__dirname, 'token.local.js');
+const localConfig = fs.existsSync(tokenLocalPath) ? require(tokenLocalPath) : {};
+const TOKEN = process.env.DISCORD_TOKEN || localConfig.TOKEN || localConfig.DISCORD_TOKEN || '';
+const LS_STUDIO_GUILD_ID = process.env.GUILD_ID || (typeof localConfig !== "undefined" && localConfig.GUILD_ID) || "1542476657825419334";
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
+
+// Helper: Pacing delay to prevent Discord 429 Rate Limits
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Watchdog timeout to prevent script hanging indefinitely
 const WATCHDOG_TIMEOUT_MS = 30000;
@@ -28,13 +35,38 @@ client.on(Events.Error, (err) => {
   console.error('❌ Lỗi Discord Client:', err.message || err);
 });
 
-process.on('unhandledRejection', async (reason) => {
+let isExiting = false;
+async function cleanupAndExit(code = 0) {
+  if (isExiting) return;
+  isExiting = true;
   clearTimeout(watchdog);
-  console.error('❌ Lỗi không kiểm soát (Unhandled Rejection):', reason);
   try {
     await client.destroy();
   } catch {}
-  process.exit(1);
+  process.exit(code);
+}
+
+process.on('SIGINT', async () => {
+  console.log('🛑 [SIGINT] Đang dừng tiến trình...');
+  await cleanupAndExit(0);
+});
+process.on('SIGTERM', async () => {
+  console.log('🛑 [SIGTERM] Đang dừng tiến trình...');
+  await cleanupAndExit(0);
+});
+process.on('SIGHUP', async () => {
+  console.log('🛑 [SIGHUP] Đang dừng tiến trình...');
+  await cleanupAndExit(0);
+});
+
+process.on('unhandledRejection', async (reason) => {
+  console.error('❌ Lỗi không kiểm soát (Unhandled Rejection):', reason);
+  await cleanupAndExit(1);
+});
+
+process.on('uncaughtException', async (err) => {
+  console.error('❌ Lỗi ngoại lệ chưa bắt (Uncaught Exception):', err);
+  await cleanupAndExit(1);
 });
 
 
@@ -42,20 +74,34 @@ client.once(Events.ClientReady, async () => {
   console.log(`🤖 Logged in as ${client.user.tag}! Cập nhật Full tính năng cho LS-AntiCheat (30k)...`);
 
   try {
-    const guild = await client.guilds.fetch(LS_STUDIO_GUILD_ID);
+    const guild = await client.guilds.fetch(LS_STUDIO_GUILD_ID).catch(err => {
+      console.error(`❌ [ERROR] Không thể fetch Guild (${LS_STUDIO_GUILD_ID}):`, err.message || err);
+      return null;
+    });
+    if (!guild) {
+      console.error(`❌ [ERROR] Không tìm thấy Guild (${LS_STUDIO_GUILD_ID}) hoặc Bot chưa tham gia.`);
+      return await cleanupAndExit(1);
+    }
     const channels = await guild.channels.fetch();
 
     async function refreshChannel(channel, fn) {
-      if (!channel) return;
+      if (!channel) {
+        console.warn("⚠️ [WARN] Không tìm thấy channel cần cập nhật.");
+        return;
+      }
       try {
-        const messages = await channel.messages.fetch({ limit: 15 });
+        const messages = await channel.messages.fetch({ limit: 15 }).catch(() => new Map());
         for (const [id, msg] of messages) {
-          if (msg.author.id === client.user.id) await msg.delete().catch(() => {});
+          if (msg.author.id === client.user.id) {
+            await msg.delete().catch(() => {});
+            await sleep(250);
+          }
         }
         await fn(channel);
-        console.log(`   ✅ Cập nhật thành công: ${channel.name}`);
+        await sleep(500);
+        console.log(`   ✅ Cập nhật thành công: #${channel.name}`);
       } catch (e) {
-        console.error(`   ❌ Lỗi kênh ${channel.name}:`, e.message);
+        console.error(`   ❌ Lỗi kênh ${channel.name || 'Unknown'}:`, e.message);
       }
     }
 
@@ -162,26 +208,19 @@ client.once(Events.ClientReady, async () => {
     });
 
     console.log("🎉 ĐÃ CẬP NHẬT FULL TÍNH NĂNG LS-ANTICHEAT (30K) XONG 100%!");
-    clearTimeout(watchdog);
-    try {
-      await client.destroy();
-    } catch {}
-    process.exit(0);
+    await cleanupAndExit(0);
   } catch (err) {
-    clearTimeout(watchdog);
-    console.error("❌ Lỗi:", err.message || err);
-    try {
-      await client.destroy();
-    } catch {}
-    process.exit(1);
+    console.error("❌ [ERROR] Lỗi thực thi:", err.message || err);
+    await cleanupAndExit(1);
   }
 });
 
-client.login(TOKEN).catch(async (err) => {
-  clearTimeout(watchdog);
-  console.error('❌ Đăng nhập Discord thất bại:', err.message || err);
-  try {
-    await client.destroy();
-  } catch {}
+if (!TOKEN || TOKEN === 'YOUR_BOT_TOKEN_HERE' || TOKEN.trim() === '') {
+  console.error('❌ Lỗi: DISCORD_TOKEN chưa được thiết lập trong .env hoặc token.local.js!');
   process.exit(1);
+}
+
+client.login(TOKEN).catch(async (err) => {
+  console.error("❌ [ERROR] Lỗi thực thi:", err.message || err);
+    await cleanupAndExit(1);
 });

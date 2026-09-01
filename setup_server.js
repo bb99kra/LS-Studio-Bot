@@ -1,5 +1,6 @@
 require('dotenv').config();
 const fs = require('fs');
+const path = require('path');
 const { 
   Client, 
   GatewayIntentBits, 
@@ -12,7 +13,9 @@ const {
   Events
 } = require('discord.js');
 
-const TOKEN = process.env.DISCORD_TOKEN || (fs.existsSync('./token.local.js') ? require('./token.local.js').TOKEN : '');
+const tokenLocalPath = path.join(__dirname, 'token.local.js');
+const localConfig = fs.existsSync(tokenLocalPath) ? require(tokenLocalPath) : {};
+const TOKEN = process.env.DISCORD_TOKEN || localConfig.TOKEN || localConfig.DISCORD_TOKEN || '';
 const GUILD_ID = process.env.GUILD_ID || "1542476657825419334";
 
 const client = new Client({
@@ -27,25 +30,270 @@ const client = new Client({
 // Helper: Tạm dừng để tránh Discord HTTP 429 Rate Limit
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Helper: Bọc hàm REST với cơ chế tự động Retry khi gặp Rate Limit (429)
-async function safeApiCall(fn, retries = 3, delayMs = 1000) {
+/**
+ * Helper: Bọc hàm REST Discord API với cơ chế tự động Retry, Exponential Backoff & Jitter
+ * Bóc tách chính xác retry_after từ mọi định dạng lỗi Discord.js v14 và HTTP 429 REST API
+ * @param {Function} fn - Async function gọi Discord API
+ * @param {number} retries - Số lần thử lại tối đa (mặc định 5)
+ * @param {number} delayMs - Độ trễ cơ sở ban đầu (ms)
+ */
+async function safeApiCall(fn, retries = 5, delayMs = 1000) {
+  let lastError;
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const result = await fn();
       await sleep(250); // Khoảng nghỉ an toàn giữa các request
       return result;
     } catch (error) {
-      if (error.status === 429 || error.code === 429 || (error.message && error.message.includes('rate limit'))) {
-        const retryAfter = (error.rawError?.retry_after ? error.rawError.retry_after * 1000 : delayMs * attempt) + 500;
-        console.warn(`   ⏳ Rate limit detected. Chờ ${retryAfter}ms trước khi thử lại (Lần ${attempt}/${retries})...`);
-        await sleep(retryAfter);
+      lastError = error;
+      const isRateLimit = 
+        error?.status === 429 || 
+        error?.code === 429 || 
+        error?.code === 'RATE_LIMIT' || 
+        error?.name === 'RateLimitError' || 
+        (error?.message && typeof error.message === 'string' && error.message.toLowerCase().includes('rate limit'));
+
+      if (isRateLimit) {
+        let retryAfterMs = 0;
+
+        // 1. Kiểm tra error.retryAfter (Discord.js RateLimitError / DiscordAPIError)
+        if (typeof error.retryAfter === 'number' && error.retryAfter > 0) {
+          retryAfterMs = error.retryAfter > 500 ? error.retryAfter : Math.round(error.retryAfter * 1000);
+        }
+        // 2. Kiểm tra error.rawError?.retry_after (Discord REST API payload)
+        else if (typeof error.rawError?.retry_after === 'number' && error.rawError.retry_after > 0) {
+          const val = error.rawError.retry_after;
+          retryAfterMs = val > 500 ? val : Math.round(val * 1000);
+        }
+        // 3. Kiểm tra error.data?.retry_after hoặc error.response?.data?.retry_after
+        else if (typeof error.data?.retry_after === 'number' && error.data.retry_after > 0) {
+          const val = error.data.retry_after;
+          retryAfterMs = val > 500 ? val : Math.round(val * 1000);
+        } else if (typeof error.response?.data?.retry_after === 'number' && error.response.data.retry_after > 0) {
+          const val = error.response.data.retry_after;
+          retryAfterMs = val > 500 ? val : Math.round(val * 1000);
+        }
+        // 4. Kiểm tra error.timeToReset (Discord.js REST)
+        else if (typeof error.timeToReset === 'number' && error.timeToReset > 0) {
+          retryAfterMs = error.timeToReset;
+        }
+        // 5. Kiểm tra HTTP Response Headers: 'retry-after'
+        else if (error.headers || error.response?.headers) {
+          const headers = error.headers || error.response.headers;
+          const headerVal = typeof headers.get === 'function' ? headers.get('retry-after') : headers['retry-after'];
+          if (headerVal && !isNaN(Number(headerVal))) {
+            const num = Number(headerVal);
+            retryAfterMs = num > 500 ? num : Math.round(num * 1000);
+          }
+        }
+
+        // Nếu không trích xuất được retry_after cụ thể, áp dụng Exponential Backoff + Jitter
+        if (!retryAfterMs || retryAfterMs <= 0) {
+          retryAfterMs = Math.round(delayMs * Math.pow(2, attempt - 1) + Math.random() * 500);
+        } else {
+          retryAfterMs += 500; // Thêm buffer 500ms an toàn tránh chạm sát biên rate limit
+        }
+
+        if (attempt === retries) {
+          console.warn(`   ⏳ Rate limit detected (429) ở lần thử cuối (${attempt}/${retries}). Chờ ${retryAfterMs}ms trước khi thử lại lần chót...`);
+        } else {
+          console.warn(`   ⏳ Rate limit detected (429). Chờ ${retryAfterMs}ms trước khi thử lại (Lần ${attempt}/${retries})...`);
+        }
+        await sleep(retryAfterMs);
       } else if (attempt === retries) {
         throw error;
       } else {
-        console.warn(`   ⚠️ Warning API call failed (Lần ${attempt}/${retries}): ${error.message}. Đang thử lại...`);
-        await sleep(delayMs);
+        // Lỗi tạm thời mạng hoặc 5xx Discord API (500, 502, 503, 504, ECONNRESET, ETIMEDOUT)
+        const backoffMs = Math.round(delayMs * Math.pow(1.5, attempt - 1) + Math.random() * 200);
+        console.warn(`   ⚠️ Warning API call failed (Lần ${attempt}/${retries}): ${error.message}. Đang thử lại sau ${backoffMs}ms...`);
+        await sleep(backoffMs);
       }
     }
+  }
+  throw lastError || new Error(`safeApiCall: Exceeded maximum retries (${retries})`);
+}
+
+/**
+ * Helper: Kiểm tra hai tập hợp thuộc tính Role có hoàn toàn trùng khớp hay không
+ */
+function areRolePropsEqual(role, rDef) {
+  if (!role || !rDef) return false;
+  if (rDef.color) {
+    const roleHex = (role.hexColor || '').toLowerCase();
+    const targetHex = rDef.color.toLowerCase();
+    if (roleHex !== targetHex) return false;
+  }
+  if (rDef.hoist !== undefined && role.hoist !== !!rDef.hoist) return false;
+  if (rDef.mentionable !== undefined && role.mentionable !== !!rDef.mentionable) return false;
+  if (rDef.permissions !== undefined) {
+    const targetBits = new PermissionsBitField(rDef.permissions).bitfield;
+    const roleBits = role.permissions instanceof PermissionsBitField ? role.permissions.bitfield : new PermissionsBitField(role.permissions || 0n).bitfield;
+    if (targetBits !== roleBits) return false;
+  }
+  return true;
+}
+
+/**
+ * Helper: Chuẩn hóa mảng Overwrites thành Map để so sánh chính xác theo bitfield
+ */
+function normalizeOverwrites(overwrites) {
+  if (!Array.isArray(overwrites)) return new Map();
+  const map = new Map();
+  for (const ow of overwrites) {
+    if (!ow || !ow.id) continue;
+    const allowBit = new PermissionsBitField(ow.allow || 0n).bitfield;
+    const denyBit = new PermissionsBitField(ow.deny || 0n).bitfield;
+    map.set(String(ow.id), {
+      id: String(ow.id),
+      allow: allowBit,
+      deny: denyBit,
+      type: ow.type !== undefined ? ow.type : undefined
+    });
+  }
+  return map;
+}
+
+/**
+ * Helper: So sánh quyền hạn (permissionOverwrites) giữa kênh hiện có và cấu hình mong muốn
+ */
+function areOverwritesEqual(currentOverwritesManager, desiredOverwrites) {
+  if (!currentOverwritesManager || !currentOverwritesManager.cache) return false;
+  const desiredMap = normalizeOverwrites(desiredOverwrites);
+  const cache = currentOverwritesManager.cache;
+
+  if (cache.size !== desiredMap.size) return false;
+
+  for (const [id, desired] of desiredMap.entries()) {
+    const existing = cache.get(id);
+    if (!existing) return false;
+    const existingAllow = existing.allow instanceof PermissionsBitField ? existing.allow.bitfield : new PermissionsBitField(existing.allow || 0n).bitfield;
+    const existingDeny = existing.deny instanceof PermissionsBitField ? existing.deny.bitfield : new PermissionsBitField(existing.deny || 0n).bitfield;
+    if (existingAllow !== desired.allow || existingDeny !== desired.deny) {
+      return false;
+    }
+    if (desired.type !== undefined && existing.type !== undefined && existing.type !== desired.type) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Helper: Kiểm tra xem Embeds và Buttons của tin nhắn có trùng khớp với payload mới không (Idempotent Embeds)
+ */
+function areEmbedsAndComponentsEqual(existingMsg, newPayload) {
+  if (!existingMsg) return false;
+  
+  const existingContent = (existingMsg.content || '').trim();
+  const newContent = (newPayload.content || '').trim();
+  if (existingContent !== newContent) return false;
+
+  const existingEmbeds = existingMsg.embeds || [];
+  const newEmbeds = (newPayload.embeds || []).map(e => (typeof e?.toJSON === 'function' ? e.toJSON() : e));
+  if (existingEmbeds.length !== newEmbeds.length) return false;
+
+  for (let i = 0; i < newEmbeds.length; i++) {
+    const eExist = typeof existingEmbeds[i]?.toJSON === 'function' ? existingEmbeds[i].toJSON() : existingEmbeds[i];
+    const eNew = newEmbeds[i];
+    if ((eExist?.title || '') !== (eNew?.title || '')) return false;
+    if ((eExist?.description || '') !== (eNew?.description || '')) return false;
+    const existFields = eExist?.fields || [];
+    const newFields = eNew?.fields || [];
+    if (existFields.length !== newFields.length) return false;
+    for (let f = 0; f < newFields.length; f++) {
+      if (existFields[f]?.name !== newFields[f]?.name || existFields[f]?.value !== newFields[f]?.value) {
+        return false;
+      }
+    }
+  }
+
+  const existingComponents = existingMsg.components || [];
+  const newComponents = (newPayload.components || []).map(c => (typeof c?.toJSON === 'function' ? c.toJSON() : c));
+  if (existingComponents.length !== newComponents.length) return false;
+
+  for (let r = 0; r < newComponents.length; r++) {
+    const cExist = typeof existingComponents[r]?.toJSON === 'function' ? existingComponents[r].toJSON() : existingComponents[r];
+    const cNew = newComponents[r];
+    const compExist = cExist?.components || [];
+    const compNew = cNew?.components || [];
+    if (compExist.length !== compNew.length) return false;
+    for (let b = 0; b < compNew.length; b++) {
+      const bExistId = compExist[b]?.custom_id || compExist[b]?.customId;
+      const bNewId = compNew[b]?.custom_id || compNew[b]?.customId;
+      if (bExistId !== bNewId) return false;
+      if (compExist[b]?.label !== compNew[b]?.label) return false;
+      if (compExist[b]?.style !== compNew[b]?.style) return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Helper: Đồng bộ vị trí (Position Ordering) của toàn bộ Categories và Channels trong máy chủ
+ */
+async function syncChannelAndCategoryPositions(guild, botMember, categoryOrderList, channelOrderMap) {
+  if (!botMember || !botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+    console.warn("   ⚠️ Bot thiếu quyền ManageChannels để sắp xếp thứ tự danh mục và kênh.");
+    return;
+  }
+
+  const updates = [];
+
+  // 1. Kiểm tra vị trí Categories (đặt liên tiếp từ 0..N)
+  categoryOrderList.forEach((cat, index) => {
+    if (cat && cat.position !== index) {
+      updates.push({
+        channel: cat.id,
+        position: index
+      });
+    }
+  });
+
+  // 2. Kiểm tra vị trí Channels trong từng Category
+  for (const [catId, channels] of channelOrderMap.entries()) {
+    channels.forEach((ch, index) => {
+      if (ch) {
+        const posMismatch = ch.position !== index;
+        const parentMismatch = ch.parentId !== catId;
+        if (posMismatch || parentMismatch) {
+          updates.push({
+            channel: ch.id,
+            position: index,
+            parent: catId
+          });
+        }
+      }
+    });
+  }
+
+  if (updates.length === 0) {
+    console.log("   ✅ Thứ tự Categories & Channels đã đồng bộ chuẩn xác (không cần di chuyển)!");
+    return;
+  }
+
+  console.log(`   🔄 Đang đồng bộ vị trí cho ${updates.length} kênh/danh mục...`);
+  if (typeof guild.channels.setPositions === 'function') {
+    try {
+      await safeApiCall(() => guild.channels.setPositions(updates));
+      console.log("   ✅ Đã đồng bộ vị trí toàn bộ Categories & Channels thành công!");
+    } catch (err) {
+      console.warn(`   ! guild.channels.setPositions gặp lỗi: ${err.message}. Đang thử cập nhật từng kênh...`);
+      for (const up of updates) {
+        const targetCh = guild.channels.cache?.get(up.channel);
+        if (targetCh && typeof targetCh.setPosition === 'function') {
+          await safeApiCall(() => targetCh.setPosition(up.position)).catch(() => {});
+        }
+      }
+    }
+  } else {
+    for (const up of updates) {
+      const targetCh = guild.channels.cache?.get(up.channel);
+      if (targetCh && typeof targetCh.setPosition === 'function') {
+        await safeApiCall(() => targetCh.setPosition(up.position)).catch(() => {});
+      }
+    }
+    console.log("   ✅ Đã cập nhật vị trí các kênh theo thứ tự chuẩn!");
   }
 }
 
@@ -57,9 +305,7 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
     const guild = await safeApiCall(() => clientInstance.guilds.fetch(targetGuildId));
     if (!guild) {
       console.error("❌ Guild không tồn tại hoặc Bot chưa tham gia Guild!");
-      clearTimeout(watchdog);
-      try { await client.destroy(); } catch {}
-      process.exit(1);
+      throw new Error(`Guild không tồn tại hoặc Bot chưa tham gia Guild: ${targetGuildId}`);
     }
 
     console.log(`🏰 Target Server: ${guild.name} (${guild.id})`);
@@ -72,9 +318,7 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
     
     if (!botMember) {
       console.error("❌ Không thể lấy thông tin Bot Member trong Guild!");
-      clearTimeout(watchdog);
-      try { await client.destroy(); } catch {}
-      process.exit(1);
+      throw new Error(`Không thể lấy thông tin Bot Member cho id: ${readyUser.id}`);
     }
 
     const requiredPermissions = [
@@ -192,21 +436,37 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
     for (const rDef of roleDefs) {
       let role = existingRoles.find(r => r.name === rDef.name);
       if (role) {
-        // Cập nhật thuộc tính role nếu bot có thứ bậc cao hơn
-        if (botMember.permissions.has(PermissionsBitField.Flags.ManageRoles) && role.position < botMember.roles.highest.position) {
-          try {
-            role = await safeApiCall(() => role.edit({
-              color: rDef.color,
-              hoist: rDef.hoist,
-              mentionable: rDef.mentionable,
-              permissions: rDef.permissions
-            }));
-            console.log(`   ✓ Role đã tồn tại (đã đồng bộ): ${rDef.name}`);
-          } catch (e) {
-            console.log(`   ✓ Role đã tồn tại: ${rDef.name} (Bỏ qua đồng bộ: ${e.message})`);
+        // 1. Kiểm tra nếu là Managed / Integration Role (Bot Role, Booster Role...)
+        if (role.managed) {
+          console.log(`   ℹ️ Role đã tồn tại nhưng là Managed Role (tích hợp/bot): ${rDef.name} (Bỏ qua chỉnh sửa)`);
+        } else if (botMember.permissions.has(PermissionsBitField.Flags.ManageRoles) && role.position < botMember.roles.highest.position) {
+          // 2. Chống gọi API edit thừa thãi nếu thuộc tính role đã khớp chuẩn
+          const colorMatch = !rDef.color || (role.hexColor && role.hexColor.toLowerCase() === rDef.color.toLowerCase());
+          const hoistMatch = role.hoist === rDef.hoist;
+          const mentionableMatch = role.mentionable === rDef.mentionable;
+          const permissionsMatch = Array.isArray(rDef.permissions)
+            ? (rDef.permissions.length === 0 ? role.permissions.bitfield === 0n : role.permissions.has(rDef.permissions))
+            : true;
+
+          const needsUpdate = !colorMatch || !hoistMatch || !mentionableMatch || !permissionsMatch;
+
+          if (!needsUpdate) {
+            console.log(`   ✓ Role đã tồn tại (thuộc tính đã chuẩn, không cần gọi API edit): ${rDef.name}`);
+          } else {
+            try {
+              role = await safeApiCall(() => role.edit({
+                color: rDef.color,
+                hoist: rDef.hoist,
+                mentionable: rDef.mentionable,
+                permissions: rDef.permissions
+              }));
+              console.log(`   ✓ Role đã tồn tại (đã đồng bộ thuộc tính): ${rDef.name}`);
+            } catch (e) {
+              console.log(`   ✓ Role đã tồn tại: ${rDef.name} (Bỏ qua đồng bộ: ${e.message})`);
+            }
           }
         } else {
-          console.log(`   ✓ Role đã tồn tại (Hierarchy cao hơn/ngang Bot): ${rDef.name}`);
+          console.log(`   ✓ Role đã tồn tại (Hierarchy cao hơn/ngang Bot hoặc thiếu quyền): ${rDef.name}`);
         }
       } else {
         if (botMember.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
@@ -226,7 +486,38 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
       if (role) rolesMap[rDef.name] = role;
     }
 
-    const everyoneRole = guild.roles.everyone;
+    // =========================================================================
+    // 1.1 THIẾT LẬP THỨ BẬC ROLES (ROLE HIERARCHY POSITIONING)
+    // =========================================================================
+    if (botMember.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
+      try {
+        const manageableRoles = [];
+        for (const rDef of roleDefs) {
+          const r = rolesMap[rDef.name];
+          // Bỏ qua managed roles, @everyone và các role có position >= bot
+          if (r && !r.managed && r.id !== guild.id && r.position < botMember.roles.highest.position) {
+            manageableRoles.push(r);
+          }
+        }
+
+        if (manageableRoles.length > 1 && typeof guild.roles.setPositions === 'function') {
+          // roleDefs được định nghĩa từ cao nhất (index 0) xuống thấp nhất
+          // Vị trí cao nhất bot có thể gán an toàn là botMember.roles.highest.position - 1
+          const maxPosition = Math.max(1, botMember.roles.highest.position - 1);
+          const positionUpdates = manageableRoles.map((role, idx) => ({
+            role: role.id,
+            position: Math.max(1, maxPosition - idx)
+          }));
+          await safeApiCall(() => guild.roles.setPositions(positionUpdates));
+          console.log("   ✅ Đã sắp xếp và đồng bộ vị trí thứ bậc Roles (Role Hierarchy) chuẩn xác!");
+        }
+      } catch (posErr) {
+        console.warn(`   ⚠️ Không thể đồng bộ vị trí Role Hierarchy: ${posErr.message}`);
+      }
+    }
+
+    const everyoneRole = guild.roles?.everyone || (guild.roles?.cache ? (guild.roles.cache.get(guild.id) || guild.roles.cache.find(r => r.name === '@everyone')) : null) || { id: guild.id, name: '@everyone' };
+    const everyoneRoleId = everyoneRole?.id || guild.id;
     const customerRole = rolesMap["🛒・Khách Hàng (Buyer)"];
     const vipRole = rolesMap["💎・VIP Customer"];
     const staffRole = rolesMap["🛡️・Staff / Support"];
@@ -238,15 +529,18 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
     console.log("\n📁 Đang kiểm tra danh mục và kênh hiện có...");
     let currentChannels = await safeApiCall(() => guild.channels.fetch());
 
-    // Helper: Tạo hoặc Lấy Category (Idempotent)
+    // Helper: Tạo hoặc Lấy Category (Idempotent - kiểm tra Overwrites trước khi cập nhật)
     async function getOrCreateCategory(name, overwrites = []) {
       let cat = currentChannels.find(c => c && c.type === ChannelType.GuildCategory && c.name === name);
       if (cat) {
         console.log(`   📁 Category đã tồn tại: ${name}`);
         if (overwrites && overwrites.length > 0 && botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
-          await safeApiCall(() => cat.permissionOverwrites.set(overwrites)).catch(err => {
-            console.warn(`   ! Không thể cập nhật quyền category ${name}: ${err.message}`);
-          });
+          if (!areOverwritesEqual(cat.permissionOverwrites, overwrites)) {
+            await safeApiCall(() => cat.permissionOverwrites.set(overwrites)).catch(err => {
+              console.warn(`   ! Không thể cập nhật quyền category ${name}: ${err.message}`);
+            });
+            console.log(`   🔄 Đã cập nhật quyền hạn Category: ${name}`);
+          }
         }
         return cat;
       }
@@ -262,7 +556,7 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
       return cat;
     }
 
-    // Helper: Tạo hoặc Lấy Text Channel (Idempotent)
+    // Helper: Tạo hoặc Lấy Text Channel (Idempotent - kiểm tra Topic, Parent và Overwrites)
     async function getOrCreateTextChannel(name, parentCategory, topic = "", customOverwrites = null) {
       let ch = currentChannels.find(c => 
         c && 
@@ -279,9 +573,13 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
           if (parentCategory && ch.parentId !== parentCategory.id) updateData.parent = parentCategory.id;
           if (Object.keys(updateData).length > 0 && botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
             await safeApiCall(() => ch.edit(updateData));
+            console.log(`   🔄 Đã cập nhật thuộc tính Text Channel: #${name}`);
           }
           if (customOverwrites && customOverwrites.length > 0 && botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
-            await safeApiCall(() => ch.permissionOverwrites.set(customOverwrites));
+            if (!areOverwritesEqual(ch.permissionOverwrites, customOverwrites)) {
+              await safeApiCall(() => ch.permissionOverwrites.set(customOverwrites));
+              console.log(`   🔄 Đã cập nhật quyền hạn Text Channel: #${name}`);
+            }
           }
         } catch (e) {
           console.warn(`   ! Không thể update channel #${name}: ${e.message}`);
@@ -307,8 +605,13 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
       return ch;
     }
 
-    // Helper: Tạo hoặc Lấy Voice Channel (Idempotent)
-    async function getOrCreateVoiceChannel(name, parentCategory, customOverwrites = null) {
+    // Helper: Tạo hoặc Lấy Voice Channel (Idempotent - hỗ trợ userLimit, bitrate, customOverwrites)
+    async function getOrCreateVoiceChannel(name, parentCategory, options = {}) {
+      const customOverwrites = options.customOverwrites || null;
+      const userLimit = options.userLimit !== undefined ? options.userLimit : undefined;
+      const bitrate = options.bitrate !== undefined ? options.bitrate : undefined;
+      const rtcRegion = options.rtcRegion !== undefined ? options.rtcRegion : undefined;
+
       let ch = currentChannels.find(c => 
         c && 
         c.type === ChannelType.GuildVoice && 
@@ -318,6 +621,27 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
 
       if (ch) {
         console.log(`   🔊 Voice Channel đã tồn tại: ${name}`);
+        try {
+          const updateData = {};
+          if (parentCategory && ch.parentId !== parentCategory.id) updateData.parent = parentCategory.id;
+          if (userLimit !== undefined && ch.userLimit !== userLimit) updateData.userLimit = userLimit;
+          if (bitrate !== undefined && ch.bitrate !== bitrate) updateData.bitrate = bitrate;
+          if (rtcRegion !== undefined && ch.rtcRegion !== rtcRegion) updateData.rtcRegion = rtcRegion;
+
+          if (Object.keys(updateData).length > 0 && botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+            await safeApiCall(() => ch.edit(updateData));
+            console.log(`   🔄 Đã cập nhật thuộc tính Voice Channel: ${name}`);
+          }
+
+          if (customOverwrites && customOverwrites.length > 0 && botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+            if (!areOverwritesEqual(ch.permissionOverwrites, customOverwrites)) {
+              await safeApiCall(() => ch.permissionOverwrites.set(customOverwrites));
+              console.log(`   🔄 Đã cập nhật quyền hạn Voice Channel: ${name}`);
+            }
+          }
+        } catch (e) {
+          console.warn(`   ! Không thể update voice channel ${name}: ${e.message}`);
+        }
         return ch;
       }
 
@@ -325,6 +649,9 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
         name: name,
         type: ChannelType.GuildVoice,
         parent: parentCategory ? parentCategory.id : undefined,
+        userLimit: userLimit !== undefined ? userLimit : undefined,
+        bitrate: bitrate !== undefined ? bitrate : undefined,
+        rtcRegion: rtcRegion !== undefined ? rtcRegion : undefined,
         reason: "LS Studio Setup - Voice Channel Creation"
       };
 
@@ -338,15 +665,15 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
       return ch;
     }
 
-    // Helper: Đăng hoặc Cập nhật Embeds sạch sẽ (tránh duplicate tin nhắn khi chạy lại nhiều lần)
+    // Helper: Đăng hoặc Cập nhật Embeds sạch sẽ (Idempotent - tránh duplicate và flicker)
     async function publishOrRefreshEmbed(channel, messagePayload) {
       if (!channel || !channel.isTextBased()) return null;
       try {
         const messages = await safeApiCall(() => channel.messages.fetch({ limit: 10 }));
         const botMessages = messages.filter(m => m.author.id === botUser.id);
         
-        // Xóa tin nhắn cũ của bot để làm mới
-        for (const [id, msg] of botMessages) {
+        // Xóa tin nhắn cũ của bot để làm mới giao diện
+        for (const msg of botMessages.values()) {
           await safeApiCall(() => msg.delete()).catch(() => {});
         }
 
@@ -354,22 +681,17 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
         console.log(`   ✅ Đã đăng Embed thành công vào: #${channel.name}`);
         return sent;
       } catch (err) {
-        console.error(`   ❌ Lỗi khi gửi Embed vào #${channel.name}:`, err.message);
+        console.error(`   ❌ Lỗi khi đăng Embed vào #${channel.name}:`, err.message);
         return null;
       }
     }
-
-    // =========================================================================
-    // 2. KHỞI TẠO CATEGORIES VÀ CHANNELS VỚI BITFIELD OVERWRITES CHUẨN DISCORD.JS V14
-    // =========================================================================
-    console.log("\n🏗️ Bắt đầu xây dựng danh mục và các kênh...");
 
     // -------------------------------------------------------------------------
     // 1. DANH MỤC: 📌 ━━━ THÔNG TIN ━━━
     // -------------------------------------------------------------------------
     const infoOverwrites = [
       {
-        id: everyoneRole.id,
+        id: everyoneRoleId,
         allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.ReadMessageHistory],
         deny: [
           PermissionsBitField.Flags.SendMessages, 
@@ -404,6 +726,30 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
         ]
       });
     }
+    if (devRole) {
+      infoOverwrites.push({
+        id: devRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.EmbedLinks,
+          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.ReadMessageHistory
+        ]
+      });
+    }
+    if (founderRole) {
+      infoOverwrites.push({
+        id: founderRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.EmbedLinks,
+          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.ReadMessageHistory
+        ]
+      });
+    }
 
     const catInfo = await getOrCreateCategory("📌 ━━━ THÔNG TIN ━━━", infoOverwrites);
 
@@ -419,7 +765,7 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
     // -------------------------------------------------------------------------
     const storeOverwrites = [
       {
-        id: everyoneRole.id,
+        id: everyoneRoleId,
         allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.ReadMessageHistory],
         deny: [
           PermissionsBitField.Flags.SendMessages,
@@ -453,6 +799,30 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
         ]
       });
     }
+    if (devRole) {
+      storeOverwrites.push({
+        id: devRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.EmbedLinks,
+          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.ReadMessageHistory
+        ]
+      });
+    }
+    if (founderRole) {
+      storeOverwrites.push({
+        id: founderRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.EmbedLinks,
+          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.ReadMessageHistory
+        ]
+      });
+    }
 
     const catStore = await getOrCreateCategory("🛒 ━━━ CỬA HÀNG LS ━━━", storeOverwrites);
 
@@ -463,7 +833,7 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
     // Kênh Vouch cho phép @everyone gửi phản hồi
     const vouchOverwrites = [
       {
-        id: everyoneRole.id,
+        id: everyoneRoleId,
         allow: [
           PermissionsBitField.Flags.ViewChannel,
           PermissionsBitField.Flags.SendMessages,
@@ -499,6 +869,32 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
         ]
       });
     }
+    if (devRole) {
+      vouchOverwrites.push({
+        id: devRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.EmbedLinks,
+          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.ManageMessages,
+          PermissionsBitField.Flags.ReadMessageHistory
+        ]
+      });
+    }
+    if (founderRole) {
+      vouchOverwrites.push({
+        id: founderRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.EmbedLinks,
+          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.ManageMessages,
+          PermissionsBitField.Flags.ReadMessageHistory
+        ]
+      });
+    }
     const chVouch = await getOrCreateTextChannel("⭐・đánh-giá-uy-tín", catStore, "Nơi khách hàng gửi đánh giá uy tín sau khi giao dịch", vouchOverwrites);
 
     // -------------------------------------------------------------------------
@@ -506,7 +902,7 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
     // -------------------------------------------------------------------------
     const supportOverwrites = [
       {
-        id: everyoneRole.id,
+        id: everyoneRoleId,
         allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.ReadMessageHistory],
         deny: [
           PermissionsBitField.Flags.SendMessages,
@@ -541,6 +937,30 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
         ]
       });
     }
+    if (devRole) {
+      supportOverwrites.push({
+        id: devRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.EmbedLinks,
+          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.ReadMessageHistory
+        ]
+      });
+    }
+    if (founderRole) {
+      supportOverwrites.push({
+        id: founderRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.EmbedLinks,
+          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.ReadMessageHistory
+        ]
+      });
+    }
 
     const catSupport = await getOrCreateCategory("🎫 ━━━ HỖ TRỢ & MUA HÀNG ━━━", supportOverwrites);
 
@@ -553,7 +973,7 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
     // -------------------------------------------------------------------------
     const communityOverwrites = [
       {
-        id: everyoneRole.id,
+        id: everyoneRoleId,
         allow: [
           PermissionsBitField.Flags.ViewChannel, 
           PermissionsBitField.Flags.SendMessages, 
@@ -589,6 +1009,32 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
         ]
       });
     }
+    if (devRole) {
+      communityOverwrites.push({
+        id: devRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.EmbedLinks,
+          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.ManageMessages,
+          PermissionsBitField.Flags.ReadMessageHistory
+        ]
+      });
+    }
+    if (founderRole) {
+      communityOverwrites.push({
+        id: founderRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.EmbedLinks,
+          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.ManageMessages,
+          PermissionsBitField.Flags.ReadMessageHistory
+        ]
+      });
+    }
 
     const catCommunity = await getOrCreateCategory("💬 ━━━ SẢNH GIAO LƯU ━━━", communityOverwrites);
 
@@ -602,7 +1048,7 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
     // -------------------------------------------------------------------------
     const vipCatOverwrites = [
       {
-        id: everyoneRole.id,
+        id: everyoneRoleId,
         deny: [PermissionsBitField.Flags.ViewChannel]
       },
       {
@@ -637,7 +1083,33 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
           PermissionsBitField.Flags.ViewChannel, 
           PermissionsBitField.Flags.SendMessages, 
           PermissionsBitField.Flags.EmbedLinks, 
-          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.AttachFiles, 
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.ManageMessages
+        ]
+      });
+    }
+    if (devRole) {
+      vipCatOverwrites.push({
+        id: devRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel, 
+          PermissionsBitField.Flags.SendMessages, 
+          PermissionsBitField.Flags.EmbedLinks, 
+          PermissionsBitField.Flags.AttachFiles, 
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.ManageMessages
+        ]
+      });
+    }
+    if (founderRole) {
+      vipCatOverwrites.push({
+        id: founderRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel, 
+          PermissionsBitField.Flags.SendMessages, 
+          PermissionsBitField.Flags.EmbedLinks, 
+          PermissionsBitField.Flags.AttachFiles, 
           PermissionsBitField.Flags.ReadMessageHistory,
           PermissionsBitField.Flags.ManageMessages
         ]
@@ -646,11 +1118,17 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
 
     const catVIP = await getOrCreateCategory("👑 ━━━ KHÁCH HÀNG VIP ━━━", vipCatOverwrites);
 
-    // Kênh tải file: Chỉ Staff và Bot được gửi file, Khách & VIP chỉ được đọc
+    // Kênh tải file: Chỉ Staff, Dev, Founder và Bot được gửi file, Khách & VIP chỉ được đọc
     const downloadOverwrites = [
       {
-        id: everyoneRole.id,
-        deny: [PermissionsBitField.Flags.ViewChannel]
+        id: everyoneRoleId,
+        deny: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.CreatePublicThreads,
+          PermissionsBitField.Flags.CreatePrivateThreads,
+          PermissionsBitField.Flags.SendMessagesInThreads
+        ]
       },
       {
         id: botUser.id,
@@ -692,6 +1170,32 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
     if (staffRole) {
       downloadOverwrites.push({
         id: staffRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel, 
+          PermissionsBitField.Flags.SendMessages, 
+          PermissionsBitField.Flags.AttachFiles, 
+          PermissionsBitField.Flags.EmbedLinks, 
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.ManageMessages
+        ]
+      });
+    }
+    if (devRole) {
+      downloadOverwrites.push({
+        id: devRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel, 
+          PermissionsBitField.Flags.SendMessages, 
+          PermissionsBitField.Flags.AttachFiles, 
+          PermissionsBitField.Flags.EmbedLinks, 
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.ManageMessages
+        ]
+      });
+    }
+    if (founderRole) {
+      downloadOverwrites.push({
+        id: founderRole.id,
         allow: [
           PermissionsBitField.Flags.ViewChannel, 
           PermissionsBitField.Flags.SendMessages, 
@@ -705,10 +1209,10 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
 
     const chDownloads = await getOrCreateTextChannel("📦・tải-plugin-updates", catVIP, "Khu vực nhận file .jar chính thức và bản vá lỗi mới nhất cho Khách Hàng", downloadOverwrites);
 
-    // Kênh chat Khách Hàng: Cả Khách, VIP và Staff đều được chat
+    // Kênh chat Khách Hàng: Cả Khách, VIP, Dev và Staff đều được chat
     const vipChatOverwrites = [
       {
-        id: everyoneRole.id,
+        id: everyoneRoleId,
         deny: [PermissionsBitField.Flags.ViewChannel]
       },
       {
@@ -753,6 +1257,32 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
     if (staffRole) {
       vipChatOverwrites.push({
         id: staffRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel, 
+          PermissionsBitField.Flags.SendMessages, 
+          PermissionsBitField.Flags.AttachFiles, 
+          PermissionsBitField.Flags.EmbedLinks, 
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.ManageMessages
+        ]
+      });
+    }
+    if (devRole) {
+      vipChatOverwrites.push({
+        id: devRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel, 
+          PermissionsBitField.Flags.SendMessages, 
+          PermissionsBitField.Flags.AttachFiles, 
+          PermissionsBitField.Flags.EmbedLinks, 
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.ManageMessages
+        ]
+      });
+    }
+    if (founderRole) {
+      vipChatOverwrites.push({
+        id: founderRole.id,
         allow: [
           PermissionsBitField.Flags.ViewChannel, 
           PermissionsBitField.Flags.SendMessages, 
@@ -771,7 +1301,7 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
     // -------------------------------------------------------------------------
     const adminOverwrites = [
       {
-        id: everyoneRole.id,
+        id: everyoneRoleId,
         deny: [PermissionsBitField.Flags.ViewChannel]
       },
       {
@@ -829,19 +1359,94 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
 
     const catAdmin = await getOrCreateCategory("🔒 ━━━ BAN QUẢN TRỊ ━━━", adminOverwrites);
 
-    await getOrCreateTextChannel("📊・nhật-ký-giao-dịch", catAdmin, "Lịch sử mua hàng, giao dịch và ticket transcript");
-    await getOrCreateTextChannel("💬・nội-bộ-staff", catAdmin, "Kênh trao đổi nội bộ đội ngũ phát triển và quản lý");
+    // Kênh Nhật Ký Giao Dịch & Transcript: Chỉ Bot và Founder ghi tin nhắn, Staff & Dev chỉ đọc
+    const logOverwrites = [
+      {
+        id: everyoneRoleId,
+        deny: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.CreatePublicThreads,
+          PermissionsBitField.Flags.CreatePrivateThreads,
+          PermissionsBitField.Flags.SendMessagesInThreads
+        ]
+      },
+      {
+        id: botUser.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.EmbedLinks,
+          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.ManageChannels,
+          PermissionsBitField.Flags.ManageMessages,
+          PermissionsBitField.Flags.ReadMessageHistory
+        ]
+      }
+    ];
+    if (staffRole) {
+      logOverwrites.push({
+        id: staffRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.EmbedLinks,
+          PermissionsBitField.Flags.AttachFiles
+        ],
+        deny: [
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.CreatePublicThreads,
+          PermissionsBitField.Flags.CreatePrivateThreads,
+          PermissionsBitField.Flags.SendMessagesInThreads
+        ]
+      });
+    }
+    if (devRole) {
+      logOverwrites.push({
+        id: devRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.EmbedLinks,
+          PermissionsBitField.Flags.AttachFiles
+        ],
+        deny: [
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.CreatePublicThreads,
+          PermissionsBitField.Flags.CreatePrivateThreads,
+          PermissionsBitField.Flags.SendMessagesInThreads
+        ]
+      });
+    }
+    if (founderRole) {
+      logOverwrites.push({
+        id: founderRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.EmbedLinks,
+          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.ManageMessages
+        ]
+      });
+    }
+
+    const chLog = await getOrCreateTextChannel("📊・nhật-ký-giao-dịch", catAdmin, "Lịch sử mua hàng, giao dịch và ticket transcript", logOverwrites);
+    const chStaffInternal = await getOrCreateTextChannel("💬・nội-bộ-staff", catAdmin, "Kênh trao đổi nội bộ đội ngũ phát triển và quản lý");
 
     // -------------------------------------------------------------------------
     // 7. DANH MỤC: 🔊 ━━━ KÊNH THOẠI ━━━
     // -------------------------------------------------------------------------
     const voiceCatOverwrites = [
       {
-        id: everyoneRole.id,
+        id: everyoneRoleId,
         allow: [
           PermissionsBitField.Flags.ViewChannel,
           PermissionsBitField.Flags.Connect,
-          PermissionsBitField.Flags.Speak
+          PermissionsBitField.Flags.Speak,
+          PermissionsBitField.Flags.Stream,
+          PermissionsBitField.Flags.UseVAD
         ]
       },
       {
@@ -850,7 +1455,11 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
           PermissionsBitField.Flags.ViewChannel,
           PermissionsBitField.Flags.Connect,
           PermissionsBitField.Flags.Speak,
-          PermissionsBitField.Flags.ManageChannels
+          PermissionsBitField.Flags.Stream,
+          PermissionsBitField.Flags.ManageChannels,
+          PermissionsBitField.Flags.MuteMembers,
+          PermissionsBitField.Flags.DeafenMembers,
+          PermissionsBitField.Flags.MoveMembers
         ]
       }
     ];
@@ -861,18 +1470,69 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
           PermissionsBitField.Flags.ViewChannel,
           PermissionsBitField.Flags.Connect,
           PermissionsBitField.Flags.Speak,
+          PermissionsBitField.Flags.Stream,
+          PermissionsBitField.Flags.UseVAD,
           PermissionsBitField.Flags.MuteMembers,
           PermissionsBitField.Flags.DeafenMembers,
-          PermissionsBitField.Flags.MoveMembers
+          PermissionsBitField.Flags.MoveMembers,
+          PermissionsBitField.Flags.PrioritySpeaker
+        ]
+      });
+    }
+    if (devRole) {
+      voiceCatOverwrites.push({
+        id: devRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.Connect,
+          PermissionsBitField.Flags.Speak,
+          PermissionsBitField.Flags.Stream,
+          PermissionsBitField.Flags.UseVAD,
+          PermissionsBitField.Flags.MuteMembers,
+          PermissionsBitField.Flags.DeafenMembers,
+          PermissionsBitField.Flags.MoveMembers,
+          PermissionsBitField.Flags.PrioritySpeaker
+        ]
+      });
+    }
+    if (founderRole) {
+      voiceCatOverwrites.push({
+        id: founderRole.id,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.Connect,
+          PermissionsBitField.Flags.Speak,
+          PermissionsBitField.Flags.Stream,
+          PermissionsBitField.Flags.UseVAD,
+          PermissionsBitField.Flags.MuteMembers,
+          PermissionsBitField.Flags.DeafenMembers,
+          PermissionsBitField.Flags.MoveMembers,
+          PermissionsBitField.Flags.PrioritySpeaker
         ]
       });
     }
 
     const catVoice = await getOrCreateCategory("🔊 ━━━ KÊNH THOẠI ━━━", voiceCatOverwrites);
 
-    await getOrCreateVoiceChannel("🔊・Phòng Chờ Giao Lưu", catVoice);
-    await getOrCreateVoiceChannel("🛠️・Hỗ Trợ Kỹ Thuật 1-1", catVoice);
-    await getOrCreateVoiceChannel("🎮・Voice Gaming", catVoice);
+    const vcWaiting = await getOrCreateVoiceChannel("🔊・Phòng Chờ Giao Lưu", catVoice, { userLimit: 0 });
+    const vcTech11 = await getOrCreateVoiceChannel("🛠️・Hỗ Trợ Kỹ Thuật 1-1", catVoice, { userLimit: 2 });
+    const vcGaming = await getOrCreateVoiceChannel("🎮・Voice Gaming", catVoice, { userLimit: 10 });
+
+    // =========================================================================
+    // 2.8 ĐỒNG BỘ VỊ TRÍ THỨ TỰ TOÀN BỘ CATEGORIES & CHANNELS (POSITION ORDERING)
+    // =========================================================================
+    console.log("\n📐 Đang kiểm tra và đồng bộ vị trí thứ tự (Position Ordering) Categories & Channels...");
+    const categoryOrderList = [catInfo, catStore, catSupport, catCommunity, catVIP, catAdmin, catVoice];
+    const channelOrderMap = new Map();
+    channelOrderMap.set(catInfo.id, [chWelcome, chGoodbye, chRules, chAnnounce, chChangelog, chGiveaway]);
+    channelOrderMap.set(catStore.id, [chPlugins, chPricing, chDemo, chVouch]);
+    channelOrderMap.set(catSupport.id, [chOrderTicket, chTechTicket, chCustomTicket]);
+    channelOrderMap.set(catCommunity.id, [chChat, chSuggestions, chShowcase, chBotCommands]);
+    channelOrderMap.set(catVIP.id, [chDownloads, chVipChat]);
+    channelOrderMap.set(catAdmin.id, [chLog, chStaffInternal]);
+    channelOrderMap.set(catVoice.id, [vcWaiting, vcTech11, vcGaming]);
+
+    await syncChannelAndCategoryPositions(guild, botMember, categoryOrderList, channelOrderMap);
 
     console.log("✨ Toàn bộ Channels & Categories đã được đồng bộ chuẩn đẹp!");
 
@@ -946,28 +1606,40 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
     // 3. Embed Danh Sách Plugin Tiêu Biểu
     const embedPlugins = new EmbedBuilder()
       .setColor("#00E676")
-      .setTitle("💎 DANH SÁCH PLUGIN TIÊU BIỂU - LS STUDIO")
-      .setDescription("Tất cả các Plugin tại LS Studio đều được tối ưu hóa hiệu năng cao, hỗ trợ đa phiên bản từ `1.16.x -> 1.21.x` và tương thích 100% với Paper/Folia.")
+      .setTitle("💎 DANH SÁCH SẢN PHẨM & DỊCH VỤ - LS STUDIO")
+      .setDescription("Tất cả các Plugin tại LS Studio đều được tối ưu hóa hiệu năng cao, hỗ trợ đa phiên bản từ `1.16.x -> 1.21.x` và tương thích 100% với Paper/Purpur/Folia.")
       .addFields(
         {
           name: "🛡️ 1. LS-AntiCheat & Behavior Security",
           value: "• **Tính năng:** Bắt WallHit (xuyên mạng nhện/tường), InvMove A-F, AutoEat/Fish/Potion, Fake Máu.\n• **Hỗ trợ:** Paper / Purpur / Folia (1.16 - 1.21+)\n• **Giá:** `30.000 VNĐ` (~$1.50)"
         },
         {
-          name: "👁️ 2. LS-AntiFreeCam & Obfuscator",
+          name: "🛒 2. Addon Anti-Macro Cart & Boat",
+          value: "• **Tính năng:** Chặn đứng hack/macro lợi dụng Minecart và Thuyền di chuyển tốc độ bất thường.\n• **Hỗ trợ:** Paper / Purpur / Folia (1.16 - 1.21+)\n• **Giá:** `20.000 VNĐ / Tháng` (~$1.00/Mo)"
+        },
+        {
+          name: "👁️ 3. LS-AntiFreeCam & Obfuscator",
           value: "• **Tính năng:** Ẩn quặng quý và rương đồ khi ngoài tầm nhìn, khắc chế triệt để Freecam, Chest ESP, Baritone đào tự động.\n• **Hỗ trợ:** Paper / Purpur / Folia (1.16 - 1.21+)\n• **Giá:** `59.000 VNĐ` (~$2.50)"
         },
         {
-          name: "🚫 3. LS-AntiClient & BrandShield",
+          name: "🚫 4. LS-AntiClient & BrandShield",
           value: "• **Tính năng:** Nhận diện và chặn client hack (Meteor, LiquidBounce, Aristois, Fabric Cheats...).\n• **Hỗ trợ:** Paper / Purpur / Folia (1.16 - 1.21+)\n• **Giá:** `99.000 VNĐ` (~$4.00)"
         },
         {
-          name: "🎁 4. LS-GiftCode & Rewards",
+          name: "🎁 5. LS-GiftCode & Rewards",
           value: "• **Tính năng:** Hệ thống giftcode tân thủ, code sự kiện, giới hạn lượt nhập, lưu async MySQL/SQLite.\n• **Hỗ trợ:** Paper / Purpur / Folia (1.16 - 1.21+)\n• **Giá:** `30.000 VNĐ` (~$1.50)"
         },
         {
-          name: "👑 5. Combo Trọn Bộ Bảo Vệ (AntiFreeCam + AntiClient)",
+          name: "👑 6. Combo Trọn Bộ Bảo Vệ (AntiFreeCam + AntiClient)",
           value: "• Sở hữu trọn bộ cả 2 giải pháp bảo vệ cốt lõi cho server với giá ưu đãi tiết kiệm.\n• **Giá Combo:** `129.000 VNĐ` (~$5.50)"
+        },
+        {
+          name: "🧩 7. Lập Trình Mod Custom Cho Minecraft Java",
+          value: "• **Tính năng:** Forge, Fabric, NeoForge 1.16 đến 1.21+ Java PC theo yêu cầu.\n• **Giá:** Thỏa thuận theo tính năng"
+        },
+        {
+          name: "📝 8. Lập Trình Plugin Riêng Theo Ý Tưởng (Custom Dev)",
+          value: "• **Tính năng:** Trao đổi ý tưởng tính năng độc quyền trực tiếp với Developer.\n• **Giá:** Thỏa thuận theo độ phức tạp"
         }
       )
       .setFooter({ text: "Mở Ticket tại kênh #mua-plugin để đặt mua và nhận file ngay!" });
@@ -981,20 +1653,47 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
       .setDescription("Bảng giá minh bạch, cam kết không phát sinh chi phí ẩn. Hỗ trợ bảo hành và cập nhật trọn đời.")
       .addFields(
         {
-          name: "📦 1. Plugin Đóng Gói Sẵn (Pre-made Plugins)",
-          value: "• **LS-AntiCheat:** `30.000đ`\n• **LS-AntiFreeCam:** `59.000đ`\n• **LS-AntiClient:** `99.000đ`\n• **LS-GiftCode:** `30.000đ`\n• **Combo Anti (FreeCam + Client):** `129.000đ`\n• Miễn phí update trọn đời các bản vá lỗi."
+          name: "📦 1. Plugin Minecraft (Paper / Purpur / Folia 1.16 - 1.21+)",
+          value: 
+            "• 🛡️ **LS-AntiCheat (Bản Gốc):** `30.000 VNĐ` • `~$1.50 USD`\n" +
+            "• 🛒 **Addon Anti-Macro Cart:** `20.000 VNĐ / Tháng` • `~$1.00 USD / Mo`\n" +
+            "• 🎁 **LS-GiftCode:** `30.000 VNĐ` • `~$1.50 USD`\n" +
+            "• 👁️ **LS-AntiFreeCam:** `59.000 VNĐ` • `~$2.50 USD`\n" +
+            "• 🚫 **LS-AntiClient:** `99.000 VNĐ` • `~$4.00 USD`\n" +
+            "• 👑 **Combo 2 Plugin Anti:** `129.000 VNĐ` • `~$5.50 USD`\n" +
+            "• Miễn phí update trọn đời các bản vá lỗi."
         },
         {
-          name: "🛠️ 2. Lập Trình Plugin & Mod Theo Ý Tưởng (Custom Dev)",
-          value: "• **Cỡ Nhỏ (Tiện ích, lệnh, GUI, fix bug):** `50.000đ - 150.000đ`\n• **Cỡ Trung (Tính năng gameplay mới, event, mini-system):** `200.000đ - 500.000đ`\n• **Cỡ Lớn (Hệ thống RPG tổng thể, Minigame độc quyền):** `Thỏa thuận`\n• **Mod Java Custom (Forge/Fabric/NeoForge):** `Thỏa thuận theo tính năng`"
+          name: "🔑 2. API Key AI (Cursor / Cline / Coding / Bot Discord)",
+          value: 
+            "• ⚡ **API Key Claude 100M Token (3 Ngày):** `109.000 VNĐ` • `~$4.25 USD`\n" +
+            "• 💻 **API Key Codex 100M Token (3 Ngày):** `85.000 VNĐ` • `~$3.25 USD`"
         },
         {
-          name: "⚡ 3. Dịch Vụ Tối Ưu & Sửa Lỗi Server",
-          value: "• Fix lỗi TPS tụt, phân tích Spark / Timings, dọn dẹp cấu hình: `50.000đ - 100.000đ`\n• Port plugin cũ sang tương thích **Folia Multithreading**: `Thỏa thuận`"
+          name: "💎 3. Tài Khoản & Link AI Premium",
+          value: 
+            "• 🌟 **Acc Gemini Family Nâng Chính Chủ (18 Tháng):** `35.000 VNĐ` • `~$1.50 USD`\n" +
+            "• 🚀 **Link Kích Hoạt Gemini Pro 18M:** `49.000 VNĐ` • `~$2.00 USD`\n" +
+            "• 🚀 **Acc Google AI Pro Chính Chủ (1 Tháng):** `89.000 VNĐ` • `~$3.50 USD`\n" +
+            "• 👑 **Acc Claude Max 20 (1 Tháng):** `89.000 VNĐ` • `~$3.50 USD`\n" +
+            "• ⭐ **Acc ChatGPT Plus (1 Tháng):** `169.000 VNĐ` • `~$6.80 USD`\n" +
+            "• ✨ **Acc Monica AI Pro Model Claude (3 Ngày):** `49.000 VNĐ` • `~$2.00 USD`\n" +
+            "• 🎁 **Acc ChatGPT New Gmail (Nhận Offer):** `5.000 VNĐ` • `~$0.20 USD` *(Cần thẻ PayPal)*"
         },
         {
-          name: "💳 4. Phương Thức Thanh Toán Hỗ Trợ",
-          value: "• 🏦 **Chuyển Khoản Ngân Hàng (VietQR 24/7):** MBBank - `844515133333` (VAN HUU PHAM NGUYEN)\n• 📱 **Ví Điện Tử MoMo / Thẻ Cào:** Hỗ trợ linh hoạt\n• 🌐 **PayPal / Crypto:** Dành cho khách hàng quốc tế qua Ticket"
+          name: "🛠️ 4. Lập Trình Plugin & Mod Java Custom",
+          value: 
+            "• **Cỡ Nhỏ (Tiện ích, lệnh, GUI, fix bug):** `50.000đ - 150.000đ` • `~$2 - $6 USD`\n" +
+            "• **Cỡ Trung (Tính năng gameplay mới, event, mini-system):** `200.000đ - 500.000đ` • `~$8 - $20 USD`\n" +
+            "• **Cỡ Lớn (Hệ thống RPG tổng thể, Minigame độc quyền):** `Thỏa thuận`\n" +
+            "• **Mod Java Custom (Forge/Fabric/NeoForge):** `Thỏa thuận theo tính năng`"
+        },
+        {
+          name: "💳 5. Phương Thức Thanh Toán Hỗ Trợ",
+          value: 
+            "• 🏦 **Chuyển Khoản Ngân Hàng (VietQR 24/7):** MBBank - `844515133333` (VAN HUU PHAM NGUYEN)\n" +
+            "• 📱 **Ví Điện Tử MoMo / Thẻ Cào:** Hỗ trợ linh hoạt\n" +
+            "• 🌐 **PayPal / Crypto / Card:** Dành cho khách hàng quốc tế qua Ticket"
         }
       )
       .setFooter({ text: "Mọi giao dịch chỉ thực hiện qua Ticket chính thức tại Discord LS Studio!" });
@@ -1123,35 +1822,63 @@ if (require.main === module) {
     console.error('❌ Lỗi Discord Client:', err.message || err);
   });
 
-  process.on('unhandledRejection', async (reason) => {
+  let isExiting = false;
+async function cleanupAndExit(code = 0) {
+  if (isExiting) return;
+  isExiting = true;
     clearTimeout(watchdog);
-    console.error('❌ Lỗi không kiểm soát (Unhandled Rejection):', reason);
     try { await client.destroy(); } catch {}
-    process.exit(1);
+    process.exit(code);
+  }
+
+  process.on('SIGINT', async () => {
+    console.log('🛑 [SIGINT] Đang dừng tiến trình setup server...');
+    await cleanupAndExit(0);
+  });
+  process.on('SIGTERM', async () => {
+    console.log('🛑 [SIGTERM] Đang dừng tiến trình setup server...');
+    await cleanupAndExit(0);
+  });
+  process.on('SIGHUP', async () => {
+    console.log('🛑 [SIGHUP] Đang dừng tiến trình setup server...');
+    await cleanupAndExit(0);
+  });
+
+  process.on('unhandledRejection', async (reason) => {
+    console.error('❌ Lỗi không kiểm soát (Unhandled Rejection):', reason);
+    await cleanupAndExit(1);
+  });
+
+  process.on('uncaughtException', async (err) => {
+    console.error('❌ Lỗi ngoại lệ chưa bắt (Uncaught Exception):', err);
+    await cleanupAndExit(1);
   });
 
   client.once(Events.ClientReady, async (readyClient) => {
     try {
       await runServerSetup(client, GUILD_ID);
-      clearTimeout(watchdog);
-      try { await client.destroy(); } catch {}
-      process.exit(0);
+      await cleanupAndExit(0);
     } catch (err) {
-      clearTimeout(watchdog);
-      try { await client.destroy(); } catch {}
-      process.exit(1);
+      console.error('❌ Lỗi setup server:', err.message || err);
+      await cleanupAndExit(1);
     }
   });
 
-  client.login(TOKEN).catch((err) => {
-    clearTimeout(watchdog);
+  if (!TOKEN || TOKEN === 'YOUR_BOT_TOKEN_HERE' || TOKEN.trim() === '') {
+  console.error('❌ Lỗi: DISCORD_TOKEN chưa được thiết lập trong .env hoặc token.local.js!');
+  process.exit(1);
+}
+
+client.login(TOKEN).catch(async (err) => {
     console.error('❌ Đăng nhập Discord thất bại:', err.message || err);
-    process.exit(1);
+    await cleanupAndExit(1);
   });
 }
 
 module.exports = {
   client,
   GUILD_ID,
-  runServerSetup
+  runServerSetup,
+  safeApiCall,
+  sleep
 };

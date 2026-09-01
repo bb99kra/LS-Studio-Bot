@@ -1,4 +1,6 @@
+const path = require('path');
 const fs = require('fs');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { 
   Client,
   Events, 
@@ -9,12 +11,17 @@ const {
   ButtonStyle 
 } = require('discord.js');
 
-const TOKEN = process.env.DISCORD_TOKEN || (fs.existsSync('./token.local.js') ? require('./token.local.js').TOKEN : 'YOUR_BOT_TOKEN_HERE');
-const LS_STUDIO_GUILD_ID = "1542476657825419334";
+const tokenLocalPath = path.join(__dirname, 'token.local.js');
+const localConfig = fs.existsSync(tokenLocalPath) ? require(tokenLocalPath) : {};
+const TOKEN = process.env.DISCORD_TOKEN || localConfig.TOKEN || localConfig.DISCORD_TOKEN || '';
+const LS_STUDIO_GUILD_ID = process.env.GUILD_ID || localConfig.GUILD_ID || "1542476657825419334";
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
+
+// Helper: Pacing delay to prevent Discord 429 Rate Limits
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Watchdog timeout to prevent script hanging indefinitely
 const WATCHDOG_TIMEOUT_MS = 120000;
@@ -45,20 +52,34 @@ client.once(Events.ClientReady, async () => {
   console.log(`🤖 Logged in as ${client.user.tag}! Cập nhật toàn bộ các kênh sang Song Ngữ VI & EN chuẩn đẹp...`);
 
   try {
-    const guild = await client.guilds.fetch(LS_STUDIO_GUILD_ID);
+    const guild = await client.guilds.fetch(LS_STUDIO_GUILD_ID).catch(err => {
+      console.error(`❌ [ERROR] Không thể fetch Guild (${LS_STUDIO_GUILD_ID}):`, err.message || err);
+      return null;
+    });
+    if (!guild) {
+      console.error(`❌ [ERROR] Không tìm thấy Guild (${LS_STUDIO_GUILD_ID}) hoặc Bot chưa tham gia.`);
+      return await cleanupAndExit(1);
+    }
     const channels = await guild.channels.fetch();
 
     async function refreshChannel(channel, fn) {
-      if (!channel) return;
+      if (!channel) {
+        console.warn("⚠️ [WARN] Không tìm thấy channel cần cập nhật.");
+        return;
+      }
       try {
-        const messages = await channel.messages.fetch({ limit: 15 });
+        const messages = await channel.messages.fetch({ limit: 15 }).catch(() => new Map());
         for (const [id, msg] of messages) {
-          if (msg.author.id === client.user.id) await msg.delete().catch(() => {});
+          if (msg.author.id === client.user.id) {
+            await msg.delete().catch(() => {});
+            await sleep(250);
+          }
         }
         await fn(channel);
-        console.log(`   ✅ Cập nhật kênh: #${channel.name}`);
+        await sleep(500);
+        console.log(`   ✅ Cập nhật thành công: #${channel.name}`);
       } catch (e) {
-        console.error(`   ❌ Lỗi kênh ${channel.name}:`, e.message);
+        console.error(`   ❌ Lỗi kênh ${channel.name || 'Unknown'}:`, e.message);
       }
     }
 
@@ -90,7 +111,7 @@ client.once(Events.ClientReady, async () => {
           "• **Giá bán:** `30.000 VNĐ` • **Price:** `~$1.50 USD`\n" +
           "• **Nền tảng hỗ trợ:** Paper, Purpur, Folia 1.16 đến 1.21+\n\n" +
           "⚔️ **Tính năng nổi bật:**\n" +
-          "• **Chống WallHit & Raytrace:** Chặn đứng Killaura đánh xuyên tường, xuyên block chắn, đặc biệt chặn triệt để hack đánh xuyên **Mạng Nhện Cobweb**, cửa và kính.\n" +
+          "• **Chống WallHit & Raytrace:** Chặn đứng Killaura đánh xuyên tường, xuyên block chắn, đặc biệt chặn triệt để hack đánh xuyên **mạng nhện (Cobweb)**, cửa và kính.\n" +
           "• **Chống gian lận PvP:** Chặn tự động ăn thức ăn siêu tốc, chặn auto câu cá AFK, chặn auto ném và uống potion tức thì khi tụt máu.\n" +
           "• **Chống macro khiên:** Chặn vừa giơ khiên vừa chém, vừa che khiên vừa chạy nước rút, chặn click bật tắt khiên 0ms.\n" +
           "• **Kiểm tra kho đồ (Inventory A-F):** Chặn vừa mở hòm đồ vừa đi lại, chém nhau hoặc lia chuột. Tóm gọn AutoClicker bằng thuật toán phân tích độ lệch chuẩn.\n" +
@@ -99,15 +120,17 @@ client.once(Events.ClientReady, async () => {
           "────────────────────────────────────────\n" +
           "🇺🇸 **ENGLISH:**\n" +
           "Advanced behavioral anti-cheat and wall-hit security engine for Paper, Purpur, Folia 1.16 to 1.21+.\n\n" +
+          "• **Price:** `~$1.50 USD` • `30.000 VNĐ`\n" +
+          "• **Supported Platforms:** Paper, Purpur, Folia 1.16 to 1.21+\n\n" +
           "🛡️ **Core Features:**\n" +
-          "• **WallHit & Raytrace Check:** Prevents attacking through blocks, walls, doors, glass, and especially **Cobwebs Line-of-Sight**.\n" +
+          "• **WallHit & Raytrace Check:** Prevents attacking through blocks, walls, doors, glass, and especially **Cobweb line-of-sight**.\n" +
           "• **PvP & Utility Checks:** Blocks AutoEat, AutoFish AFK bots, and AutoPotion instant healing.\n" +
           "• **Shield Checks:** Blocks attacking while shielding, sprinting while shielding, and instant shield macros.\n" +
           "• **Inventory Checks (Type A-F):** Prevents moving, fighting, or rotating camera while inventory is open. Statistical heuristic detection for AutoClickers.\n" +
           "• **BadPacket Checks:** Detects NoSwing animation exploits, Forcefield, and robotic Aimbot rotations.\n" +
           "• **Item & Health Obfuscation:** Fake health spoofing against DamageIndicator mods, hidden enchants and armor durability."
         )
-        .setFooter({ text: "LS STUDIO • Hỗ trợ nhiệt tình / Worldwide Support" });
+        .setFooter({ text: "LS STUDIO • Hỗ trợ tận tâm / Worldwide Dedicated Support" });
 
       await ch.send({ embeds: [embed], components: [makeActionButtons()] });
     });
@@ -119,7 +142,7 @@ client.once(Events.ClientReady, async () => {
     await refreshChannel(chFc, async (ch) => {
       const embed = new EmbedBuilder()
         .setColor("#00E5FF")
-        .setTitle("👁️ LS-ANTIFREECAM & OBFUSCATOR")
+        .setTitle("👁️ LS-ANTIFREECAM & OBFUSCATOR • ANTI-XRAY & CHEST ESP")
         .setDescription(
           "🇻🇳 **TIẾNG VIỆT:**\n" +
           "Khắc chế hoàn toàn Freecam Mod, Baritone đào tự động, Chest ESP và X-Ray.\n\n" +
@@ -132,12 +155,14 @@ client.once(Events.ClientReady, async () => {
           "────────────────────────────────────────\n" +
           "🇺🇸 **ENGLISH:**\n" +
           "Complete solution against Freecam Mod, Baritone Auto-Mining, Chest ESP, and X-Ray.\n\n" +
+          "• **Price:** `~$2.50 USD` • `59.000 VNĐ`\n" +
+          "• **Supported Platforms:** Paper, Purpur, Folia 1.16 to 1.21+\n\n" +
           "💎 **Core Features:**\n" +
           "• **Container & Ore Obfuscation:** Hides valuable ores, chests, and shulker boxes outside player line-of-sight.\n" +
           "• **Anti Baritone & Mining Bots:** Renders Baritone and auto-mining scripts blind to hidden ores and loot.\n" +
           "• **Async Optimization:** Highly optimized async engine ensuring solid 20 TPS even under heavy player load."
         )
-        .setFooter({ text: "LS STUDIO • Hỗ trợ nhiệt tình / Worldwide Support" });
+        .setFooter({ text: "LS STUDIO • Hỗ trợ tận tâm / Worldwide Dedicated Support" });
 
       await ch.send({ embeds: [embed], components: [makeActionButtons()] });
     });
@@ -149,7 +174,7 @@ client.once(Events.ClientReady, async () => {
     await refreshChannel(chClient, async (ch) => {
       const embed = new EmbedBuilder()
         .setColor("#ED4245")
-        .setTitle("🚫 LS-ANTICLIENT & BRANDSHIELD")
+        .setTitle("🚫 LS-ANTICLIENT & BRANDSHIELD • CLIENT BRAND BLOCKER")
         .setDescription(
           "🇻🇳 **TIẾNG VIỆT:**\n" +
           "Hệ thống nhận diện và chặn đứng các Hacked Client phổ biến ngay từ cổng vào.\n\n" +
@@ -162,12 +187,14 @@ client.once(Events.ClientReady, async () => {
           "────────────────────────────────────────\n" +
           "🇺🇸 **ENGLISH:**\n" +
           "Smart packet & client brand analyzer to block popular hacked clients upon connection.\n\n" +
+          "• **Price:** `~$4.00 USD` • `99.000 VNĐ`\n" +
+          "• **Supported Platforms:** Paper, Purpur, Folia 1.16 to 1.21+\n\n" +
           "🛡️ **Core Features:**\n" +
           "• **Hacked Client Blocker:** Identifies and blocks Meteor, LiquidBounce, Aristois, Fabric Cheat clients.\n" +
           "• **Anti-Spoofing:** Detects and denies spoofed vanilla brand packets.\n" +
           "• **Flexible Actions:** Automatic kick, staff alerts, or silent violation logging."
         )
-        .setFooter({ text: "LS STUDIO • Hỗ trợ nhiệt tình / Worldwide Support" });
+        .setFooter({ text: "LS STUDIO • Hỗ trợ tận tâm / Worldwide Dedicated Support" });
 
       await ch.send({ embeds: [embed], components: [makeActionButtons()] });
     });
@@ -179,7 +206,7 @@ client.once(Events.ClientReady, async () => {
     await refreshChannel(chGc, async (ch) => {
       const embed = new EmbedBuilder()
         .setColor("#FEE75C")
-        .setTitle("🎁 LS-GIFTCODE & REWARDS")
+        .setTitle("🎁 LS-GIFTCODE & REWARDS • GIFT CODE SYSTEM")
         .setDescription(
           "🇻🇳 **TIẾNG VIỆT:**\n" +
           "Hệ thống tạo mã code quà tặng chuyên nghiệp dành cho Server Minecraft.\n\n" +
@@ -193,13 +220,15 @@ client.once(Events.ClientReady, async () => {
           "────────────────────────────────────────\n" +
           "🇺🇸 **ENGLISH:**\n" +
           "Professional gift code & reward redeem system for Minecraft servers.\n\n" +
+          "• **Price:** `~$1.50 USD` • `30.000 VNĐ`\n" +
+          "• **Supported Platforms:** Paper, Purpur, Folia 1.16 to 1.21+\n\n" +
           "📦 **Core Features:**\n" +
           "• **Flexible Code Creation:** Create unlimited starter packs, event codes, and compensation codes.\n" +
           "• **Usage Limits & Expiration:** Set per-player or global claim limits with automated expiry timers.\n" +
           "• **Diverse Rewards:** Supports custom items, Vault economy money, and automatic console commands.\n" +
           "• **Lightweight Database:** Fully async MySQL & SQLite data storage."
         )
-        .setFooter({ text: "LS STUDIO • Hỗ trợ nhiệt tình / Worldwide Support" });
+        .setFooter({ text: "LS STUDIO • Hỗ trợ tận tâm / Worldwide Dedicated Support" });
 
       await ch.send({ embeds: [embed], components: [makeActionButtons()] });
     });
@@ -211,12 +240,11 @@ client.once(Events.ClientReady, async () => {
     await refreshChannel(chCombo, async (ch) => {
       const embed = new EmbedBuilder()
         .setColor("#FF73FA")
-        .setTitle("👑 COMBO TRỌN BỘ 2 PLUGIN ANTI")
+        .setTitle("👑 COMBO 2 PLUGIN ANTI • ALL-IN-ONE SECURITY SUITE")
         .setDescription(
           "🇻🇳 **TIẾNG VIỆT:**\n" +
           "Sở hữu trọn bộ 2 giải pháp bảo vệ cốt lõi cho server với giá ưu đãi tiết kiệm nhất.\n\n" +
-          "• **Giá Combo:** `129.000 VNĐ` • Tiết kiệm 29.000 VNĐ so với mua lẻ\n" +
-          "• **Combo Price:** `~$5.50 USD` • Save $1.50 compared to separate purchases\n" +
+          "• **Giá Combo:** `129.000 VNĐ` • `~$5.50 USD` *(Tiết kiệm 29.000 VNĐ / Save $1.00)*\n" +
           "• **Nền tảng hỗ trợ:** Paper, Purpur, Folia 1.16 đến 1.21+\n\n" +
           "🌟 **Bao gồm:**\n" +
           "1. **LS-AntiFreeCam & Obfuscator:** Chống soi rương, soi quặng, khắc chế Baritone đào tự động.\n" +
@@ -224,11 +252,13 @@ client.once(Events.ClientReady, async () => {
           "────────────────────────────────────────\n" +
           "🇺🇸 **ENGLISH:**\n" +
           "Get both essential server security solutions at an exclusive discounted bundle price.\n\n" +
+          "• **Bundle Price:** `~$5.50 USD` • `129.000 VNĐ` *(Save $1.00 / 29.000 VNĐ compared to separate purchases)*\n" +
+          "• **Supported Platforms:** Paper, Purpur, Folia 1.16 to 1.21+\n\n" +
           "🌟 **Includes:**\n" +
-          "1. **LS-AntiFreeCam & Obfuscator:** Complete anti-xray, chest esp, and anti-baritone mining.\n" +
+          "1. **LS-AntiFreeCam & Obfuscator:** Complete anti-xray, chest ESP, and anti-baritone mining.\n" +
           "2. **LS-AntiClient & BrandShield:** Instant detection and denial for Meteor, LiquidBounce, Aristois..."
         )
-        .setFooter({ text: "LS STUDIO • Hỗ trợ nhiệt tình / Worldwide Support" });
+        .setFooter({ text: "LS STUDIO • Hỗ trợ tận tâm / Worldwide Dedicated Support" });
 
       await ch.send({ embeds: [embed], components: [makeActionButtons()] });
     });
@@ -240,7 +270,7 @@ client.once(Events.ClientReady, async () => {
     await refreshChannel(chMod, async (ch) => {
       const embed = new EmbedBuilder()
         .setColor("#9C27B0")
-        .setTitle("🧩 DỊCH VỤ LẬP TRÌNH MOD CUSTOM CHO MINECRAFT JAVA")
+        .setTitle("🧩 DỊCH VỤ LẬP TRÌNH MOD CUSTOM CHO MINECRAFT JAVA / CUSTOM JAVA MOD DEV")
         .setDescription(
           "🇻🇳 **TIẾNG VIỆT:**\n" +
           "Nhận thiết kế và lập trình Mod độc quyền theo đúng tính năng bạn yêu cầu.\n\n" +
@@ -260,7 +290,7 @@ client.once(Events.ClientReady, async () => {
           "• **Supported Platforms:** Forge, Fabric, NeoForge, Quilt (1.16 to 1.21+ Java PC).\n" +
           "• **Scope:** Any custom feature, mechanics, or items you require.\n" +
           "• **Notice:** PC Java Edition only (Bedrock/PE is not supported).\n" +
-          "• **Price:** Negotiable based on project complexity.\n\n" +
+          "• **Price:** Negotiable based on project specifications.\n\n" +
           "🛠️ **Popular Categories:**\n" +
           "• Custom weapons, tools, armor sets with unique skill effects.\n" +
           "• Custom blocks, ores, crops, and world generation.\n" +
@@ -268,7 +298,7 @@ client.once(Events.ClientReady, async () => {
           "• Custom GUI menus, HUDs, and inventory screens.\n" +
           "• Exclusive gameplay mechanics for servers and modpacks."
         )
-        .setFooter({ text: "LS STUDIO • Hỗ trợ nhiệt tình / Worldwide Support" });
+        .setFooter({ text: "LS STUDIO • Hỗ trợ tận tâm / Worldwide Dedicated Support" });
 
       await ch.send({ embeds: [embed], components: [makeActionButtons()] });
     });
@@ -287,34 +317,41 @@ client.once(Events.ClientReady, async () => {
         )
         .addFields(
           {
-            name: "📦 1. Plugin Có Sẵn • Paper / Purpur / Folia 1.16 - 1.21+",
+            name: "📦 1. Plugin Minecraft Có Sẵn / Premade Plugins (1.16 - 1.21+)",
             value: 
               "• 🛡️ **LS-AntiCheat:** `30.000 VNĐ` • `~$1.50 USD`\n" +
-              "• 🎁 **LS-GiftCode:** `30.000 VNĐ` • `~$1.50 USD`\n" +
-              "• 👁️ **LS-AntiFreeCam:** `59.000 VNĐ` • `~$2.50 USD`\n" +
-              "• 🚫 **LS-AntiClient:** `99.000 VNĐ` • `~$4.00 USD`\n" +
-              "• 👑 **Combo 2 Plugin Anti:** `129.000 VNĐ` • `~$5.50 USD`"
+              "• 🛒 **Addon Anti-Macro Cart:** `20.000 VNĐ/Tháng` • `~$1.00 USD/Mo`\n" +
+              "• 🎁 **LS-GiftCode & Rewards:** `30.000 VNĐ` • `~$1.50 USD`\n" +
+              "• 👁️ **LS-AntiFreeCam & Obfuscator:** `59.000 VNĐ` • `~$2.50 USD`\n" +
+              "• 🚫 **LS-AntiClient & BrandShield:** `99.000 VNĐ` • `~$4.00 USD`\n" +
+              "• 👑 **Combo 2 Plugin Anti:** `129.000 VNĐ` • `~$5.50 USD` *(Tiết kiệm 29.000 VNĐ / Save $1.00)*"
           },
           {
-            name: "🛠️ 2. Lập Trình Plugin Riêng / Custom Plugin Dev",
+            name: "🤖 2. Dịch Vụ AI & API Key / AI Accounts & API Keys",
             value: 
-              "• Hỗ trợ tối ưu cho Paper, Purpur, Folia 1.16 đến 1.21+\n" +
-              "• Plugin tiện ích, lệnh, giao diện: `50k - 150k` • `~$2 - $6 USD`\n" +
-              "• Hệ thống gameplay, minigame riêng: `200k - 500k` • `~$8 - $20 USD`\n" +
-              "• Dự án lớn: Thỏa thuận theo độ phức tạp / Negotiable"
+              "• 🌟 **Gemini Family Chính Chủ (18 Tháng / 18 Months):** `35.000 VNĐ` • `~$1.50 USD`\n" +
+              "• 🚀 **Link Kích Hoạt Gemini Pro (18 Tháng / 18 Months):** `49.000 VNĐ` • `~$2.00 USD`\n" +
+              "• 🚀 **Google AI Pro Chính Chủ (1 Tháng / 1 Month):** `89.000 VNĐ` • `~$3.50 USD`\n" +
+              "• ⚡ **API Key Claude 100M (3 Ngày / 3 Days):** `109.000 VNĐ` • `~$4.25 USD`\n" +
+              "• 💻 **API Key Codex GPT-5.6 100M (3 Ngày / 3 Days):** `85.000 VNĐ` • `~$3.25 USD`\n" +
+              "• 👑 **Claude Max 20 (1 Tháng / 1 Month):** `89.000 VNĐ` • `~$3.50 USD`\n" +
+              "• ⭐ **ChatGPT Plus GPT-5.6 (1 Tháng / 1 Month):** `169.000 VNĐ` • `~$6.80 USD`\n" +
+              "• ✨ **Monica AI Pro Claude 5 (3 Ngày / 3 Days):** `49.000 VNĐ` • `~$2.00 USD`\n" +
+              "• 🎁 **ChatGPT New Gmail (Nhận Offer / Trial):** `5.000 VNĐ` • `~$0.20 USD`"
           },
           {
-            name: "🧩 3. Lập Trình Mod Custom Cho Java / Custom Java Mod Dev",
+            name: "🛠️ 3. Lập Trình Plugin & Mod Riêng / Custom Plugin & Mod Dev",
             value: 
-              "• Nền tảng: Forge, Fabric, NeoForge 1.16 đến 1.21+ Java PC\n" +
-              "• Hạng mục: Tùy theo tính năng khách hàng yêu cầu / Custom specs\n" +
-              "• Báo giá: Trao đổi ý tưởng trong Ticket để nhận báo giá chi tiết"
+              "• Plugin tiện ích, lệnh, giao diện: `50.000 - 150.000 VNĐ` • `~$2.00 - $6.00 USD`\n" +
+              "• Hệ thống gameplay, minigame riêng: `200.000 - 500.000 VNĐ` • `~$8.00 - $20.00 USD`\n" +
+              "• Mod Custom Java (Forge/Fabric/NeoForge): Thỏa thuận theo yêu cầu / Negotiable\n" +
+              "• Dự án lớn: Trao đổi trực tiếp trong Ticket để nhận báo giá chi tiết"
           },
           {
-            name: "💳 4. Thanh Toán / Payment Methods",
+            name: "💳 4. Phương Thức Thanh Toán / Payment Methods",
             value: 
               "• 🇻🇳 **Việt Nam:** MBBank Quân Đội • STK `844515133333` • Tên **VAN HUU PHAM NGUYEN**\n" +
-              "• 🌐 **Global:** PayPal / Crypto / Card (Open ticket for payment link)"
+              "• 🌐 **Global:** PayPal / Crypto / Card *(Open ticket for international payment link)*"
           }
         )
         .setFooter({ text: "Giao dịch an toàn qua Ticket tại LS STUDIO / Secure Ticket Transactions" });
@@ -328,25 +365,35 @@ client.once(Events.ClientReady, async () => {
     const chTb = channels.find(c => c && c.name.includes("thông-báo"));
     await refreshChannel(chTb, async (ch) => {
       const chBuy = channels.find(c => c && c.name.includes("mua-plugin"));
+      const chAc = channels.find(c => c && c.name.includes("ls-anticheat"));
+      const chFc = channels.find(c => c && c.name.includes("ls-antifreecam"));
+      const chClient = channels.find(c => c && c.name.includes("ls-anticlient"));
+      const chGc = channels.find(c => c && c.name.includes("ls-giftcode"));
+      const chCombo = channels.find(c => c && c.name.includes("combo-anti"));
+      const chMod = channels.find(c => c && c.name.includes("mod-custom-java"));
+      const chPrice = channels.find(c => c && c.name.includes("bảng-giá"));
+
+      const formatCh = (target, fallback) => (target && target.id) ? `<#${target.id}>` : fallback;
+
       const embed = new EmbedBuilder()
         .setColor("#5865F2")
         .setTitle("🚀 CHÀO MỪNG ĐẾN VỚI LS STUDIO / WELCOME TO LS STUDIO")
         .setDescription(
           "🇻🇳 **TIẾNG VIỆT:**\n" +
-          "Chào anh em! **LS STUDIO** chuyên tự phát triển các **Plugin Minecraft, Hệ Thống Chống Hack và Mod Custom cho Minecraft Java** tối ưu mượt mà cho Paper, Purpur và Folia 1.16 đến 1.21+.\n\n" +
-          "🛠️ **Danh mục sản phẩm:**\n" +
-          `• 🛡️ AntiCheat Đa Năng: <#${chAc?.id}>\n` +
-          `• 👁️ Chống Freecam và X-Ray: <#${chFc?.id}>\n` +
-          `• 🚫 Chặn Hacked Client: <#${chClient?.id}>\n` +
-          `• 🎁 Quà Tặng GiftCode: <#${chGc?.id}>\n` +
-          `• 👑 Combo Tiết Kiệm: <#${chCombo?.id}>\n` +
-          `• 🧩 Mod Custom Java: <#${chMod?.id}>\n` +
-          `• 💰 Bảng Giá Tổng Hợp: <#${chPrice?.id}>\n` +
-          `• 🛒 Mở Ticket Đặt Hàng: <#${chBuy?.id}>\n\n` +
+          "Chào anh em! **LS STUDIO** chuyên tự phát triển các **Plugin Minecraft, Hệ Thống Chống Hack, Mod Custom Minecraft Java** và cung cấp **Tài Khoản & API Key AI** chất lượng cao, tối ưu mượt mà cho Paper, Purpur và Folia 1.16 đến 1.21+.\n\n" +
+          "🛠️ **Danh mục sản phẩm & dịch vụ:**\n" +
+          `• 🛡️ AntiCheat Đa Năng: ${formatCh(chAc, '#🛡️・ls-anticheat')}\n` +
+          `• 👁️ Chống Freecam & X-Ray: ${formatCh(chFc, '#👁️・ls-antifreecam')}\n` +
+          `• 🚫 Chặn Hacked Client: ${formatCh(chClient, '#🚫・ls-anticlient')}\n` +
+          `• 🎁 Quà Tặng GiftCode: ${formatCh(chGc, '#🎁・ls-giftcode')}\n` +
+          `• 👑 Combo Tiết Kiệm: ${formatCh(chCombo, '#👑・combo-anti')}\n` +
+          `• 🧩 Mod Custom Java: ${formatCh(chMod, '#🧩・mod-custom-java')}\n` +
+          `• 💰 Bảng Giá Tổng Hợp: ${formatCh(chPrice, '#💰・bảng-giá')}\n` +
+          `• 🛒 Mở Ticket Đặt Hàng: ${formatCh(chBuy, '#🛒・mua-plugin')}\n\n` +
           "────────────────────────────────────────\n" +
           "🇺🇸 **ENGLISH:**\n" +
-          "Welcome to **LS STUDIO**! We specialize in developing high-performance **Minecraft Plugins, Anti-Cheat solutions, and Custom Java Mods** for Paper, Purpur, and Folia 1.16 to 1.21+.\n\n" +
-          "Browse our channels above or open a ticket at <#" + chBuy?.id + "> to place an order!"
+          "Welcome to **LS STUDIO**! We specialize in high-performance **Minecraft Plugins, Anti-Cheat solutions, Custom Java Mods**, and premium **AI Accounts & API Keys** for Paper, Purpur, and Folia 1.16 to 1.21+.\n\n" +
+          `Browse our channels above or open a ticket at ${formatCh(chBuy, '#🛒・mua-plugin')} to place an order!`
         )
         .setFooter({ text: "LS STUDIO • Lead Developer: Nguyendzvn" });
 
@@ -374,7 +421,7 @@ client.once(Events.ClientReady, async () => {
           "3. Do not leak or redistribute exclusive LS Studio plugins and mods.\n" +
           "4. All purchases and orders must be conducted inside official Tickets."
         )
-        .setFooter({ text: "LS STUDIO • Tuân thủ quy định để xây dựng cộng đồng văn minh" });
+        .setFooter({ text: "LS STUDIO • Tuân thủ quy định để xây dựng cộng đồng văn minh / Please follow server rules" });
 
       await ch.send({ embeds: [embed] });
     });
@@ -456,7 +503,7 @@ client.once(Events.ClientReady, async () => {
           "🇺🇸 **ENGLISH:**\n" +
           "Have a unique Plugin or Java Mod idea for your server? Click below to discuss your custom project, get a quotation, and timeline directly from our Developer!"
         )
-        .setFooter({ text: "LS STUDIO • Cam kết đúng hẹn, tối ưu mượt mà" });
+        .setFooter({ text: "LS STUDIO • Cam kết đúng hẹn, tối ưu mượt mà / On-time delivery & High performance" });
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
@@ -497,26 +544,19 @@ client.once(Events.ClientReady, async () => {
     });
 
     console.log("🎉 ĐÃ CẬP NHẬT TOÀN BỘ 13 KÊNH SANG SONG NGỮ VI & EN HOÀN TẤT 100%!");
-    clearTimeout(watchdog);
-    try {
-      await client.destroy();
-    } catch {}
-    process.exit(0);
+    await cleanupAndExit(0);
   } catch (err) {
-    clearTimeout(watchdog);
-    console.error("❌ Lỗi:", err.message || err);
-    try {
-      await client.destroy();
-    } catch {}
-    process.exit(1);
+    console.error("❌ [ERROR] Lỗi thực thi:", err.message || err);
+    await cleanupAndExit(1);
   }
 });
 
-client.login(TOKEN).catch(async (err) => {
-  clearTimeout(watchdog);
-  console.error('❌ Đăng nhập Discord thất bại:', err.message || err);
-  try {
-    await client.destroy();
-  } catch {}
+if (!TOKEN || TOKEN === 'YOUR_BOT_TOKEN_HERE' || TOKEN.trim() === '') {
+  console.error('❌ Lỗi: DISCORD_TOKEN chưa được thiết lập trong .env hoặc token.local.js!');
   process.exit(1);
+}
+
+client.login(TOKEN).catch(async (err) => {
+  console.error("❌ [ERROR] Lỗi thực thi:", err.message || err);
+    await cleanupAndExit(1);
 });

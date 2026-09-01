@@ -30,15 +30,47 @@ const {
 // 0. CẤU HÌNH HỆ THỐNG & BIẾN MÔI TRƯỜNG
 // =========================================================================
 const tokenLocalPath = path.join(__dirname, 'token.local.js');
-const TOKEN = process.env.DISCORD_TOKEN || (fs.existsSync(tokenLocalPath) ? require(tokenLocalPath).TOKEN : '');
+const localConfig = fs.existsSync(tokenLocalPath) ? require(tokenLocalPath) : {};
+const TOKEN = process.env.DISCORD_TOKEN || localConfig.TOKEN || localConfig.DISCORD_TOKEN || '';
 const GUILD_ID = process.env.GUILD_ID || "1542476657825419334";
 
-// CẤU HÌNH NGÂN HÀNG MBBANK
+// CẤU HÌNH NGÂN HÀNG MBBANK (Hỗ trợ cấu hình động qua Biến môi trường)
 const BANK_CONFIG = Object.freeze({
-  BANK_ID: "MB",
-  ACCOUNT_NO: "844515133333",
-  ACCOUNT_NAME: "VAN HUU PHAM NGUYEN"
+  BANK_ID: (process.env.BANK_ID || "MB").trim().toUpperCase(),
+  ACCOUNT_NO: (process.env.BANK_ACCOUNT_NO || process.env.BANK_ACCOUNT || "844515133333").trim(),
+  ACCOUNT_NAME: (process.env.BANK_ACCOUNT_NAME || process.env.ACCOUNT_NAME || "VAN HUU PHAM NGUYEN").trim().toUpperCase()
 });
+
+/**
+ * Kiểm tra tính hợp lệ của cấu hình ngân hàng BANK_CONFIG
+ * @param {Object} config - Cấu hình ngân hàng cần kiểm tra
+ * @returns {{ valid: boolean, reason?: string }}
+ */
+function validateBankConfig(config = BANK_CONFIG) {
+  if (!config || typeof config !== 'object') {
+    return { valid: false, reason: 'BANK_CONFIG phải là một Object hợp lệ.' };
+  }
+  const bankId = config.BANK_ID ? String(config.BANK_ID).trim() : '';
+  const accountNo = config.ACCOUNT_NO ? String(config.ACCOUNT_NO).trim() : '';
+  const accountName = config.ACCOUNT_NAME ? String(config.ACCOUNT_NAME).trim() : '';
+
+  if (!bankId || !/^[A-Za-z0-9]{2,10}$/.test(bankId)) {
+    return { valid: false, reason: `Mã ngân hàng (BANK_ID) không hợp lệ: "${bankId}". Yêu cầu 2-10 ký tự chữ/số.` };
+  }
+  if (!accountNo || !/^[A-Za-z0-9]{6,25}$/.test(accountNo)) {
+    return { valid: false, reason: `Số tài khoản (ACCOUNT_NO) không hợp lệ: "${accountNo}". Yêu cầu 6-25 ký tự chữ/số.` };
+  }
+  if (!accountName || accountName.length < 2) {
+    return { valid: false, reason: `Tên chủ tài khoản (ACCOUNT_NAME) không được để trống: "${accountName}".` };
+  }
+  return { valid: true };
+}
+
+// Kiểm tra cấu hình ngân hàng ngay khi khởi động
+const _initialBankValidation = validateBankConfig(BANK_CONFIG);
+if (!_initialBankValidation.valid) {
+  console.warn(`⚠️ [BANK_CONFIG Warning] ${_initialBankValidation.reason}`);
+}
 
 // Pool theo dõi mã đơn hàng trong RAM chống trùng lặp (Collision Guard) & chống duyệt trùng (Idempotency)
 const activeOrderCodes = new Map(); // orderCode -> { createdAt: number, pkgKey?: string, buyerId?: string }
@@ -73,47 +105,291 @@ function generateOrderCode() {
 
 // Bóc tách và chuẩn hóa mã đơn hàng từ nội dung tin nhắn hoặc SMS/Banking webhook
 function extractOrderCode(text) {
-  if (!text || typeof text !== 'string') return null;
-  const match = text.match(ORDER_CODE_REGEX);
-  return match ? match[1].replace(/[\s-_]/g, '').toUpperCase() : null;
+  if (text === null || text === undefined) return null;
+  const str = typeof text === 'string' ? text : String(text);
+  const match = str.match(ORDER_CODE_REGEX);
+  return match ? sanitizeOrderCode(match[1]) : null;
 }
 
 // Kiểm tra mã đơn có đúng cấu trúc LS + 4-8 ký tự số/chữ hay không
 function isValidOrderCode(code) {
-  if (!code || typeof code !== 'string') return false;
-  return /^LS[0-9A-Z]{4,8}$/i.test(code.trim().replace(/[\s-_]/g, ''));
+  if (code === null || code === undefined) return false;
+  const str = typeof code === 'string' ? code : String(code);
+  const cleaned = str
+    .replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2066-\u2069\x00-\x1F\x7F-\x9F]/g, '')
+    .trim()
+    .replace(/[\s-_]/g, '')
+    .toUpperCase();
+  return /^LS[0-9A-Z]{6}$/.test(cleaned);
+}
+
+/**
+ * Kiểm tra xem mức giá có phải là dạng báo giá thỏa thuận (0 VNĐ / Custom Dev / Mod) hay không
+ * @param {number|string|null|undefined} amount 
+ * @returns {boolean}
+ */
+function isNegotiatedPrice(amount) {
+  if (amount === null || amount === undefined) return true;
+  const num = typeof amount === 'number' ? amount : Number(amount);
+  return !Number.isFinite(num) || num <= 0;
 }
 
 /**
  * Chuẩn hóa chuỗi text dùng cho nội dung chuyển khoản VietQR / Banking Memo
  * - Loại bỏ dấu tiếng Việt (Unicode NFD)
- * - Loại bỏ ký tự đặc biệt, emoji, newline
+ * - Loại bỏ ký tự đặc biệt, emoji, newline, BiDi overrides, control chars
  * - Chỉ giữ chữ cái A-Z, số 0-9 và dấu cách
  * - Chuyển sang chữ in hoa
  * - Cắt ngắn tối đa maxLength ký tự theo chuẩn VietQR / NAPAS
  */
 function sanitizeVietQRText(text, maxLength = 25) {
-  if (!text || typeof text !== 'string') return '';
-  return text
+  if (text === null || text === undefined) return '';
+  const str = typeof text === 'string' ? text : String(text);
+  if (!str.trim()) return '';
+  const maxLen = typeof maxLength === 'number' && maxLength > 0 ? maxLength : 25;
+  return str
+    .normalize('NFKC')
+    .replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2066-\u2069\x00-\x1F\x7F-\x9F]/g, '')
+    .replace(/[đĐðÐ]/g, 'D')
+    .replace(/[łŁ]/g, 'L')
+    .replace(/[øØ]/g, 'O')
+    .replace(/[æÆ]/g, 'AE')
+    .replace(/ß/g, 'SS')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '') // Bỏ dấu tiếng Việt
-    .replace(/[đĐ]/g, 'D')           // Chuyển đ/Đ thành D
     .replace(/[^a-zA-Z0-9 ]/g, ' ')   // Ký tự đặc biệt & emoji -> khoảng trắng
     .replace(/\s+/g, ' ')            // Gộp khoảng trắng liên tiếp
     .trim()
     .toUpperCase()
-    .slice(0, maxLength);
+    .slice(0, maxLen);
+}
+
+/**
+ * Chuẩn hóa và làm sạch tên khách hàng / tên hiển thị Discord
+ * Chống Discord markdown breakout, mass mention (@everyone/@here/<@&), zero-width chars, BiDi overrides
+ * @param {string} name 
+ * @param {number} maxLength 
+ * @param {string} fallback 
+ * @returns {string}
+ */
+function sanitizeCustomerName(name, maxLength = 32, fallback = 'Khách Hàng') {
+  if (name === null || name === undefined) return fallback;
+  const str = typeof name === 'string' ? name : String(name);
+  const cleaned = str
+    .normalize('NFKC')
+    .replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2066-\u2069\x00-\x1F\x7F-\x9F]/g, '')
+    .replace(/@everyone/gi, '@ everyone')
+    .replace(/@here/gi, '@ here')
+    .replace(/<@[!&]?\d+>/g, '')
+    .replace(/<#\d+>/g, '')
+    .replace(/[`*~_|>\\#]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const maxLen = typeof maxLength === 'number' && maxLength > 0 ? maxLength : 32;
+  return cleaned ? cleaned.slice(0, maxLen) : fallback;
+}
+
+/**
+ * Chuẩn hóa mã đơn hàng, loại bỏ ký tự lạ, khoảng trắng, gạch nối, BiDi overrides
+ * @param {string|number} rawCode 
+ * @returns {string|null}
+ */
+function sanitizeOrderCode(rawCode) {
+  if (rawCode === null || rawCode === undefined) return null;
+  const str = typeof rawCode === 'string' ? rawCode : String(rawCode);
+  const cleaned = str
+    .replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2066-\u2069\x00-\x1F\x7F-\x9F]/g, '')
+    .trim()
+    .replace(/[\s\-_]/g, '')
+    .toUpperCase()
+    .slice(0, 12);
+  return isValidOrderCode(cleaned) ? cleaned : null;
+}
+
+/**
+ * Chuẩn hóa và làm sạch chuỗi văn bản inline từ modal input:
+ * - Thay thế backtick bằng dấu nháy đơn
+ * - Thay thế newline bằng khoảng trắng
+ * - Tránh mention injection (@everyone / @here)
+ * - Cắt ngắn theo maxLength và áp dụng fallback nếu rỗng
+ */
+function sanitizeModalInlineText(text, maxLength = 100, fallback = '') {
+  if (text === null || text === undefined) return fallback;
+  let str = typeof text === 'string' ? text : String(text);
+  if (!str.trim()) return fallback;
+  str = str.replace(/`/g, "'");
+  str = str.replace(/\r?\n|\r/g, ' ');
+  str = str.replace(/@(everyone|here|[!&]?[0-9]{15,20})/gi, '@ $1');
+  str = str.replace(/\s+/g, ' ').trim();
+  if (maxLength && str.length > maxLength) {
+    str = str.slice(0, maxLength).trim();
+  }
+  return str || fallback;
+}
+
+/**
+ * Chuẩn hóa và làm sạch chuỗi code block từ modal input:
+ * - Thoát chuỗi 3 dấu backticks thành 3 dấu nháy đơn để tránh phá vỡ cú pháp code block
+ * - Tránh mention injection
+ * - Cắt ngắn theo maxLength và áp dụng fallback nếu rỗng
+ */
+function sanitizeModalCodeBlockText(text, maxLength = 1024, fallback = '') {
+  if (text === null || text === undefined) return fallback;
+  let str = typeof text === 'string' ? text : String(text);
+  if (!str.trim()) return fallback;
+  str = str.replace(/```/g, "'''");
+  str = str.replace(/@(everyone|here)/gi, '@ $1');
+  if (maxLength && str.length > maxLength) {
+    str = str.slice(0, maxLength);
+  }
+  return str || fallback;
+}
+
+/**
+ * Chuẩn hóa và làm sạch mô tả kênh (Channel Topic) của Discord (Tối đa 1024 ký tự)
+ */
+function sanitizeDiscordChannelTopic(text, maxLength = 1024) {
+  if (text === null || text === undefined) return '';
+  let str = typeof text === 'string' ? text : String(text);
+  str = str.replace(/```/g, "'''").trim();
+  if (str.length > maxLength) {
+    str = str.slice(0, maxLength);
+  }
+  return str;
+}
+
+/**
+ * Loại bỏ các ký tự điều khiển nguy hiểm (ANSI escapes, BiDi overrides, carriage return injection, zero-width, non-printable control chars)
+ * khỏi nội dung transcript để chống terminal injection, log spoofing & visual tampering.
+ * @param {string} text - Văn bản cần làm sạch
+ * @returns {string} Văn bản an toàn
+ */
+function sanitizeTranscriptControlChars(text) {
+  if (text === null || text === undefined) return '';
+  const str = typeof text === 'string' ? text : String(text);
+  return str
+    // 1. Chuẩn hóa ký tự xuống dòng (\r\n, \r, \u2028, \u2029) thành \n chuẩn
+    // Chống Carriage Return Injection (\r) ghi đè dòng trước trên terminal/cat logs
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[\u2028\u2029]/g, '\n')
+    // 2. Loại bỏ mã màu và chuỗi thoát lệnh ANSI (CSI, OSC sequences) chống terminal injection
+    .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '')
+    // 3. Loại bỏ ký tự Unicode BiDi Override (chống Trojan Source / visual spoofing / RTL overrides)
+    .replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+    // 4. Loại bỏ ký tự tàng hình / zero-width space / BOM / Annotation Controls
+    .replace(/[\u180E\u200B-\u200D\u2060\uFEFF\uFFF9-\uFFFB]/g, '')
+    // 5. Loại bỏ Unicode Tag Characters & Variation Selector exploits
+    .replace(/[\uDB40][\uDC00-\uDC7F]/g, '')
+    // 6. Loại bỏ ký tự điều khiển không in được (giữ lại \t và \n)
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
+}
+
+/**
+ * Làm sạch và chuẩn hóa tiêu đề/trường 1 dòng trong Transcript (loại bỏ newlines chống CRLF injection)
+ * @param {string} text - Văn bản trường
+ * @param {number} maxLen - Giới hạn độ dài
+ * @returns {string} Văn bản 1 dòng an toàn
+ */
+function sanitizeSingleLineHeader(text, maxLen = 300) {
+  if (text === null || text === undefined) return 'N/A';
+  let str = sanitizeTranscriptControlChars(text);
+  str = str.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (maxLen && str.length > maxLen) {
+    str = str.slice(0, maxLen).trim();
+  }
+  return str || 'N/A';
+}
+
+/**
+ * Làm sạch văn bản khi đưa vào Discord Embed (chống phá vỡ codeblock, mass mention @everyone/@here/<@&)
+ * @param {string} text - Văn bản người dùng nhập
+ * @param {number} maxLen - Giới hạn độ dài (mặc định 1000 ký tự cho embed field)
+ * @returns {string} Văn bản an toàn cho Discord Embed
+ */
+function sanitizeMarkdownForEmbed(text, maxLen = 1000) {
+  if (text === null || text === undefined) return '';
+  let str = sanitizeTranscriptControlChars(text);
+  str = str
+    // Thoát backtick chống phá vỡ cú pháp code block / inline code
+    .replace(/`/g, "'")
+    // Vô hiệu hóa mention injection (@everyone, @here, role pings, user pings)
+    .replace(/@(everyone|here)/gi, '@\u200b$1')
+    .replace(/<@&(\d+)>/g, '<@\u200b&$1>')
+    .replace(/<@!?(\d+)>/g, '<@\u200b$1>')
+    .trim();
+  if (maxLen && str.length > maxLen) {
+    str = str.slice(0, maxLen).trim();
+  }
+  return str;
+}
+
+/**
+ * Che dấu (mask/redact) các dữ liệu nhạy cảm như Bot Token, Webhook Secret, Passwords, API Keys,
+ * DB connection strings, Credit Cards, Banking OTPs khỏi Transcript để bảo vệ quyền riêng tư.
+ * @param {string} text - Nội dung tin nhắn
+ * @returns {string} Nội dung đã được lọc thông tin nhạy cảm
+ */
+function redactSensitiveData(text) {
+  if (!text || typeof text !== 'string') return text || '';
+  return text
+    // 1. Discord Bot Token & MFA tokens
+    .replace(/\b(?:[a-zA-Z0-9_-]{24,28}\.[a-zA-Z0-9_-]{6,7}\.[a-zA-Z0-9_-]{27,38}|mfa\.[a-zA-Z0-9_-]{70,})\b/g, '***[REDACTED_DISCORD_TOKEN]***')
+    // 2. Discord Webhook URL with secret token: https://discord.com/api/webhooks/12345/abcdef...
+    .replace(/(https?:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/)[A-Za-z0-9_-]+/gi, '$1***[REDACTED_WEBHOOK_TOKEN]***')
+    // 3. AI API Keys (OpenAI, Claude/Anthropic, Gemini, Groq, HuggingFace)
+    .replace(/\b(sk-(?:ant-api\d\d-[a-zA-Z0-9_-]+|proj-[a-zA-Z0-9_-]+|[a-zA-Z0-9]{20,}))\b/g, '***[REDACTED_API_KEY]***')
+    .replace(/\b(AIzaSy[a-zA-Z0-9_-]{25,45})\b/g, '***[REDACTED_API_KEY]***')
+    .replace(/\b(gsk_[a-zA-Z0-9]{40,64})\b/g, '***[REDACTED_API_KEY]***')
+    .replace(/\b(hf_[a-zA-Z0-9]{34,40})\b/g, '***[REDACTED_API_KEY]***')
+    // 4. GitHub Tokens (ghp_, gho_, ghu_, ghs_, ghr_, github_pat_)
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{30,45}\b/g, '***[REDACTED_GITHUB_TOKEN]***')
+    .replace(/\bgithub_pat_[a-zA-Z0-9_]{30,100}\b/g, '***[REDACTED_GITHUB_TOKEN]***')
+    // 5. Cloud, Payment & Stripe API Keys
+    .replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '***[REDACTED_AWS_KEY]***')
+    .replace(/\b(?:sk_live|rk_live|pk_live|sk_test)_[0-9a-zA-Z]{24,34}\b/g, '***[REDACTED_STRIPE_KEY]***')
+    // 6. Database Connection Strings (PostgreSQL, MySQL, MongoDB, Redis passwords)
+    .replace(/\b((?:postgres(?:ql)?|mongodb(?:\+srv)?|mysql|redis(?:s)?):\/\/[^\s:@]+:)[^\s@]+(@[^\s\/]+)/gi, '$1***[REDACTED_DB_PASSWORD]***$2')
+    // 7. URL Credentials (http://user:pass@host)
+    .replace(/(https?:\/\/[^\s:@/]+:)[^\s@/]+(@[^\s\/]+)/gi, '$1***[REDACTED_URL_PASSWORD]***$2')
+    // 8. Generic Bearer & Authorization Tokens
+    .replace(/(?<=\b(?:bearer|authorization\s*:\s*bearer)\s+)[a-zA-Z0-9_.\-~+/]{20,}/gi, '***[REDACTED_TOKEN]***')
+    // 9. Private RSA / OpenSSH / PGP / EC Keys
+    .replace(/-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/gi, '[REDACTED_PRIVATE_KEY]')
+    // 10. Credit / Debit Card Numbers (Visa, Mastercard, Amex, Discover 13-19 digits)
+    .replace(/\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12}|(?:[0-9]{4}[ -]){3}[0-9]{4})\b/g, '[REDACTED_CARD_NUMBER]')
+    // 11. CVV / CVC Security Codes
+    .replace(/(?<=\b(?:cvv|cvc|cvv2|cvc2)\s*[:=]\s*)\d{3,4}\b/gi, '[REDACTED_CVV]')
+    // 12. Banking OTP & Verification Codes
+    .replace(/(?<=\b(?:otp|mã\s*otp|mã\s*xác\s*thực|mã\s*xác\s*minh)\s*[:=]?\s*)\d{4,8}\b/gi, '[REDACTED_OTP]')
+    // 13. Passwords & Sensitive Fields with labeled keywords
+    .replace(/(?<=\b(?:password|passwd|pass|matkhau|mật\s*khẩu|api[_-]?secret|client[_-]?secret|db_pass|database_password)\s*[:=]\s*)(\S+)/gi, '[REDACTED_SECRET]');
 }
 
 // Định dạng tiền tệ VND chuẩn Việt Nam
 function formatVND(amount) {
-  const num = Number(amount) || 0;
-  return `${num.toLocaleString('vi-VN')} VNĐ`;
+  if (amount === null || amount === undefined) return '0 VNĐ';
+  const num = typeof amount === 'number' ? amount : Number(amount);
+  if (!Number.isFinite(num) || num === 0) {
+    return '0 VNĐ';
+  }
+  if (num < 0) {
+    return `-${Math.abs(Math.round(num)).toLocaleString('vi-VN')} VNĐ`;
+  }
+  return `${Math.round(num).toLocaleString('vi-VN')} VNĐ`;
 }
 
 // Định dạng tiền tệ USD chuẩn quốc tế (2 chữ số thập phân)
 function formatUSD(amount) {
-  const num = Number(amount) || 0;
+  if (amount === null || amount === undefined) return '$0.00 USD';
+  const num = typeof amount === 'number' ? amount : Number(amount);
+  if (!Number.isFinite(num) || num === 0) {
+    return '$0.00 USD';
+  }
+  if (num < 0) {
+    return `-$${Math.abs(num).toFixed(2)} USD`;
+  }
   return `$${num.toFixed(2)} USD`;
 }
 
@@ -127,25 +403,62 @@ const paymentHttpClient = axios.create({
   }
 });
 
+// Cache lưu trữ Buffer ảnh VietQR trong RAM để tái sử dụng, giảm thiểu request HTTP và tăng tốc độ phản hồi
+const vietQRBufferCache = new Map(); // qrUrl -> { buffer: Buffer, cachedAt: number, size: number }
+const VIETQR_CACHE_TTL = 10 * 60 * 1000; // 10 phút TTL
+const VIETQR_CACHE_MAX_SIZE = 100; // Tối đa 100 ảnh QR trong bộ nhớ RAM
+
+// Deduplication map cho các request HTTP đang xử lý dở (In-flight request coalescing)
+const pendingVietQRRequests = new Map(); // qrUrl -> Promise<Buffer|null>
+
+// Circuit Breaker / Negative Cache cho các URL lỗi/offline để tránh spam request liên tục khi ngân hàng/VietQR bảo trì
+const failedVietQRUrls = new Map(); // qrUrl -> { failedAt: number, reason: string }
+const VIETQR_FAILURE_TTL = 30 * 1000; // 30 giây cooldown nếu VietQR offline
+
+function getVietQRCacheStats() {
+  return {
+    size: vietQRBufferCache.size,
+    maxSize: VIETQR_CACHE_MAX_SIZE,
+    ttlMs: VIETQR_CACHE_TTL,
+    pendingRequests: pendingVietQRRequests.size,
+    failedUrlsCount: failedVietQRUrls.size
+  };
+}
+
+function clearVietQRCache() {
+  vietQRBufferCache.clear();
+  pendingVietQRRequests.clear();
+  failedVietQRUrls.clear();
+}
+
+// Aliases cho tên chuẩn
+const getVietQRBufferCacheStats = getVietQRCacheStats;
+const clearVietQRBufferCache = clearVietQRCache;
+
 // Xây dựng URL VietQR chuẩn RFC 3986 với URLSearchParams và sanitize an toàn
 function generateVietQRUrl({ bankId, accountNo, template = 'compact2', amount = null, addInfo = null, accountName = null } = {}) {
   const cleanBank = encodeURIComponent((bankId || BANK_CONFIG.BANK_ID || 'MB').trim().replace(/[^a-zA-Z0-9]/g, ''));
   const cleanAcc = encodeURIComponent((accountNo || BANK_CONFIG.ACCOUNT_NO || '').trim().replace(/[^a-zA-Z0-9]/g, ''));
-  const cleanTemplate = encodeURIComponent((template || 'compact2').trim().replace(/[^a-zA-Z0-9]/g, ''));
+  const cleanTemplate = encodeURIComponent((template || 'compact2').trim().replace(/[^a-zA-Z0-9]/g, '').toLowerCase());
 
   const baseUrl = `https://img.vietqr.io/image/${cleanBank}-${cleanAcc}-${cleanTemplate}.png`;
   const params = new URLSearchParams();
 
-  if (amount !== null && amount !== undefined && Number(amount) > 0) {
-    params.append('amount', Math.round(Number(amount)).toString());
+  // Chỉ thêm tham số amount nếu số tiền > 0 và hợp lệ (hỗ trợ trường hợp 0 VND / báo giá thỏa thuận)
+  if (amount !== null && amount !== undefined) {
+    const parsedAmount = typeof amount === 'number' ? amount : Number(amount);
+    if (Number.isFinite(parsedAmount) && parsedAmount > 0) {
+      params.append('amount', Math.round(parsedAmount).toString());
+    }
   }
+
   if (addInfo) {
     const sanitizedMemo = sanitizeVietQRText(String(addInfo), 25);
     if (sanitizedMemo) {
       params.append('addInfo', sanitizedMemo);
     }
   }
-  const name = sanitizeVietQRText(accountName || BANK_CONFIG.ACCOUNT_NAME || '', 50);
+  const name = sanitizeVietQRText(String(accountName || BANK_CONFIG.ACCOUNT_NAME || ''), 50);
   if (name) {
     params.append('accountName', name);
   }
@@ -154,32 +467,100 @@ function generateVietQRUrl({ bankId, accountNo, template = 'compact2', amount = 
   return queryStr ? `${baseUrl}?${queryStr}` : baseUrl;
 }
 
-// Tải ảnh QR buffer trực tiếp qua Axios với cơ chế bắt lỗi an toàn & xác thực định dạng ảnh
+// Tải ảnh QR buffer trực tiếp qua Axios với cơ chế bắt lỗi an toàn, cache RAM & xác thực định dạng ảnh
 async function fetchVietQRBuffer(qrUrl) {
-  try {
-    const res = await paymentHttpClient.get(qrUrl, { 
-      responseType: 'arraybuffer',
-      validateStatus: (status) => status === 200
-    });
+  if (!qrUrl || typeof qrUrl !== 'string' || !qrUrl.startsWith('http')) {
+    return null;
+  }
 
-    const contentType = res.headers['content-type'] || res.headers['Content-Type'] || '';
-    
-    // Kiểm tra content-type bắt buộc phải là image (tránh nhận nhầm HTML/JSON error từ CDN)
-    if (contentType && !contentType.startsWith('image/')) {
-      console.warn(`⚠️ [VietQR Warning] Phản hồi từ ${qrUrl} không phải ảnh (${contentType}). Chuyển sang fallback URL.`);
+  // 1. Kiểm tra Cache RAM trước (kèm LRU position refresh)
+  const cached = vietQRBufferCache.get(qrUrl);
+  if (cached) {
+    if (Date.now() - cached.cachedAt < VIETQR_CACHE_TTL && Buffer.isBuffer(cached.buffer)) {
+      // LRU refresh: Xóa và gán lại để đưa lên vị trí mới nhất (MRU)
+      vietQRBufferCache.delete(qrUrl);
+      vietQRBufferCache.set(qrUrl, cached);
+      return cached.buffer;
+    }
+    vietQRBufferCache.delete(qrUrl);
+  }
+
+  // 2. Kiểm tra Cooldown bảo trì / lỗi gần đây (Circuit Breaker / Negative Cache)
+  const failed = failedVietQRUrls.get(qrUrl);
+  if (failed) {
+    if (Date.now() - failed.failedAt < VIETQR_FAILURE_TTL) {
       return null;
     }
-
-    // Kiểm tra kích thước tối thiểu (ảnh PNG QR hợp lệ thường > 500 bytes)
-    if (res.data && res.data.length >= 500) {
-      return Buffer.from(res.data);
-    } else {
-      console.warn(`⚠️ [VietQR Warning] Dữ liệu ảnh quá nhỏ (${res.data?.length || 0} bytes).`);
-    }
-  } catch (err) {
-    console.warn(`⚠️ [VietQR Network Warning] Không thể tải buffer từ ${qrUrl} (${err.message}). Tự động fallback sang Direct URL.`);
+    failedVietQRUrls.delete(qrUrl);
   }
-  return null;
+
+  // 3. In-flight Request Deduplication: Chia sẻ cùng Promise nếu request cho qrUrl này đang bay
+  if (pendingVietQRRequests.has(qrUrl)) {
+    return pendingVietQRRequests.get(qrUrl);
+  }
+
+  const fetchPromise = (async () => {
+    try {
+      const res = await paymentHttpClient.get(qrUrl, { 
+        responseType: 'arraybuffer',
+        validateStatus: (status) => status === 200
+      });
+
+      const contentType = String(res.headers['content-type'] || res.headers['Content-Type'] || '').toLowerCase();
+      
+      // 1. Kiểm tra content-type bắt buộc phải là image (tránh nhận nhầm HTML/JSON error từ CDN)
+      if (contentType && !contentType.startsWith('image/')) {
+        console.warn(`⚠️ [VietQR Warning] Phản hồi từ ${qrUrl} không phải ảnh (${contentType}). Chuyển sang fallback URL.`);
+        failedVietQRUrls.set(qrUrl, { failedAt: Date.now(), reason: `Invalid contentType: ${contentType}` });
+        return null;
+      }
+
+      if (!res.data || res.data.length < 500) {
+        console.warn(`⚠️ [VietQR Warning] Dữ liệu ảnh quá nhỏ (${res.data?.length || 0} bytes).`);
+        failedVietQRUrls.set(qrUrl, { failedAt: Date.now(), reason: 'Payload too small' });
+        return null;
+      }
+
+      const buffer = Buffer.from(res.data);
+
+      // 2. Kiểm tra Magic Bytes tiêu chuẩn của ảnh (PNG: 89 50 4E 47, JPEG: FF D8 FF, GIF: 47 49 46, WebP: RIFF...WEBP)
+      const isPng = buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47;
+      const isJpeg = buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF;
+      const isGif = buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46;
+      const isWebp = buffer.length > 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP';
+
+      if (!isPng && !isJpeg && !isGif && !isWebp) {
+        console.warn(`⚠️ [VietQR Warning] Định dạng Magic Bytes không phải ảnh từ ${qrUrl}. Có thể là HTML error page trả về status 200.`);
+        failedVietQRUrls.set(qrUrl, { failedAt: Date.now(), reason: 'Invalid magic bytes' });
+        return null;
+      }
+
+      // Xóa khỏi cache lỗi nếu tải thành công
+      failedVietQRUrls.delete(qrUrl);
+
+      // Lưu vào Cache RAM với LRU Eviction
+      if (vietQRBufferCache.size >= VIETQR_CACHE_MAX_SIZE) {
+        const oldestKey = vietQRBufferCache.keys().next().value;
+        if (oldestKey) vietQRBufferCache.delete(oldestKey);
+      }
+      vietQRBufferCache.set(qrUrl, {
+        buffer,
+        cachedAt: Date.now(),
+        size: buffer.length
+      });
+
+      return buffer;
+    } catch (err) {
+      console.warn(`⚠️ [VietQR Network Warning] Không thể tải buffer từ ${qrUrl} (${err.message}). Tự động fallback sang Direct URL.`);
+      failedVietQRUrls.set(qrUrl, { failedAt: Date.now(), reason: err.message });
+      return null;
+    } finally {
+      pendingVietQRRequests.delete(qrUrl);
+    }
+  })();
+
+  pendingVietQRRequests.set(qrUrl, fetchPromise);
+  return fetchPromise;
 }
 
 
@@ -196,7 +577,7 @@ const PACKAGES = {
     desc_en: "Anti-WallHit through cobwebs/walls, Inventory checks, AutoEat/Potion, Health spoof"
   },
   "addon_macro_cart": {
-    name_vi: "Addon Anti-Macro Cart • Chống Macro Xe Mỏ & Thuyền (20k/Tháng)",
+    name_vi: "Addon Anti-Macro Cart • Chống Macro Xe Mỏ & Thuyền (20.000 VNĐ/Tháng)",
     name_en: "Anti-Macro Cart Addon • Minecart & Boat Exploit Protection ($1.00/Mo)",
     price_vnd: 20000,
     price_usd: 1.0,
@@ -329,6 +710,7 @@ const PACKAGES = {
 
 // DANH SÁCH BÍ DANH & GÓI SẢN PHẨM CŨ (DEPRECATED PACKAGE ALIASES & FALLBACKS)
 const DEPRECATED_PACKAGE_ALIASES = Object.freeze({
+  "custom_plugin": "custom_dev",
   "anti_macro": "addon_macro_cart",
   "anti_macro_cart": "addon_macro_cart",
   "combo_anti": "combo_suite",
@@ -414,18 +796,43 @@ const client = new Client({
     ...Options.DefaultSweeperSettings,
     messages: {
       interval: 300, // Quét dọn message cache mỗi 5 phút
-      lifetime: 900  // Loại bỏ tin nhắn cũ hơn 15 phút khỏi RAM
+      lifetime: 600  // Loại bỏ tin nhắn cũ hơn 10 phút khỏi RAM
     },
     users: {
-      interval: 3600, // Quét dọn user cache không hoạt động mỗi 1 giờ
+      interval: 1800, // Quét dọn user cache không hoạt động mỗi 30 phút
       filter: () => user => user.id !== client.user?.id
+    },
+    guildMembers: {
+      interval: 1800,
+      filter: () => member => member.id !== client.user?.id
+    },
+    threads: {
+      interval: 1800,
+      lifetime: 900
+    },
+    threadMembers: {
+      interval: 1800,
+      filter: () => () => true
     }
   },
   makeCache: Options.cacheWithLimits({
     ...Options.DefaultMakeCacheSettings,
-    MessageManager: 50,      // Tối đa 50 tin nhắn trên mỗi channel trong RAM
-    GuildMemberManager: 200, // Giới hạn cache member
-    PresenceManager: 0       // Không lưu cache presence không cần thiết
+    MessageManager: 25,              // Tối đa 25 tin nhắn trên mỗi channel trong RAM
+    GuildMemberManager: 50,          // Giới hạn cache member tối đa 50 trong RAM
+    PresenceManager: 0,              // Tắt cache presence không dùng
+    ReactionManager: 0,              // Tắt cache reaction
+    ReactionUserManager: 0,          // Tắt cache reaction user
+    VoiceStateManager: 0,            // Tắt cache voice state
+    GuildBanManager: 0,              // Tắt cache ban
+    GuildInviteManager: 0,           // Tắt cache invites
+    GuildStickerManager: 0,          // Tắt cache stickers
+    GuildScheduledEventManager: 0,   // Tắt cache scheduled events
+    StageInstanceManager: 0,         // Tắt cache stage
+    ThreadManager: 0,                // Tắt cache threads
+    ThreadMemberManager: 0,          // Tắt cache thread members
+    AutoModerationRuleManager: 0,    // Tắt cache auto mod rules
+    ApplicationCommandManager: 0,    // Tắt cache application command objects
+    BaseGuildEmojiManager: 0         // Tắt cache emojis
   })
 });
 
@@ -537,16 +944,116 @@ client.once(Events.ClientReady, async (readyClient) => {
 // 4. TÍNH NĂNG AUTOMOD: BẢO VỆ MÁY CHỦ, CHỐNG INVITE SPAM & PING @EVERYONE
 // =========================================================================
 
+// Bảng tra cứu ký tự Homoglyphs (Cyrillic, Greek, Armenian, IPA, Lookalikes)
+const HOMOGLYPH_MAP = Object.freeze({
+  // a
+  'а': 'a', 'α': 'a', 'ӓ': 'a', 'ӑ': 'a', 'ā': 'a', 'à': 'a', 'á': 'a', 'â': 'a', 'ã': 'a', 'ä': 'a', 'å': 'a', 'ą': 'a',
+  // b
+  'в': 'b', 'ь': 'b', 'ъ': 'b', 'β': 'b', 'ɓ': 'b', 'ḃ': 'b', 'ḅ': 'b',
+  // c
+  'с': 'c', 'ƈ': 'c', 'ɕ': 'c', 'ç': 'c', 'ć': 'c', 'ĉ': 'c', 'ċ': 'c', 'č': 'c', 'ϲ': 'c', 'ᴄ': 'c',
+  // d
+  'ԁ': 'd', 'ԃ': 'd', 'ɗ': 'd', 'đ': 'd', 'ď': 'd', 'ḋ': 'd', 'ḍ': 'd', 'ḏ': 'd', 'ð': 'd',
+  // e
+  'е': 'e', 'ё': 'e', 'ε': 'e', 'ϵ': 'e', 'è': 'e', 'é': 'e', 'ê': 'e', 'ë': 'e', 'ē': 'e', 'ĕ': 'e', 'ė': 'e', 'ę': 'e', 'ě': 'e', 'ẹ': 'e', 'ẻ': 'e', 'ẽ': 'e',
+  // g
+  'ɡ': 'g', 'ɢ': 'g', 'ԍ': 'g', 'ǥ': 'g', 'ɠ': 'g', 'ğ': 'g', 'ġ': 'g', 'ģ': 'g', 'ǧ': 'g', 'ǵ': 'g',
+  // h
+  'һ': 'h', 'հ': 'h', 'ĥ': 'h', 'ħ': 'h', 'ḣ': 'h', 'ḥ': 'h', 'ḧ': 'h',
+  // i
+  'і': 'i', 'ї': 'i', 'ι': 'i', 'ı': 'i', 'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ī': 'i', 'ĭ': 'i', 'į': 'i', 'ǐ': 'i', 'ỉ': 'i', 'ị': 'i', 'ɪ': 'i',
+  // j
+  'ј': 'j', 'ȷ': 'j', 'ĵ': 'j', 'ǰ': 'j',
+  // k
+  'к': 'k', 'κ': 'k', 'ķ': 'k', 'ǩ': 'k', 'ḳ': 'k', 'ḵ': 'k',
+  // l
+  'ℓ': 'l', 'ł': 'l', 'ĺ': 'l', 'ļ': 'l', 'ľ': 'l', 'ŀ': 'l', 'ḷ': 'l', 'ḻ': 'l',
+  // m
+  'м': 'm', 'ḿ': 'm', 'ṁ': 'm', 'ṃ': 'm',
+  // n
+  'п': 'n', 'ո': 'n', 'ñ': 'n', 'ń': 'n', 'ņ': 'n', 'ň': 'n', 'ŋ': 'n', 'ṅ': 'n', 'ṇ': 'n', 'ṉ': 'n',
+  // o
+  'о': 'o', 'ο': 'o', 'օ': 'o', 'ò': 'o', 'ó': 'o', 'ô': 'o', 'õ': 'o', 'ö': 'o', 'ō': 'o', 'ŏ': 'o', 'ő': 'o', 'ǒ': 'o', 'ơ': 'o', 'ọ': 'o', 'ỏ': 'o', 'ø': 'o', 'ǿ': 'o', 'ɵ': 'o', 'ᴏ': 'o',
+  // p
+  'р': 'p', 'ρ': 'p', 'ƥ': 'p', 'ṕ': 'p', 'ṗ': 'p',
+  // q
+  'ԛ': 'q', 'ɋ': 'q', 'զ': 'q',
+  // r
+  'г': 'r', 'ѓ': 'r', 'ґ': 'r', 'ŕ': 'r', 'ŗ': 'r', 'ř': 'r', 'ṙ': 'r', 'ṛ': 'r', 'ɼ': 'r', 'ɾ': 'r', 'ʀ': 'r',
+  // s
+  'ѕ': 's', 'ʂ': 's', 'ś': 's', 'ŝ': 's', 'ş': 's', 'š': 's', 'ș': 's', 'ṡ': 's', 'ṣ': 's', 'ꜱ': 's',
+  // t
+  'т': 't', 'τ': 't', 'ţ': 't', 'ť': 't', 'ț': 't', 'ṫ': 't', 'ṭ': 't', 'ṯ': 't',
+  // u
+  'υ': 'u', 'μ': 'u', 'ù': 'u', 'ú': 'u', 'û': 'u', 'ü': 'u', 'ũ': 'u', 'ū': 'u', 'ŭ': 'u', 'ů': 'u', 'ű': 'u', 'ų': 'u', 'ư': 'u', 'ụ': 'u', 'ủ': 'u',
+  // v
+  'ѵ': 'v', 'ν': 'v', 'ṽ': 'v', 'ṿ': 'v',
+  // w
+  'ш': 'w', 'щ': 'w', 'ŵ': 'w', 'ẁ': 'w', 'ẃ': 'w', 'ẅ': 'w', 'ẇ': 'w', 'ẉ': 'w',
+  // x
+  'х': 'x', 'χ': 'x', 'ẋ': 'x', 'ẍ': 'x',
+  // y
+  'у': 'y', 'ý': 'y', 'ÿ': 'y', 'ŷ': 'y', 'ẏ': 'y', 'ỳ': 'y', 'ỵ': 'y', 'ỷ': 'y', 'ỹ': 'y', 'γ': 'y',
+  // z
+  'ź': 'z', 'ż': 'z', 'ž': 'z', 'ẑ': 'z', 'ẓ': 'z', 'ẕ': 'z'
+});
+
+const HOMOGLYPH_REGEX = new RegExp(Object.keys(HOMOGLYPH_MAP).join('|'), 'gi');
+
 /**
- * Chuẩn hóa chuỗi văn bản phòng chống spam & obfuscation:
- * 1. NFKC Unicode normalization (chuyển các ký tự fullwidth như ｄｉｓｃｏｒｄ thành discord)
- * 2. Loại bỏ các ký tự ẩn, zero-width, invisible formatters, control characters
+ * Chuẩn hóa chuỗi văn bản phòng chống spam, obfuscation & homoglyphs:
+ * 1. NFKC Unicode normalization (chuyển math bold/italic, fullwidth thành ký tự chuẩn)
+ * 2. Thay thế homoglyphs (Cyrillic, Greek, Armenian, Lookalikes) sang Latin tương ứng
+ * 3. NFD decomposition và loại bỏ combining diacritics
+ * 4. Loại bỏ các ký tự ẩn, zero-width, formatting controls
  */
 function normalizeAntiSpamText(text) {
   if (!text || typeof text !== 'string') return '';
-  return text
-    .normalize('NFKC')
-    .replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2060-\u206F\u0000-\u001F\u007F-\u009F\u00AD\u180E]/g, '');
+  
+  let normalized = text.normalize('NFKC');
+
+  normalized = normalized.replace(HOMOGLYPH_REGEX, (matched) => {
+    const lower = matched.toLowerCase();
+    return HOMOGLYPH_MAP[lower] || matched;
+  });
+
+  normalized = normalized
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  // Dot homoglyphs: U+2024, U+FF0E, U+2027, U+2022, U+00B7, U+2219, U+FE52, U+3002
+  normalized = normalized.replace(/[\u2024\uFF0E\u2027\u2022\u00B7\u2219\uFE52\u3002]/g, '.');
+
+  // Slash homoglyphs: U+FF0F, U+2044, U+2215, U+29F8, U+29F9, U+FF3C, backslash
+  normalized = normalized.replace(/[\uFF0F\u2044\u2215\u29F8\u29F9\uFF3C\\]/g, '/');
+
+  normalized = normalized.replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2060-\u206F\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u180E]/g, '');
+
+  return normalized;
+}
+
+/**
+ * Trích xuất toàn bộ URL và nội dung ẩn trong Markdown Masked Links [text](url), <url>, v.v.
+ */
+function extractAllLinkTargets(rawText) {
+  if (!rawText || typeof rawText !== 'string') return [];
+  const targets = [rawText];
+
+  // Bóc tách Markdown Masked Links: [label](url) hoặc [label](<url>)
+  const markdownLinkRegex = /\[([^\]]*)\]\(\s*<?([^\s>)]+)>?\s*(?:"[^"]*")?\)/gi;
+  let match;
+  while ((match = markdownLinkRegex.exec(rawText)) !== null) {
+    if (match[1]) targets.push(match[1]); // Visible anchor text
+    if (match[2]) targets.push(match[2]); // Hidden URL target
+  }
+
+  // Bóc tách URL trong dấu <url>
+  const angleBracketRegex = /<\s*(https?:\/\/[^\s>]+|[a-zA-Z0-9_\-\.]+\.[a-zA-Z]{2,}\/[^\s>]+)\s*>/gi;
+  while ((match = angleBracketRegex.exec(rawText)) !== null) {
+    if (match[1]) targets.push(match[1]);
+  }
+
+  return targets;
 }
 
 /**
@@ -573,25 +1080,41 @@ async function safeDeleteMessage(msg) {
 
 /**
  * Nhận diện chính xác link mời Discord (hỗ trợ discord.gg, discord.com/invite, discordapp.com/invite,
- * discord.me, discord.io, discord.li, dsc.gg, invite.gg, chữ hoa, zero-width chars, khoảng cách, phân cách đặc biệt).
+ * discord.me, discord.io, discord.li, discord.link, dsc.gg, invite.gg, dis.gd,
+ * bao gồm homoglyph spoofing, spoiler tags ||, markdown masked links, code blocks, backticks, dot-obfuscation).
  */
 function containsDiscordInvite(rawContent) {
   if (!rawContent || typeof rawContent !== 'string') return false;
 
-  const cleaned = normalizeAntiSpamText(rawContent);
+  const targetTexts = extractAllLinkTargets(rawContent);
 
-  // 1. Regex trên chuỗi thông thường (hỗ trợ khoảng trắng xen kẽ quanh dấu chấm, gạch chéo, ngoặc)
-  const patternWithSpaces = /(?:https?:\/\/)?(?:www\s*[\.\(\[\{]\s*)?(?:discord\s*(?:app)?\s*[\.\(\[\{]\s*(?:gg|com\s*[\/\\]+\s*(?:invite|servers)|io|me|li)|(?:discord|invite|dsc)\s*[\.\(\[\{]\s*gg)\s*[\/\\]+\s*[a-zA-Z0-9_\-\+]+/i;
-  if (patternWithSpaces.test(cleaned)) return true;
+  const invitePatternStandard = /(?:https?:\/\/)?(?:www\s*[\.\(\[\{]\s*)?(?:(?:discord\s*(?:app)?\s*[\.\(\[\{]\s*(?:gg|com\s*[\/\\]+\s*(?:invite|servers)|io|me|li|link|gift))|(?:dsc|invite)\s*[\.\(\[\{]\s*gg|dis\s*[\.\(\[\{]\s*gd)\s*[\/\\]+\s*[a-zA-Z0-9_\-\+]+/i;
+  
+  const invitePatternStripped = /(?:https?:\/\/)?(?:www\.)?(?:(?:discord(?:app)?(?:\.(?:gg|com\/(?:invite|servers)|io|me|li|link|gift)|\/(?:invite|servers|channels)))|(?:dsc|invite)\.gg|dis\.gd)(?:\/[a-zA-Z0-9_\-\+]+)?/i;
 
-  // 2. Regex sau khi loại bỏ khoảng trắng và chuyển dấu cách / dot giả lập
-  const noSpaces = cleaned.replace(/\s+/g, '').replace(/[\(\[\{]dot[\)\]\}]/gi, '.').replace(/[\(\[\{]\.[\)\]\}]/g, '.');
-  const directPattern = /(?:https?:\/\/)?(?:www\.)?(?:discord(?:app)?\.(?:gg|com\/(?:invite|servers)|io|me|li)|(?:discord|invite|dsc)\.gg)\/[a-zA-Z0-9_\-\+]+/i;
-  if (directPattern.test(noSpaces)) return true;
+  for (const item of targetTexts) {
+    const normalized = normalizeAntiSpamText(item);
 
-  // 3. Bắt các dạng rút gọn hoặc vanity URL không có scheme
-  const barePattern = /\b(?:discord(?:app)?\.(?:gg|com\/(?:invite|servers)|io|me|li)|(?:discord|invite|dsc)\.gg)\/[a-zA-Z0-9_\-\+]+/i;
-  if (barePattern.test(noSpaces)) return true;
+    // 1. Kiểm tra trực tiếp trên chuỗi đã chuẩn hóa homoglyphs & unicode
+    if (invitePatternStandard.test(normalized)) {
+      return true;
+    }
+
+    // 2. Kiểm tra trên chuỗi sau khi loại bỏ spoiler tags '||', backticks '`', quotes, và spaces
+    const stripped = normalized
+      .replace(/\|\|/g, '')                          // Loại bỏ spoiler markers
+      .replace(/[`*~_]/g, '')                        // Loại bỏ markdown formatters (backticks, bold, italic, strikethrough)
+      .replace(/[\(\[\{]\s*dot\s*[\)\]\}]/gi, '.')  // (dot), [dot], {dot} -> .
+      .replace(/[\(\[\{]\s*\.\s*[\)\]\}]/g, '.')    // (.), [.], {.} -> .
+      .replace(/[\(\[\{]\s*slash\s*[\)\]\}]/gi, '/')// (slash), [slash] -> /
+      .replace(/[\(\[\{]\s*\/\s*[\)\]\}]/g, '/')    // (/), [/], {/} -> /
+      .replace(/[\[\]\(\)\{\}]/g, '')               // Loại bỏ ngoặc bao quanh từ
+      .replace(/\s+/g, '');                          // Bỏ toàn bộ khoảng trắng
+
+    if (invitePatternStripped.test(stripped)) {
+      return true;
+    }
+  }
 
   return false;
 }
@@ -601,104 +1124,138 @@ function containsDiscordInvite(rawContent) {
  * - Bỏ qua code block (```...```) và inline code (`...`)
  * - Bỏ qua escaped mention (\@everyone, \@here)
  * - Bỏ qua địa chỉ email (admin@everyone.com, contact@here.org)
- * - Xử lý zero-width bypass và NFKC unicode normalization
+ * - Bỏ qua URL link chứa @everyone/@here
+ * - Bắt triệt để spoiler bypass (@||everyone||, @every||one), homoglyphs (@еveryone), zero-width
  */
 function containsEveryonePing(message) {
+  if (!message) return false;
+
   // Nếu Discord API xác nhận tin nhắn thực sự kích hoạt ping everyone/here
-  if (message.mentions && message.mentions.everyone) {
+  if (typeof message === 'object' && message.mentions && message.mentions.everyone) {
     return true;
   }
 
-  if (!message.content || typeof message.content !== 'string') return false;
+  let text = typeof message === 'string' ? message : message.content;
+  if (!text || typeof text !== 'string') return false;
 
-  let text = normalizeAntiSpamText(message.content);
+  // 1. Loại bỏ code block (```...```) và inline code (`...`) TRƯỚC KHI normalize (Phòng chống false positive trong code)
+  text = text.replace(/```[\s\S]*?(?:```|$)/g, ' ');
+  text = text.replace(/`[^`\n]*?`/g, ' ');
 
-  // Loại bỏ code block (```...```) và inline code (`...`)
-  text = text.replace(/```[\s\S]*?```/g, ' ');
-  text = text.replace(/`[^`]*?`/g, ' ');
-
-  // Loại bỏ escaped mention (\@everyone, \@here)
+  // 2. Loại bỏ escaped mention (\@everyone, \@here)
   text = text.replace(/\\@everyone/gi, ' ');
   text = text.replace(/\\@here/gi, ' ');
 
-  // Bắt @everyone hoặc @here đứng độc lập (không thuộc email hoặc từ ghép)
+  // 3. Chuẩn hóa chống spam & homoglyphs
+  text = normalizeAntiSpamText(text);
+
+  // 4. Loại bỏ spoiler tags '||' và các ký tự phân tách nằm giữa '@' và 'everyone/here'
+  const cleanedMentions = text.replace(/@\s*[\|*~_]*\s*([a-zA-Z]+)/g, (match, word) => {
+    return '@' + word;
+  }).replace(/\|\|/g, '');
+
+  // 5. Bắt @everyone hoặc @here đứng độc lập (không thuộc email, username trong URL, hay từ ghép)
   const everyoneRegex = /(?<![\w@])@(everyone|here)(?![\w\.])/i;
-  return everyoneRegex.test(text);
+  return everyoneRegex.test(cleanedMentions);
+}
+
+/**
+ * Bộ xử lý AutoMod tập trung cho cả tin nhắn mới và tin nhắn chỉnh sửa
+ */
+async function handleAutoMod(message) {
+  if (!message || !message.guild || message.author?.bot) return;
+
+  // Fetch full message nếu là partial
+  if (message.partial) {
+    try {
+      message = await message.fetch();
+    } catch {
+      return;
+    }
+  }
+
+  // Lấy thông tin member (tự fetch nếu cache chưa có)
+  const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
+  if (!member) return;
+
+  // Kiểm tra quyền Staff / Admin / Quản trị
+  const isStaff = isStaffMember(member);
+  if (isStaff) return;
+
+  // Quyền của bot trong channel hiện tại
+  const botMember = message.guild.members.me || await message.guild.members.fetchMe().catch(() => null);
+  const perms = message.channel.permissionsFor ? message.channel.permissionsFor(botMember) : null;
+  const canSendEmbed = !perms || perms.has([
+    PermissionsBitField.Flags.SendMessages,
+    PermissionsBitField.Flags.EmbedLinks
+  ]);
+
+  // 1. Chặn và Timeout 5 phút nếu tự ý ping @everyone / @here
+  if (containsEveryonePing(message)) {
+    await safeDeleteMessage(message);
+
+    if (member.moderatable) {
+      await member.timeout(5 * 60 * 1000, 'Tự ý ping @everyone / @here trái phép (AutoMod)').catch(err => {
+        console.warn(`⚠️ [AutoMod Timeout Warning] Không thể timeout user ${message.author.id}: ${err.message}`);
+      });
+    }
+
+    if (canSendEmbed) {
+      const warnEmbed = new EmbedBuilder()
+        .setColor('#ED4245')
+        .setTitle('⚠️ CẢNH BÁO TỰ ĐỘNG / AUTO MODERATION')
+        .setDescription(
+          `🚫 <@${message.author.id}> đã bị **khóa chat (Mute) 5 phút** do tự ý ping \`@everyone\` hoặc \`@here\` trái phép!\n\n` +
+          `*User <@${message.author.id}> has been timed out for **5 minutes** for unauthorized \`@everyone\` / \`@here\` mention.*`
+        )
+        .setFooter({ text: 'LS STUDIO Security & Anti-Spam System' })
+        .setTimestamp();
+
+      const sent = await message.channel.send({ embeds: [warnEmbed] }).catch(() => null);
+      if (sent) {
+        setTimeout(() => safeDeleteMessage(sent).catch(() => {}), 10000).unref();
+      }
+    }
+    return;
+  }
+
+  // 2. Chặn link mời Discord của máy chủ khác
+  if (containsDiscordInvite(message.content)) {
+    await safeDeleteMessage(message);
+
+    if (canSendEmbed) {
+      const inviteWarnEmbed = new EmbedBuilder()
+        .setColor('#FF9800')
+        .setTitle('🚫 CHẶN QUẢNG CÁO / ANTI-INVITE LINK')
+        .setDescription(
+          `⚠️ <@${message.author.id}> vui lòng không gửi link mời Discord của máy chủ khác!\n\n` +
+          `*Discord invite links are strictly prohibited in this server.*`
+        )
+        .setFooter({ text: 'LS STUDIO Anti-Ad System' })
+        .setTimestamp();
+
+      const sent = await message.channel.send({ embeds: [inviteWarnEmbed] }).catch(() => null);
+      if (sent) {
+        setTimeout(() => safeDeleteMessage(sent).catch(() => {}), 7000).unref();
+      }
+    }
+    return;
+  }
 }
 
 client.on(Events.MessageCreate, async (message) => {
   try {
-    if (!message.guild || message.author.bot) return;
-
-    // Lấy thông tin member (tự fetch nếu cache chưa có)
-    const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
-    if (!member) return;
-
-    // Kiểm tra quyền Staff / Admin / Quản trị
-    const isStaff = isStaffMember(member);
-
-    // Quyền của bot trong channel hiện tại
-    const botMember = message.guild.members.me || await message.guild.members.fetchMe().catch(() => null);
-    const perms = message.channel.permissionsFor ? message.channel.permissionsFor(botMember) : null;
-    const canSendEmbed = !perms || perms.has([
-      PermissionsBitField.Flags.SendMessages,
-      PermissionsBitField.Flags.EmbedLinks
-    ]);
-
-    // 1. Chặn và Timeout 5 phút nếu tự ý ping @everyone / @here
-    if (!isStaff && containsEveryonePing(message)) {
-      await safeDeleteMessage(message);
-
-      if (member.moderatable) {
-        await member.timeout(5 * 60 * 1000, 'Tự ý ping @everyone / @here trái phép (AutoMod)').catch(err => {
-          console.warn(`⚠️ [AutoMod Timeout Warning] Không thể timeout user ${message.author.id}: ${err.message}`);
-        });
-      }
-
-      if (canSendEmbed) {
-        const warnEmbed = new EmbedBuilder()
-          .setColor('#ED4245')
-          .setTitle('⚠️ CẢNH BÁO TỰ ĐỘNG / AUTO MODERATION')
-          .setDescription(
-            `🚫 <@${message.author.id}> đã bị **khóa chat (Mute) 5 phút** do tự ý ping \`@everyone\` hoặc \`@here\` trái phép!\n\n` +
-            `*User <@${message.author.id}> has been timed out for **5 minutes** for unauthorized \`@everyone\` / \`@here\` mention.*`
-          )
-          .setFooter({ text: 'LS STUDIO Security & Anti-Spam System' })
-          .setTimestamp();
-
-        const sent = await message.channel.send({ embeds: [warnEmbed] }).catch(() => null);
-        if (sent) {
-          setTimeout(() => safeDeleteMessage(sent).catch(() => {}), 10000).unref();
-        }
-      }
-      return;
-    }
-
-    // 2. Chặn link mời Discord của máy chủ khác
-    if (!isStaff && containsDiscordInvite(message.content)) {
-      await safeDeleteMessage(message);
-
-      if (canSendEmbed) {
-        const inviteWarnEmbed = new EmbedBuilder()
-          .setColor('#FF9800')
-          .setTitle('🚫 CHẶN QUẢNG CÁO / ANTI-INVITE LINK')
-          .setDescription(
-            `⚠️ <@${message.author.id}> vui lòng không gửi link mời Discord của máy chủ khác!\n\n` +
-            `*Discord invite links are strictly prohibited in this server.*`
-          )
-          .setFooter({ text: 'LS STUDIO Anti-Ad System' })
-          .setTimestamp();
-
-        const sent = await message.channel.send({ embeds: [inviteWarnEmbed] }).catch(() => null);
-        if (sent) {
-          setTimeout(() => safeDeleteMessage(sent).catch(() => {}), 7000).unref();
-        }
-      }
-      return;
-    }
-
+    await handleAutoMod(message);
   } catch (err) {
     console.error('Lỗi AutoMod messageCreate:', err);
+  }
+});
+
+client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
+  try {
+    await handleAutoMod(newMessage);
+  } catch (err) {
+    console.error('Lỗi AutoMod messageUpdate:', err);
   }
 });
 
@@ -707,13 +1264,28 @@ client.on(Events.MessageCreate, async (message) => {
 // =========================================================================
 client.on(Events.GuildMemberAdd, async (member) => {
   try {
-    const memberRole = member.guild.roles.cache.find(r => r.name.includes("Thành Viên"));
-    if (memberRole) {
-      const botMember = member.guild.members.me || await member.guild.members.fetchMe().catch(() => null);
-      if (botMember && botMember.permissions.has(PermissionsBitField.Flags.ManageRoles) && botMember.roles.highest.position > memberRole.position) {
-        await member.roles.add(memberRole).catch((err) => {
-          console.warn(`⚠️ [guildMemberAdd] Không thể tự động cấp role Thành Viên: ${err.message}`);
-        });
+    let memberRole = member.guild.roles.cache.find(r => r.name.includes("Thành Viên") && !r.managed) ||
+                     member.guild.roles.cache.find(r => r.name.includes("Thành Viên"));
+    if (!memberRole) {
+      const fetchedRoles = await member.guild.roles.fetch().catch(() => null);
+      memberRole = fetchedRoles?.find(r => r.name.includes("Thành Viên") && !r.managed) ||
+                   fetchedRoles?.find(r => r.name.includes("Thành Viên"));
+    }
+    if (memberRole && !memberRole.managed && memberRole.id !== member.guild.id) {
+      const alreadyHasRole = member.roles?.cache ? member.roles.cache.has(memberRole.id) : false;
+      if (!alreadyHasRole) {
+        const botMember = member.guild.members.me || await member.guild.members.fetchMe().catch(() => null);
+        if (
+          botMember && 
+          botMember.permissions.has(PermissionsBitField.Flags.ManageRoles) && 
+          botMember.roles.highest.position > memberRole.position &&
+          member.guild.ownerId !== member.id &&
+          member.roles.highest.position < botMember.roles.highest.position
+        ) {
+          await member.roles.add(memberRole).catch((err) => {
+            console.warn(`⚠️ [guildMemberAdd] Không thể tự động cấp role Thành Viên: ${err.message}`);
+          });
+        }
       }
     }
 
@@ -817,6 +1389,7 @@ class ExpiringLockMap extends Map {
 }
 
 const ticketCreationLocks = new ExpiringLockMap(30000);
+const closingTicketChannels = new Set(); // Kênh ticket đang trong tiến trình đóng & xuất transcript
 const userCooldowns = new Map();
 
 function getRateLimitRemaining(userId, cooldownMs = 5000) {
@@ -867,25 +1440,241 @@ let cleanupInterval = setInterval(() => {
       activeOrderCodes.delete(code);
     }
   }
+
+  // 4. Giới hạn approvedOrderCodes chống rò rỉ RAM dài hạn (Discloud 100MB RAM Guard)
+  if (approvedOrderCodes.size > 1000) {
+    const toRemove = Array.from(approvedOrderCodes).slice(0, 200);
+    for (const c of toRemove) approvedOrderCodes.delete(c);
+  }
+
+  // 5. Dọn dẹp cache ảnh VietQR & failure cache quá hạn
+  for (const [url, item] of vietQRBufferCache.entries()) {
+    if (now - (item.cachedAt || 0) > VIETQR_CACHE_TTL) {
+      vietQRBufferCache.delete(url);
+    }
+  }
+  for (const [url, item] of failedVietQRUrls.entries()) {
+    if (now - (item.failedAt || 0) > VIETQR_FAILURE_TTL) {
+      failedVietQRUrls.delete(url);
+    }
+  }
+
+  // 6. Cảnh báo và bảo vệ bộ nhớ Discloud (100MB limit)
+  const mem = process.memoryUsage();
+  if (mem.rss > 85 * 1024 * 1024) {
+    const rssMB = (mem.rss / 1024 / 1024).toFixed(1);
+    const heapUsedMB = (mem.heapUsed / 1024 / 1024).toFixed(1);
+    console.warn(`⚠️ [Discloud RAM Guard] Cảnh báo RSS cao: ${rssMB}MB (Heap: ${heapUsedMB}MB). Đang kích hoạt dọn dẹp...`);
+    vietQRBufferCache.clear();
+    failedVietQRUrls.clear();
+    if (global.gc) {
+      try { global.gc(); } catch (_) {}
+    }
+  }
 }, 5 * 60 * 1000).unref();
 
-// Helper: Xuất bản ghi nhật ký tin nhắn toàn diện với phân trang (Comprehensive Transcript Generator with Pagination)
+// =========================================================================
+// 5. HELPER: XỬ LÝ TIMEZONE, TRÍCH XUẤT TRANSCRIPT & GIỚI HẠN FILE KÍCH THƯỚC LỚN
+// =========================================================================
+
+/**
+ * Định dạng thời gian theo múi giờ chuẩn Việt Nam (UTC+7 / Asia/Ho_Chi_Minh)
+ * Hoạt động độc lập và xác định (deterministic) không phụ thuộc vào dữ liệu ICU hệ điều hành
+ * @param {number|Date|string} timestampOrDate - Timestamp mili-giây, Date instance hoặc chuỗi ISO
+ * @param {boolean} includeTimezone - Có kèm hậu tố "(UTC+7)" hay không
+ * @returns {string} Chuỗi thời gian định dạng DD/MM/YYYY HH:mm:ss hoặc 'N/A' nếu không hợp lệ
+ */
+function formatVNTime(timestampOrDate, includeTimezone = false) {
+  if (timestampOrDate === null || timestampOrDate === undefined) return 'N/A';
+  
+  let dateObj;
+  if (timestampOrDate instanceof Date) {
+    dateObj = timestampOrDate;
+  } else if (typeof timestampOrDate === 'number' || typeof timestampOrDate === 'string') {
+    dateObj = new Date(timestampOrDate);
+  } else {
+    return 'N/A';
+  }
+
+  const timeVal = dateObj.getTime();
+  if (isNaN(timeVal)) return 'N/A';
+
+  // Cộng 7 giờ (7 * 3600 * 1000 ms) để chuyển sang múi giờ UTC+7
+  const vnDate = new Date(timeVal + 7 * 60 * 60 * 1000);
+  const day = String(vnDate.getUTCDate()).padStart(2, '0');
+  const month = String(vnDate.getUTCMonth() + 1).padStart(2, '0');
+  const year = vnDate.getUTCFullYear();
+  const hours = String(vnDate.getUTCHours()).padStart(2, '0');
+  const minutes = String(vnDate.getUTCMinutes()).padStart(2, '0');
+  const seconds = String(vnDate.getUTCSeconds()).padStart(2, '0');
+
+  const formatted = `${day}/${month}/${year} ${hours}:${minutes}:${seconds}`;
+  return includeTimezone ? `${formatted} (UTC+7)` : formatted;
+}
+
+/**
+ * Trích xuất toàn bộ dữ liệu giàu thông tin của tin nhắn thành plain object nhẹ nhàng
+ * Giúp giải phóng ngay lập tức các đối tượng Discord.js Message instance phức tạp khỏi RAM
+ * @param {import('discord.js').Message} msg - Discord.js Message instance
+ * @returns {Object} Plain object chứa toàn bộ chi tiết tin nhắn
+ */
+function extractTranscriptMessageData(msg) {
+  if (!msg) return null;
+
+  // 1. Thông tin tác giả & Webhook (Sanitized & Redacted)
+  const authorData = msg.author ? {
+    id: msg.author.id,
+    tag: sanitizeSingleLineHeader(msg.author.tag || msg.author.username || 'User', 100),
+    username: sanitizeSingleLineHeader(msg.author.username || 'User', 100),
+    bot: Boolean(msg.author.bot)
+  } : {
+    id: msg.webhookId || 'N/A',
+    tag: msg.webhookId ? `Webhook [${sanitizeSingleLineHeader(msg.webhookId, 50)}]` : 'Deleted User',
+    username: msg.webhookId ? `Webhook [${sanitizeSingleLineHeader(msg.webhookId, 50)}]` : 'Deleted User',
+    bot: Boolean(msg.webhookId)
+  };
+
+  // 2. Tệp đính kèm (Attachments)
+  const attachments = [];
+  if (msg.attachments && typeof msg.attachments.forEach === 'function') {
+    msg.attachments.forEach((att) => {
+      let sizeFormatted = '0 B';
+      if (att.size) {
+        if (att.size >= 1024 * 1024) {
+          sizeFormatted = `${(att.size / (1024 * 1024)).toFixed(1)} MB`;
+        } else if (att.size >= 1024) {
+          sizeFormatted = `${(att.size / 1024).toFixed(1)} KB`;
+        } else {
+          sizeFormatted = `${att.size} B`;
+        }
+      }
+      attachments.push({
+        id: att.id,
+        name: sanitizeSingleLineHeader(att.name || 'file', 150),
+        size: att.size || 0,
+        sizeFormatted,
+        contentType: sanitizeSingleLineHeader(att.contentType || 'application/octet-stream', 100),
+        url: sanitizeTranscriptControlChars(att.url || ''),
+        width: att.width || null,
+        height: att.height || null,
+        description: att.description ? sanitizeTranscriptControlChars(redactSensitiveData(att.description)) : null
+      });
+    });
+  }
+
+  // 3. Khung nội dung nâng cao (Embeds)
+  const embeds = [];
+  if (Array.isArray(msg.embeds)) {
+    for (const emb of msg.embeds) {
+      embeds.push({
+        title: emb.title ? sanitizeTranscriptControlChars(redactSensitiveData(emb.title)) : null,
+        url: emb.url ? sanitizeTranscriptControlChars(emb.url) : null,
+        description: emb.description ? sanitizeTranscriptControlChars(redactSensitiveData(emb.description)) : null,
+        author: emb.author ? { 
+          name: sanitizeSingleLineHeader(redactSensitiveData(emb.author.name || ''), 150), 
+          url: emb.author.url ? sanitizeTranscriptControlChars(emb.author.url) : null 
+        } : null,
+        fields: Array.isArray(emb.fields) ? emb.fields.map(f => ({ 
+          name: sanitizeSingleLineHeader(redactSensitiveData(f.name || ''), 150), 
+          value: sanitizeTranscriptControlChars(redactSensitiveData(String(f.value || ''))), 
+          inline: Boolean(f.inline) 
+        })) : [],
+        image: emb.image ? { url: sanitizeTranscriptControlChars(emb.image.url || '') } : null,
+        thumbnail: emb.thumbnail ? { url: sanitizeTranscriptControlChars(emb.thumbnail.url || '') } : null,
+        video: emb.video ? { url: sanitizeTranscriptControlChars(emb.video.url || '') } : null,
+        footer: emb.footer ? { text: sanitizeSingleLineHeader(redactSensitiveData(emb.footer.text || ''), 200) } : null,
+        timestamp: emb.timestamp || null
+      });
+    }
+  }
+
+  // 4. Nhãn dán (Stickers)
+  const stickers = [];
+  if (msg.stickers && typeof msg.stickers.forEach === 'function') {
+    msg.stickers.forEach((stk) => {
+      stickers.push({
+        id: stk.id,
+        name: sanitizeSingleLineHeader(stk.name || 'Sticker', 100),
+        url: stk.url || `https://media.discordapp.net/stickers/${stk.id}.png`
+      });
+    });
+  }
+
+  // 5. Cảm xúc (Reactions)
+  const reactions = [];
+  if (msg.reactions?.cache && typeof msg.reactions.cache.forEach === 'function') {
+    msg.reactions.cache.forEach((r) => {
+      reactions.push({
+        emoji: sanitizeSingleLineHeader(r.emoji?.name || 'emoji', 50),
+        count: r.count || 1
+      });
+    });
+  }
+
+  // 6. Bình chọn (Poll)
+  let poll = null;
+  if (msg.poll) {
+    const answers = [];
+    if (msg.poll.answers && typeof msg.poll.answers.forEach === 'function') {
+      msg.poll.answers.forEach((ans) => {
+        answers.push({
+          text: sanitizeSingleLineHeader(redactSensitiveData(ans.text || ans.pollMedia?.text || 'Tùy chọn'), 200),
+          voteCount: ans.voteCount || 0
+        });
+      });
+    }
+    poll = {
+      question: sanitizeSingleLineHeader(redactSensitiveData(msg.poll.question?.text || 'Cuộc thăm dò'), 250),
+      answers
+    };
+  }
+
+  // Raw content sanitized and redacted
+  const rawContent = typeof msg.content === 'string' ? msg.content : '';
+  const sanitizedContent = sanitizeTranscriptControlChars(redactSensitiveData(rawContent));
+
+  return {
+    id: msg.id,
+    createdTimestamp: msg.createdTimestamp || Date.now(),
+    editedTimestamp: msg.editedTimestamp || null,
+    pinned: Boolean(msg.pinned),
+    system: Boolean(msg.system),
+    type: msg.type,
+    authorTag: authorData.tag,
+    authorId: authorData.id,
+    isBot: authorData.bot,
+    content: sanitizedContent,
+    replyMessageId: msg.reference?.messageId || null,
+    attachments,
+    embeds,
+    stickers,
+    reactions,
+    poll
+  };
+}
+
+/**
+ * Tạo nội dung văn bản Transcript với phân trang tin nhắn và định dạng chi tiết
+ * Sử dụng phân trang an toàn (limit: 100, cache: false) lên tới 5000 tin nhắn
+ * @param {import('discord.js').TextChannel} channel - Kênh cần trích xuất transcript
+ * @param {string|null} closeReason - Lý do đóng ticket (nếu có)
+ * @returns {Promise<string>} Chuỗi văn bản transcript hoàn chỉnh
+ */
 async function generateTranscript(channel, closeReason = null) {
   try {
     if (!channel || !channel.isTextBased()) {
       return `Lỗi: Kênh không hợp lệ hoặc không hỗ trợ đọc tin nhắn.`;
     }
 
-    // 1. Phân trang lấy toàn bộ lịch sử tin nhắn mà không làm phình message cache (cache: false)
-    const allMessages = [];
+    // 1. Phân trang lấy tin nhắn với { cache: false }
+    const lightweightMessages = [];
     let lastId = null;
-    const MAX_MESSAGES = 5000; // Ngưỡng an toàn chống quá tải bộ nhớ khi ticket cực dài
+    const MAX_MESSAGES = 5000;
 
-    while (allMessages.length < MAX_MESSAGES) {
+    while (lightweightMessages.length < MAX_MESSAGES) {
       const options = { limit: 100, cache: false };
-      if (lastId) {
-        options.before = lastId;
-      }
+      if (lastId) options.before = lastId;
+
       const fetched = await channel.messages.fetch(options).catch(err => {
         console.error(`Lỗi fetch tin nhắn khi tạo transcript tại kênh #${channel.name}:`, err);
         return null;
@@ -893,79 +1682,119 @@ async function generateTranscript(channel, closeReason = null) {
 
       if (!fetched || fetched.size === 0) break;
 
-      allMessages.push(...fetched.values());
-      lastId = fetched.lastKey();
+      // Trích xuất ngay lập tức plain object để giải phóng Message instances khỏi RAM
+      fetched.forEach((m) => {
+        const item = extractTranscriptMessageData(m);
+        if (item) lightweightMessages.push(item);
+      });
 
-      // Nếu số tin nhắn lấy về < 100 thì đã đến tin nhắn đầu tiên của kênh
       if (fetched.size < 100) break;
+      const lastKey = typeof fetched.lastKey === 'function' ? fetched.lastKey() : (fetched.last?.()?.id || null);
+      if (!lastKey || lastKey === lastId) break;
+      lastId = lastKey;
     }
 
-    // Sắp xếp tin nhắn theo thứ tự thời gian từ cũ nhất -> mới nhất (Chronological order)
-    const sorted = allMessages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+    // Sắp xếp theo thứ tự thời gian từ cũ nhất -> mới nhất (Chronological order)
+    lightweightMessages.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
 
-    // Thu thập danh sách người tham gia hội thoại (Distinct Participants)
+    // Thu thập danh sách người tham gia (Distinct Participants) và số lượng tin nhắn
     const participantMap = new Map();
-    for (const msg of sorted) {
-      if (msg.author) {
-        participantMap.set(msg.author.id, `${msg.author.tag || msg.author.username} (${msg.author.id})${msg.author.bot ? ' [BOT]' : ''}`);
-      } else if (msg.webhookId) {
-        participantMap.set(msg.webhookId, `Webhook [ID: ${msg.webhookId}]`);
+    let userMsgCount = 0;
+    let botMsgCount = 0;
+    let systemMsgCount = 0;
+    let totalAttachmentsCount = 0;
+
+    for (const msg of lightweightMessages) {
+      if (msg.system) systemMsgCount++;
+      else if (msg.isBot) botMsgCount++;
+      else userMsgCount++;
+
+      totalAttachmentsCount += (msg.attachments?.length || 0);
+
+      if (msg.authorId && msg.authorId !== 'N/A') {
+        const existing = participantMap.get(msg.authorId) || {
+          tag: msg.authorTag,
+          id: msg.authorId,
+          isBot: msg.isBot,
+          count: 0
+        };
+        existing.count++;
+        participantMap.set(msg.authorId, existing);
       }
     }
-    const participantsList = Array.from(participantMap.values()).join('\n  • ') || 'Không có';
 
-    const nowStr = new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
-    const firstMsgTime = sorted.length > 0 
-      ? new Date(sorted[0].createdTimestamp).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }) 
-      : 'N/A';
-    const lastMsgTime = sorted.length > 0 
-      ? new Date(sorted[sorted.length - 1].createdTimestamp).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }) 
-      : 'N/A';
+    const participantsList = Array.from(participantMap.values())
+      .map(p => `${p.tag} (${p.id})${p.isBot ? ' [BOT]' : ''} - ${p.count} tin nhắn`)
+      .join('\n  • ') || 'Không có';
+
+    const nowFormatted = formatVNTime(Date.now(), true);
+    const firstMsgTime = lightweightMessages.length > 0 ? formatVNTime(lightweightMessages[0].createdTimestamp) : 'N/A';
+    const lastMsgTime = lightweightMessages.length > 0 ? formatVNTime(lightweightMessages[lightweightMessages.length - 1].createdTimestamp) : 'N/A';
+
+    // Tính thời gian tồn tại của kênh / Ticket Lifetime
+    let channelCreatedAt = 'N/A';
+    let ticketDurationStr = 'N/A';
+    try {
+      const createdSnowflakeMs = Number((BigInt(channel.id) >> 22n) + 1420070400000n);
+      channelCreatedAt = formatVNTime(createdSnowflakeMs);
+      const durationMs = Math.max(0, Date.now() - createdSnowflakeMs);
+      const durMinutes = Math.floor(durationMs / 60000);
+      const durHours = Math.floor(durMinutes / 60);
+      const durDays = Math.floor(durHours / 24);
+      if (durDays > 0) {
+        ticketDurationStr = `${durDays} ngày ${durHours % 24} giờ ${durMinutes % 60} phút`;
+      } else if (durHours > 0) {
+        ticketDurationStr = `${durHours} giờ ${durMinutes % 60} phút`;
+      } else {
+        ticketDurationStr = `${durMinutes} phút ${Math.floor((durationMs % 60000) / 1000)} giây`;
+      }
+    } catch (_) {}
+
+    // Sanitize metadata fields
+    const safeGuildName = sanitizeSingleLineHeader(channel.guild?.name || 'N/A', 100);
+    const safeGuildId = sanitizeSingleLineHeader(channel.guildId || channel.guild?.id || 'N/A', 30);
+    const safeChannelName = sanitizeSingleLineHeader(channel.name || 'N/A', 100);
+    const safeChannelId = sanitizeSingleLineHeader(channel.id || 'N/A', 30);
+    const safeCategoryName = sanitizeSingleLineHeader(channel.parent?.name || 'N/A', 100);
+    const safeTopic = sanitizeSingleLineHeader(redactSensitiveData(channel.topic || 'N/A'), 250);
+    const safeReason = closeReason ? sanitizeSingleLineHeader(redactSensitiveData(closeReason), 300) : null;
 
     let transcript = `================================================================================\n`;
     transcript += `LS STUDIO - TICKET TRANSCRIPT / NHẬT KÝ HỘI THOẠI TICKET\n`;
     transcript += `================================================================================\n`;
-    transcript += `Máy chủ / Guild: ${channel.guild?.name || 'N/A'} (${channel.guildId || 'N/A'})\n`;
-    transcript += `Kênh / Channel: #${channel.name} (${channel.id})\n`;
-    transcript += `Danh mục / Category: ${channel.parent?.name || 'N/A'}\n`;
-    transcript += `Chủ đề / Topic: ${channel.topic || 'N/A'}\n`;
-    if (closeReason) {
-      transcript += `Lý do đóng / Close Reason: ${closeReason}\n`;
+    transcript += `Máy chủ / Guild       : ${safeGuildName} (${safeGuildId})\n`;
+    transcript += `Kênh / Channel        : #${safeChannelName} (${safeChannelId})\n`;
+    transcript += `Danh mục / Category   : ${safeCategoryName}\n`;
+    transcript += `Chủ đề / Topic        : ${safeTopic}\n`;
+    transcript += `Thời điểm tạo ticket  : ${channelCreatedAt}\n`;
+    if (safeReason) {
+      transcript += `Lý do đóng / Reason   : ${safeReason}\n`;
     }
-    transcript += `Thời gian xuất / Exported At: ${nowStr} (UTC+7)\n`;
-    transcript += `Khoảng thời gian / Time Range: ${firstMsgTime} -> ${lastMsgTime}\n`;
-    transcript += `Tổng số tin nhắn / Total Messages: ${sorted.length}\n`;
-    transcript += `Thành viên tham gia / Participants:\n  • ${participantsList}\n`;
+    transcript += `Thời gian xuất / Time : ${nowFormatted}\n`;
+    transcript += `Thời gian tồn tại     : ${ticketDurationStr}\n`;
+    transcript += `Khoảng thời gian      : ${firstMsgTime} -> ${lastMsgTime}\n`;
+    transcript += `Tổng số tin nhắn / Total Messages: ${lightweightMessages.length} (Khách/Staff: ${userMsgCount} | Bot: ${botMsgCount} | Hệ thống: ${systemMsgCount})\n`;
+    transcript += `Tổng tệp đính kèm     : ${totalAttachmentsCount}\n`;
+    transcript += `Thành viên tham gia   :\n  • ${participantsList}\n`;
     transcript += `================================================================================\n\n`;
 
-    for (const msg of sorted) {
-      const timeStr = new Date(msg.createdTimestamp).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' });
-      
-      // Fallback an toàn cho Author (khi author bị xóa, null hoặc là Webhook)
-      const authorTag = msg.author 
-        ? (msg.author.tag || msg.author.username || 'User') 
-        : (msg.webhookId ? `Webhook [${msg.webhookId}]` : 'Deleted User / Người dùng đã xóa');
-      const authorId = msg.author ? msg.author.id : (msg.webhookId || 'N/A');
-      const isBot = msg.author ? msg.author.bot : Boolean(msg.webhookId);
-      const isSystem = Boolean(msg.system);
-
+    for (const msg of lightweightMessages) {
+      const timeStr = formatVNTime(msg.createdTimestamp);
       let badge = '';
-      if (isSystem) badge = ' [SYSTEM / HỆ THỐNG]';
-      else if (isBot) badge = ' [BOT]';
+      if (msg.system) badge = ' [SYSTEM / HỆ THỐNG]';
+      else if (msg.isBot) badge = ' [BOT]';
 
-      const editedInfo = msg.editedTimestamp 
-        ? ` (Đã sửa / Edited: ${new Date(msg.editedTimestamp).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })})` 
-        : '';
+      const editedInfo = msg.editedTimestamp ? ` (Đã sửa: ${formatVNTime(msg.editedTimestamp)})` : '';
       const pinnedInfo = msg.pinned ? ' 📌[PINNED]' : '';
 
-      transcript += `[${timeStr}] ${authorTag} (${authorId})${badge}${pinnedInfo}${editedInfo}:\n`;
+      transcript += `[${timeStr}] ${msg.authorTag} (${msg.authorId})${badge}${pinnedInfo}${editedInfo}:\n`;
 
-      // 1. Phản hồi tin nhắn khác (Reply Reference)
-      if (msg.reference && msg.reference.messageId) {
-        transcript += `  ↳ [Trả lời tin nhắn / Replying to Msg ID: ${msg.reference.messageId}]\n`;
+      // 1. Phản hồi tin nhắn (Reply Reference)
+      if (msg.replyMessageId) {
+        transcript += `  ↳ [Trả lời tin nhắn / Replying to Msg ID: ${msg.replyMessageId}]\n`;
       }
 
-      // 2. Tin nhắn hệ thống (System Messages)
+      // 2. Tin nhắn hệ thống (System)
       if (msg.system) {
         transcript += `  [Hệ thống / System]: Tin nhắn hệ thống Discord (${msg.type})\n`;
       }
@@ -976,64 +1805,54 @@ async function generateTranscript(channel, closeReason = null) {
       }
 
       // 4. Nhãn dán (Stickers)
-      if (msg.stickers && msg.stickers.size > 0) {
-        for (const [, sticker] of msg.stickers) {
-          const stickerUrl = sticker.url || `https://media.discordapp.net/stickers/${sticker.id}.png`;
-          transcript += `  [Nhãn dán / Sticker]: ${sticker.name} (${stickerUrl})\n`;
+      if (msg.stickers.length > 0) {
+        for (const stk of msg.stickers) {
+          transcript += `  [Nhãn dán / Sticker]: ${stk.name} (${stk.url})\n`;
         }
       }
 
       // 5. Tệp đính kèm (Attachments)
-      if (msg.attachments && msg.attachments.size > 0) {
-        for (const [, att] of msg.attachments) {
-          const sizeStr = att.size ? ` (${(att.size / 1024).toFixed(1)} KB)` : '';
-          const typeStr = att.contentType ? ` [${att.contentType}]` : '';
-          transcript += `  [Đính kèm / Attachment]: ${att.name || 'file'}${typeStr}${sizeStr} -> ${att.url}\n`;
+      if (msg.attachments.length > 0) {
+        for (const att of msg.attachments) {
+          const dimStr = att.width && att.height ? ` [${att.width}x${att.height}]` : '';
+          const descStr = att.description ? ` (Mô tả: "${att.description}")` : '';
+          transcript += `  [Đính kèm / Attachment]: ${att.name} [${att.contentType}] (${att.sizeFormatted})${dimStr}${descStr} -> ${att.url}\n`;
         }
       }
 
-      // 6. Embeds (Khung nội dung nâng cao)
-      if (msg.embeds && msg.embeds.length > 0) {
+      // 6. Embeds
+      if (msg.embeds.length > 0) {
         for (let i = 0; i < msg.embeds.length; i++) {
-          const embed = msg.embeds[i];
-          const embedIndex = msg.embeds.length > 1 ? ` #${i + 1}` : '';
-          transcript += `  [Embed${embedIndex}]:\n`;
-          if (embed.author?.name) {
-            transcript += `    • Tác giả / Author: ${embed.author.name}\n`;
-          }
-          if (embed.title) {
-            transcript += `    • Tiêu đề / Title: ${embed.title}${embed.url ? ` (${embed.url})` : ''}\n`;
-          }
-          if (embed.description) {
-            transcript += `    • Nội dung / Description:\n      ${embed.description.split('\n').join('\n      ')}\n`;
-          }
-          if (embed.fields && embed.fields.length > 0) {
-            for (const field of embed.fields) {
-              transcript += `    • Trường / Field [${field.name}]: ${String(field.value).split('\n').join(' ')}\n`;
+          const emb = msg.embeds[i];
+          const embIdx = msg.embeds.length > 1 ? ` #${i + 1}` : '';
+          transcript += `  [Embed${embIdx}]:\n`;
+          if (emb.author?.name) transcript += `    • Tác giả: ${emb.author.name}\n`;
+          if (emb.title) transcript += `    • Tiêu đề: ${emb.title}${emb.url ? ` (${emb.url})` : ''}\n`;
+          if (emb.description) transcript += `    • Nội dung:\n      ${emb.description.split('\n').join('\n      ')}\n`;
+          if (emb.fields.length > 0) {
+            for (const f of emb.fields) {
+              transcript += `    • Trường [${f.name}]: ${String(f.value).split('\n').join(' ')}\n`;
             }
           }
-          if (embed.image?.url) {
-            transcript += `    • Ảnh lớn / Image: ${embed.image.url}\n`;
-          }
-          if (embed.thumbnail?.url) {
-            transcript += `    • Ảnh nhỏ / Thumbnail: ${embed.thumbnail.url}\n`;
-          }
-          if (embed.footer?.text) {
-            transcript += `    • Chân trang / Footer: ${embed.footer.text}\n`;
-          }
+          if (emb.image?.url) transcript += `    • Ảnh lớn: ${emb.image.url}\n`;
+          if (emb.thumbnail?.url) transcript += `    • Ảnh thu nhỏ: ${emb.thumbnail.url}\n`;
+          if (emb.footer?.text) transcript += `    • Chân trang: ${emb.footer.text}\n`;
+          if (emb.timestamp) transcript += `    • Mốc thời gian: ${formatVNTime(emb.timestamp)}\n`;
         }
       }
 
-      // 7. Cảm xúc / Tương tác (Reactions)
-      if (msg.reactions && msg.reactions.cache.size > 0) {
-        const reactList = [];
-        for (const [, reaction] of msg.reactions.cache) {
-          const emojiName = reaction.emoji.name || 'emoji';
-          reactList.push(`${emojiName} (${reaction.count})`);
+      // 7. Bình chọn (Poll)
+      if (msg.poll) {
+        transcript += `  [Bình chọn / Poll]: ${msg.poll.question}\n`;
+        for (const ans of msg.poll.answers) {
+          transcript += `    • ${ans.text} (${ans.voteCount} phiếu)\n`;
         }
-        if (reactList.length > 0) {
-          transcript += `  [Cảm xúc / Reactions]: ${reactList.join(', ')}\n`;
-        }
+      }
+
+      // 8. Cảm xúc (Reactions)
+      if (msg.reactions.length > 0) {
+        const reacts = msg.reactions.map(r => `${r.emoji} (${r.count})`).join(', ');
+        transcript += `  [Cảm xúc / Reactions]: ${reacts}\n`;
       }
 
       transcript += `\n`;
@@ -1043,14 +1862,340 @@ async function generateTranscript(channel, closeReason = null) {
     transcript += `KẾT THÚC NHẬT KÝ / END OF TRANSCRIPT - LS STUDIO SYSTEM\n`;
     transcript += `================================================================================\n`;
 
-    // Giải phóng bộ nhớ mảng và Map sau khi đã tạo xong chuỗi transcript
-    allMessages.length = 0;
+    // Giải phóng bộ nhớ mảng
+    lightweightMessages.length = 0;
     participantMap.clear();
 
     return transcript;
   } catch (err) {
     console.error("Lỗi tạo transcript:", err);
     return `Lỗi khi xuất transcript: ${err.message}`;
+  }
+}
+
+/**
+ * Kiểm tra kích thước transcript và tạo AttachmentBuilder an toàn chống lỗi 413 (Payload Too Large)
+ * Nếu file vượt quá 7.5 MB (ngưỡng an toàn của giới hạn 8MB Discord), tự động chia thành nhiều file phần.
+ * Nếu số phần vượt quá 10 (giới hạn file đính kèm Discord per message), tự động cắt bớt an toàn.
+ * @param {string} transcriptText - Nội dung văn bản transcript
+ * @param {string} baseFileName - Tên tệp cơ sở (ví dụ: transcript-mua-plugin.txt)
+ * @returns {{ attachments: import('discord.js').AttachmentBuilder[], summaryAttachment: import('discord.js').AttachmentBuilder|null, totalBytes: number, partsCount: number, isSplit: boolean, isTrimmed: boolean, summaryGenerated: boolean, baseFileName: string }}
+ */
+function createTranscriptAttachments(transcriptText, baseFileName = 'transcript.txt') {
+  const safeText = typeof transcriptText === 'string' ? transcriptText : String(transcriptText || '');
+  const fullBuffer = Buffer.from(safeText, 'utf-8');
+  const totalBytes = fullBuffer.byteLength;
+  const SAFE_CHUNK_BYTES = Math.floor(7.5 * 1024 * 1024); // 7.5 MB safe chunk threshold (< 8 MB Discord limit)
+
+  // Tên tệp an toàn (loại bỏ ký tự lạ)
+  const cleanBaseName = (baseFileName || 'transcript.txt').replace(/[^a-zA-Z0-9._-]/g, '_');
+  const rawExt = cleanBaseName.includes('.') ? cleanBaseName.substring(cleanBaseName.lastIndexOf('.')) : '.txt';
+  const rawBase = cleanBaseName.includes('.') ? cleanBaseName.substring(0, cleanBaseName.lastIndexOf('.')) : cleanBaseName;
+
+  // Trường hợp 1: File nhỏ hơn hoặc bằng 7.5 MB -> Đính kèm 1 file duy nhất
+  if (totalBytes <= SAFE_CHUNK_BYTES) {
+    const attachment = new AttachmentBuilder(fullBuffer, { name: cleanBaseName });
+    return {
+      attachments: [attachment],
+      summaryAttachment: null,
+      totalBytes,
+      partsCount: 1,
+      isSplit: false,
+      isTrimmed: false,
+      summaryGenerated: false,
+      baseFileName: cleanBaseName
+    };
+  }
+
+  // Trường hợp 2: File lớn hơn 7.5 MB -> Phân tách an toàn theo dòng / buffer slice
+  const lines = safeText.split('\n');
+  const stringChunks = [];
+  let currentChunkLines = [];
+  let currentChunkBytes = 0;
+
+  for (let line of lines) {
+    const lineByteLength = Buffer.byteLength(line, 'utf-8') + 1; // +1 cho ký tự newline
+
+    // Xử lý trường hợp dòng đơn siêu dài (> SAFE_CHUNK_BYTES)
+    if (lineByteLength > SAFE_CHUNK_BYTES) {
+      if (currentChunkLines.length > 0) {
+        stringChunks.push(currentChunkLines.join('\n'));
+        currentChunkLines = [];
+        currentChunkBytes = 0;
+      }
+      const lineBuf = Buffer.from(line, 'utf-8');
+      for (let offset = 0; offset < lineBuf.length; offset += SAFE_CHUNK_BYTES) {
+        const subBuf = lineBuf.subarray(offset, Math.min(offset + SAFE_CHUNK_BYTES, lineBuf.length));
+        stringChunks.push(subBuf.toString('utf-8'));
+      }
+      continue;
+    }
+
+    if (currentChunkBytes + lineByteLength > SAFE_CHUNK_BYTES && currentChunkLines.length > 0) {
+      stringChunks.push(currentChunkLines.join('\n'));
+      currentChunkLines = [line];
+      currentChunkBytes = lineByteLength;
+    } else {
+      currentChunkLines.push(line);
+      currentChunkBytes += lineByteLength;
+    }
+  }
+  if (currentChunkLines.length > 0) {
+    stringChunks.push(currentChunkLines.join('\n'));
+  }
+
+  const MAX_DISCORD_FILES = 10;
+  const totalParts = stringChunks.length;
+  const isTrimmed = totalParts > MAX_DISCORD_FILES;
+  const maxPartsToSend = Math.min(totalParts, MAX_DISCORD_FILES);
+  const attachments = [];
+
+  for (let i = 0; i < maxPartsToSend; i++) {
+    const partNum = i + 1;
+    const partBuffer = Buffer.from(stringChunks[i], 'utf-8');
+    const partFileName = `${rawBase}-part${partNum}-of-${totalParts}${rawExt}`;
+    attachments.push(new AttachmentBuilder(partBuffer, { name: partFileName }));
+  }
+
+  return {
+    attachments,
+    summaryAttachment: null,
+    totalBytes,
+    partsCount: totalParts,
+    isSplit: true,
+    isTrimmed,
+    summaryGenerated: false,
+    baseFileName: cleanBaseName
+  };
+}
+
+/**
+ * Xử lý quy trình đóng ticket tập trung, lưu trữ transcript, gửi DM và ghi nhật ký quản trị
+ * @param {Object} params
+ * @param {import('discord.js').TextChannel} params.channel - Kênh ticket
+ * @param {import('discord.js').Guild} params.guild - Máy chủ
+ * @param {import('discord.js').User} params.closerUser - Người thực hiện đóng ticket
+ * @param {string|null} params.closeReason - Lý do đóng ticket
+ * @returns {Promise<boolean>}
+ */
+async function executeTicketClosure({ channel, guild, closerUser, closeReason = null }) {
+  if (!channel || !channel.isTextBased() || !channel.id) return false;
+
+  // Chống race condition: không đóng trùng kênh ticket đang xử lý
+  if (closingTicketChannels.has(channel.id)) {
+    return false;
+  }
+  closingTicketChannels.add(channel.id);
+
+  try {
+    const transcriptText = await generateTranscript(channel, closeReason);
+    const baseFileName = `transcript-${channel.name}.txt`;
+    const attachmentResult = createTranscriptAttachments(transcriptText, baseFileName);
+
+    // 1. Trích xuất ID người mở ticket từ Topic hoặc Overwrites hoặc Tin nhắn đầu tiên
+    let openerId = null;
+    if (channel.topic) {
+      const openerMatch = channel.topic.match(/\((\d{17,20})\)/) || channel.topic.match(/\b(\d{17,20})\b/);
+      if (openerMatch) openerId = openerMatch[1];
+    }
+    if (!openerId && channel.permissionOverwrites?.cache) {
+      // Tìm member overwrite không phải bot và không phải người đóng
+      const memberOverwrite = channel.permissionOverwrites.cache.find(po => 
+        po.type === 1 && po.id !== client.user?.id && po.id !== closerUser.id
+      );
+      if (memberOverwrite) openerId = memberOverwrite.id;
+    }
+
+    // 2. Gửi Transcript qua tin nhắn riêng (DM) cho người mở ticket (Bắt lỗi an toàn khi user tắt/chặn DM)
+    let dmStatusNote = "Không tìm thấy thông tin người mở ticket";
+    if (openerId) {
+      try {
+        const openerUser = await client.users.fetch(openerId).catch(() => null);
+        if (openerUser) {
+          const sizeFormatted = attachmentResult.totalBytes >= 1024 * 1024
+            ? `${(attachmentResult.totalBytes / (1024 * 1024)).toFixed(2)} MB`
+            : `${(attachmentResult.totalBytes / 1024).toFixed(1)} KB`;
+
+          const safeCloserTag = sanitizeSingleLineHeader(closerUser.tag || closerUser.username, 50);
+          const safeReasonDisplay = closeReason ? sanitizeMarkdownForEmbed(closeReason, 300) : null;
+
+          const dmEmbed = new EmbedBuilder()
+            .setColor("#5865F2")
+            .setTitle("📑 BẢN LƯU NHẬT KÝ TICKET - LS STUDIO")
+            .setDescription(
+              `👋 Chào <@${openerId}>!\n\n` +
+              `Ticket **#${sanitizeMarkdownForEmbed(channel.name, 50)}** của bạn tại **LS STUDIO** đã được đóng bởi <@${closerUser.id}> (\`${safeCloserTag}\`).\n` +
+              (safeReasonDisplay ? `📝 **Lý do đóng / Ghi chú:** \`${safeReasonDisplay}\`\n` : '') +
+              `📦 **Kích thước bản lưu:** \`${sizeFormatted}\`${attachmentResult.isSplit ? ` (Được chia làm ${attachmentResult.partsCount} tệp)` : ''}\n\n` +
+              `Đính kèm bên dưới là toàn bộ lịch sử tin nhắn (Transcript) để bạn tiện theo dõi và tra cứu khi cần.\n\n` +
+              `*Thank you for contacting LS STUDIO! Your ticket transcript is attached below.*`
+            )
+            .setFooter({ text: "LS STUDIO • Hỗ Trợ 24/7" })
+            .setTimestamp();
+
+          if (attachmentResult.isSplit) {
+            // Gửi tin nhắn chính kèm Summary và Phần 1
+            const primaryFiles = [attachmentResult.summaryAttachment, attachmentResult.attachments[0]].filter(Boolean);
+            await openerUser.send({ embeds: [dmEmbed], files: primaryFiles }).catch(err => {
+              throw err;
+            });
+            // Gửi các phần còn lại theo từng tin nhắn riêng lẻ chống 413 Payload Too Large
+            for (let i = 1; i < attachmentResult.attachments.length; i++) {
+              await openerUser.send({ files: [attachmentResult.attachments[i]] }).catch(() => {});
+            }
+          } else {
+            await openerUser.send({ embeds: [dmEmbed], files: attachmentResult.attachments }).catch(err => {
+              throw err;
+            });
+          }
+          dmStatusNote = "✅ Đã gửi bản sao qua DM thành công";
+        } else {
+          dmStatusNote = "⚠️ Không tìm thấy tài khoản người dùng trên Discord";
+        }
+      } catch (dmErr) {
+        if (dmErr.code === 50007) {
+          dmStatusNote = "⚠️ Khách tắt nhận DM từ server hoặc chặn Bot (Code 50007)";
+        } else {
+          dmStatusNote = `⚠️ Lỗi gửi DM: ${dmErr.message || 'Không xác định'}`;
+        }
+        console.warn(`⚠️ [Transcript DM] Không thể gửi DM cho user ${openerId}: ${dmStatusNote}`);
+      }
+    }
+
+    // 3. Gửi Transcript về kênh Quản Trị / Log Channel
+    try {
+      const configLogChannelId = process.env.LOG_CHANNEL_ID || process.env.TICKET_LOG_CHANNEL_ID || process.env.TRANSCRIPT_LOG_CHANNEL_ID;
+      let logChannel = null;
+      if (configLogChannelId && guild) {
+        logChannel = guild.channels.cache.get(configLogChannelId) || await guild.channels.fetch(configLogChannelId).catch(() => null);
+      }
+
+      if (!logChannel && guild) {
+        const isLogName = (name) => {
+          const n = (name || '').toLowerCase();
+          return n.includes("nhật-ký-giao-dịch") ||
+                 n.includes("ticket-log") ||
+                 n.includes("ticket-transcript") ||
+                 n.includes("transcripts") ||
+                 n.includes("transcript") ||
+                 n.includes("nhật-ký") ||
+                 n === "log" || n === "logs" ||
+                 n.startsWith("log-") || n.endsWith("-log") || n.endsWith("-logs");
+        };
+
+        logChannel = guild.channels.cache.find(c => c.isTextBased() && isLogName(c.name));
+        if (!logChannel) {
+          const fetchedChannels = await guild.channels.fetch().catch(() => null);
+          if (fetchedChannels) {
+            logChannel = fetchedChannels.find(c => c && c.isTextBased() && isLogName(c.name));
+          }
+        }
+      }
+
+      if (logChannel) {
+        const botMember = guild.members.me || (client.user ? await guild.members.fetch(client.user.id).catch(() => null) : null);
+        const permissions = botMember ? logChannel.permissionsFor(botMember) : null;
+
+        const canView = !permissions || permissions.has(PermissionsBitField.Flags.ViewChannel);
+        const canSend = !permissions || permissions.has(PermissionsBitField.Flags.SendMessages);
+        const canAttach = !permissions || permissions.has(PermissionsBitField.Flags.AttachFiles);
+        const canEmbed = !permissions || permissions.has(PermissionsBitField.Flags.EmbedLinks);
+
+        if (!canView || !canSend) {
+          console.error(`❌ [Log Channel] Bot thiếu quyền ViewChannel hoặc SendMessages trong #${logChannel.name}`);
+        } else {
+          const sizeFormatted = attachmentResult.totalBytes >= 1024 * 1024
+            ? `${(attachmentResult.totalBytes / (1024 * 1024)).toFixed(2)} MB`
+            : `${(attachmentResult.totalBytes / 1024).toFixed(1)} KB`;
+
+          const safeCloserTag = sanitizeSingleLineHeader(closerUser.tag || closerUser.username, 50);
+          const safeReasonDisplay = closeReason ? sanitizeMarkdownForEmbed(closeReason, 1000) : null;
+
+          const logEmbed = new EmbedBuilder()
+            .setColor("#FF5252")
+            .setTitle("📑 NHẬT KÝ ĐÓNG TICKET / TICKET TRANSCRIPT LOG")
+            .addFields(
+              { name: "📁 Kênh / Channel", value: `\`${sanitizeMarkdownForEmbed(channel.name, 50)}\` (\`${channel.id}\`)`, inline: true },
+              { name: "👤 Người mở / Opener", value: openerId ? `<@${openerId}> (\`${openerId}\`)` : "N/A", inline: true },
+              { name: "🔒 Người đóng / Closed By", value: `<@${closerUser.id}> (\`${safeCloserTag}\`)`, inline: true },
+              ...(safeReasonDisplay ? [{ name: "📝 Lý do đóng / Reason", value: safeReasonDisplay, inline: false }] : []),
+              { name: "⏰ Thời gian / Time", value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true },
+              { name: "📦 Dung lượng / Size", value: `\`${sizeFormatted}\`${attachmentResult.isSplit ? ` (${attachmentResult.partsCount} tệp)` : ''}`, inline: true },
+              { name: "📨 Trạng thái gửi DM Khách", value: dmStatusNote, inline: false }
+            )
+            .setFooter({ text: "LS STUDIO Ticket Security & Audit" })
+            .setTimestamp();
+
+          if (!canAttach) {
+            logEmbed.addFields({ name: "⚠️ Quyền đính kèm", value: "Bot thiếu quyền `AttachFiles` để gửi kèm file transcript." });
+          }
+
+          if (canEmbed) {
+            if (canAttach && attachmentResult.isSplit) {
+              const primaryFiles = [attachmentResult.summaryAttachment, attachmentResult.attachments[0]].filter(Boolean);
+              await logChannel.send({ embeds: [logEmbed], files: primaryFiles }).catch(err => {
+                console.error("❌ Lỗi gửi log transcript có embed:", err);
+              });
+              for (let i = 1; i < attachmentResult.attachments.length; i++) {
+                await logChannel.send({ files: [attachmentResult.attachments[i]] }).catch(() => {});
+              }
+            } else {
+              const filesToSend = canAttach ? attachmentResult.attachments : [];
+              await logChannel.send({ embeds: [logEmbed], files: filesToSend }).catch(err => {
+                console.error("❌ Lỗi gửi log transcript có embed:", err);
+              });
+            }
+          } else {
+            const textContent = `📑 **NHẬT KÝ ĐÓNG TICKET**\n• Kênh: \`${sanitizeMarkdownForEmbed(channel.name, 50)}\`\n• Người mở: <@${openerId || 'N/A'}>\n• Người đóng: <@${closerUser.id}>\n• Lý do: ${safeReasonDisplay || 'N/A'}\n• DM Khách: ${dmStatusNote}`;
+            if (canAttach && attachmentResult.isSplit) {
+              const primaryFiles = [attachmentResult.summaryAttachment, attachmentResult.attachments[0]].filter(Boolean);
+              await logChannel.send({ content: textContent, files: primaryFiles }).catch(err => {
+                console.error("❌ Lỗi gửi log transcript dạng text:", err);
+              });
+              for (let i = 1; i < attachmentResult.attachments.length; i++) {
+                await logChannel.send({ files: [attachmentResult.attachments[i]] }).catch(() => {});
+              }
+            } else {
+              const filesToSend = canAttach ? attachmentResult.attachments : [];
+              await logChannel.send({ content: textContent, files: filesToSend }).catch(err => {
+                console.error("❌ Lỗi gửi log transcript dạng text:", err);
+              });
+            }
+          }
+        }
+      } else {
+        console.warn(`⚠️ [Transcript Audit Warning] Không tìm thấy kênh nhật ký (nhật-ký-giao-dịch) trên server ${guild?.name || 'N/A'}.`);
+        console.info(`📋 [Emergency Audit Log] Ticket #${channel.name} (${channel.id}) closed by ${closerUser.id}. Opener: ${openerId || 'N/A'}. DM: ${dmStatusNote}. Size: ${(attachmentResult.totalBytes / 1024).toFixed(1)} KB`);
+      }
+    } catch (logErr) {
+      console.error("❌ Lỗi xử lý gửi transcript về log channel:", logErr);
+    }
+
+    // 4. Xóa kênh sau 5 giây an toàn & giải phóng bộ nhớ cache
+    setTimeout(async () => {
+      try {
+        const ch = await guild?.channels.fetch(channel.id).catch(() => null);
+        if (ch && ch.deletable) {
+          ch.messages?.cache?.clear();
+          await ch.delete(`Ticket closed by ${closerUser.tag || closerUser.username} (${closerUser.id})`).catch(delErr => {
+            if (delErr.code !== 10003) {
+              console.error("❌ Lỗi xóa kênh ticket sau khi lưu transcript:", delErr);
+            }
+          });
+        }
+      } catch (e) {
+        if (e.code !== 10003) {
+          console.error("❌ Lỗi xóa kênh ticket sau khi lưu transcript:", e);
+        }
+      }
+    }, 5000).unref();
+
+    return true;
+  } finally {
+    // Giữ lock 10s cho tới khi channel bị xóa hoàn toàn
+    setTimeout(() => {
+      closingTicketChannels.delete(channel.id);
+    }, 10000).unref();
   }
 }
 
@@ -1069,7 +2214,7 @@ function buildPackageSelectMenu(userId, lang = 'vi') {
       .setValue('ls_anticheat')
       .setEmoji('🛡️'),
     new StringSelectMenuOptionBuilder()
-      .setLabel(isEn ? 'Addon Anti-Macro Cart • $1.00/Mo (20.000 VNĐ/Tháng)' : 'Addon Anti-Macro Cart • 20.000 VNĐ / Tháng')
+      .setLabel(isEn ? 'Addon Anti-Macro Cart • $1.00/Mo (20.000 VNĐ/Tháng)' : 'Addon Anti-Macro Cart • 20.000 VNĐ/Tháng')
       .setDescription(isEn ? 'Minecart/Boat macro speed exploits protection' : 'Chống hack/macro xe mỏ và thuyền di chuyển siêu tốc')
       .setValue('addon_macro_cart')
       .setEmoji('🛒'),
@@ -1131,22 +2276,22 @@ function buildPackageSelectMenu(userId, lang = 'vi') {
       .setValue('api_codex_100m')
       .setEmoji('💻'),
     new StringSelectMenuOptionBuilder()
-      .setLabel(isEn ? 'Claude Max 20 Account (1 Mo) • $3.50 (89.000 VNĐ)' : 'Tài Khoản Claude Max 20 • 89.000 VNĐ (1 Tháng)')
+      .setLabel(isEn ? 'Claude Max 20 Account (1 Mo) • $3.50 (89.000 VNĐ)' : 'Tài Khoản Claude Max 20 (1 Tháng) • 89.000 VNĐ')
       .setDescription(isEn ? 'Full access to Claude Sonnet 5, Opus 5, Fable 5 for 30d' : 'Hạn mức cao Max 20, dùng Claude Fable 5, Opus 5, Sonnet 5')
       .setValue('acc_claude_max20')
       .setEmoji('👑'),
     new StringSelectMenuOptionBuilder()
-      .setLabel(isEn ? 'ChatGPT Plus GPT-5.6 (1 Mo) • $6.80 (169.000 VNĐ)' : 'Tài Khoản ChatGPT Plus • 169.000 VNĐ (1 Tháng)')
+      .setLabel(isEn ? 'ChatGPT Plus GPT-5.6 (1 Mo) • $6.80 (169.000 VNĐ)' : 'Tài Khoản ChatGPT Plus GPT-5.6 (1 Tháng) • 169.000 VNĐ')
       .setDescription(isEn ? 'Full GPT-5.6 Sol, DALL-E, Voice Chat with 30-day warranty' : 'GPT-5.6 Sol, DALL-E 3, Voice Chat, Canvas 2.0, bảo hành 1 tháng')
       .setValue('acc_chatgpt_plus')
       .setEmoji('⭐'),
     new StringSelectMenuOptionBuilder()
-      .setLabel(isEn ? 'Monica AI Pro Claude 5 (3 Days) • $2.00 (49.000 VNĐ)' : 'Tài Khoản Monica AI Pro Claude 5 • 49.000 VNĐ')
+      .setLabel(isEn ? 'Monica AI Pro Claude 5 (3 Days) • $2.00 (49.000 VNĐ)' : 'Tài Khoản Monica AI Pro Claude 5 (3 Ngày) • 49.000 VNĐ')
       .setDescription(isEn ? 'Claude Sonnet 5, Opus 5, GPT-5.6 Sol, Gemini 2.5 Pro' : 'Gói Pro 3 ngày có Claude 5, GPT-5.6 Sol, Gemini 2.5 Pro')
       .setValue('acc_monica_pro_3d')
       .setEmoji('✨'),
     new StringSelectMenuOptionBuilder()
-      .setLabel(isEn ? 'ChatGPT Fresh Gmail for Offer • $0.20 (5.000 VNĐ)' : 'Tài Khoản ChatGPT New Gmail • 5.000 VNĐ')
+      .setLabel(isEn ? 'ChatGPT Fresh Gmail for Offer • $0.20 (5.000 VNĐ)' : 'Tài Khoản ChatGPT New Gmail (Nhận Offer) • 5.000 VNĐ')
       .setDescription(isEn ? 'Fresh Gmail to activate GPT-5.6 offer/trial' : 'Gmail mới dùng nhận Offer GPT-5.6 Sol (Cần thẻ PayPal)')
       .setValue('acc_chatgpt_offer')
       .setEmoji('🎁')
@@ -1156,8 +2301,56 @@ function buildPackageSelectMenu(userId, lang = 'vi') {
 }
 
 // =========================================================================
-// 6.1 HELPER MODAL BUILDERS & TICKET FACTORIES (DISCORD MODAL SPECS COMPLIANT)
+// 6.1 SANITIZATION HELPERS & MODAL BUILDERS (DISCORD SPECS COMPLIANT)
 // =========================================================================
+
+/**
+ * Chuẩn hóa và làm sạch văn bản nhập từ Modal một dòng (Inline Text)
+ * - Thay thế dấu backtick ` thành nháy đơn '
+ * - Thay thế ký tự xuống dòng bằng khoảng trắng
+ * - Thoát các ping nguy hiểm (@everyone, @here) thành (@ everyone, @ here)
+ * - Giới hạn độ dài và hỗ trợ giá trị mặc định fallback an toàn
+ */
+function sanitizeModalInlineText(text, maxLength = 100, fallback = '') {
+  if (text === null || text === undefined) return fallback;
+  const str = typeof text === 'string' ? text : String(text);
+  if (!str.trim()) return fallback;
+  const cleaned = str
+    .replace(/`/g, "'")
+    .replace(/\r?\n/g, ' ')
+    .replace(/@(everyone|here)/gi, '@ $1')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return (cleaned.slice(0, maxLength).trim()) || fallback;
+}
+
+/**
+ * Chuẩn hóa và làm sạch văn bản nhập từ Modal nhiều dòng (Code Block / Paragraph)
+ * - Thoát các khối mã 3 dấu backtick ``` thành ''' để tránh vỡ embed markdown
+ * - Giới hạn độ dài và hỗ trợ giá trị mặc định fallback an toàn
+ */
+function sanitizeModalCodeBlockText(text, maxLength = 1500, fallback = '') {
+  if (text === null || text === undefined) return fallback;
+  const str = typeof text === 'string' ? text : String(text);
+  if (!str.trim()) return fallback;
+  const cleaned = str
+    .replace(/```/g, "'''")
+    .trim();
+  return (cleaned.slice(0, maxLength).trim()) || fallback;
+}
+
+/**
+ * Chuẩn hóa chuỗi Topic cho kênh Discord (giới hạn 1024 ký tự theo Discord API)
+ */
+function sanitizeDiscordChannelTopic(text, maxLength = 1024) {
+  if (text === null || text === undefined) return '';
+  const str = typeof text === 'string' ? text : String(text);
+  return str
+    .replace(/```/g, "'''")
+    .replace(/\r?\n/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
 
 // Helper: Khởi tạo kênh Ticket an toàn với đầy đủ phân quyền và kiểm tra trùng lặp
 async function createTicketChannel({ guild, user, ticketType = '🛒-mua', customTopic = null }) {
@@ -1203,20 +2396,40 @@ async function createTicketChannel({ guild, user, ticketType = '🛒-mua', custo
   );
 
   // 5. Lấy tất cả các Role Staff / Developer / Founder / Admin
-  const staffRoles = guild.roles.cache.filter(r => 
-    r.name.includes("Staff") || 
-    r.name.includes("Developer") || 
-    r.name.includes("Founder") || 
-    r.name.includes("Admin")
+  let staffRoles = guild.roles.cache.filter(r => 
+    r && r.name && (
+      r.name.includes("Staff") || 
+      r.name.includes("Developer") || 
+      r.name.includes("Founder") || 
+      r.name.includes("Admin")
+    )
   );
+
+  if (staffRoles.size === 0) {
+    const fetchedRoles = await guild.roles.fetch().catch(() => null);
+    if (fetchedRoles) {
+      staffRoles = fetchedRoles.filter(r => 
+        r && r.name && (
+          r.name.includes("Staff") || 
+          r.name.includes("Developer") || 
+          r.name.includes("Founder") || 
+          r.name.includes("Admin")
+        )
+      );
+    }
+  }
+
+  const everyoneRoleId = guild.roles?.everyone?.id || guild.roles?.cache?.get(guild.id)?.id || guild.id;
+  const botUserId = client.user?.id || (botMember ? botMember.id : client.application?.id) || 'bot_id';
+  const targetUserId = user?.id || 'user_id';
 
   const overwrites = [
     {
-      id: guild.roles.everyone.id,
+      id: everyoneRoleId,
       deny: [PermissionsBitField.Flags.ViewChannel]
     },
     {
-      id: user.id,
+      id: targetUserId,
       allow: [
         PermissionsBitField.Flags.ViewChannel,
         PermissionsBitField.Flags.SendMessages,
@@ -1227,7 +2440,7 @@ async function createTicketChannel({ guild, user, ticketType = '🛒-mua', custo
       ]
     },
     {
-      id: client.user?.id || (botMember ? botMember.id : client.application?.id),
+      id: botUserId,
       allow: [
         PermissionsBitField.Flags.ViewChannel,
         PermissionsBitField.Flags.SendMessages,
@@ -1256,7 +2469,8 @@ async function createTicketChannel({ guild, user, ticketType = '🛒-mua', custo
     });
   });
 
-  const topic = customTopic || `Ticket của @${user.tag || user.username} (${user.id}) • Type: ${ticketType}`;
+  const safeUsername = sanitizeCustomerName(user?.tag || user?.username, 32, 'user');
+  const topic = sanitizeDiscordChannelTopic(customTopic || `Ticket của @${safeUsername} (${user?.id || 'id'}) • Type: ${ticketType}`);
 
   const ticketChannel = await guild.channels.create({
     name: channelName,
@@ -1417,9 +2631,8 @@ function createFeedbackModal() {
       .setCustomId('feedback_comment')
       .setLabel('Nhận xét & Trải nghiệm của bạn') // 32 ký tự <= 45
       .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder('Cảm nhận về chất lượng plugin, độ ổn định và hỗ trợ của Staff...') // 65 ký tự <= 100
-      .setRequired(true)
-      .setMinLength(5)
+      .setPlaceholder('Chia sẻ cảm nghĩ, độ hài lòng hoặc đề xuất cải tiến...')
+      .setRequired(false)
       .setMaxLength(1000)
   );
 
@@ -1428,25 +2641,254 @@ function createFeedbackModal() {
 }
 
 // =========================================================================
+// 6.2 SAFE INTERACTION HELPERS (ZERO-CRASH RESPONSE FALLBACKS & ERROR CODES)
+// =========================================================================
+
+const IGNORABLE_INTERACTION_ERROR_CODES = new Set([
+  10062, // Unknown interaction (expired 3s/15m)
+  40060, // Interaction has already been acknowledged
+  10008, // Unknown message
+  10003, // Unknown channel (channel deleted)
+  10015, // Unknown webhook
+  10004, // Unknown guild
+  10009, // Unknown member
+  50027, // Invalid Webhook Token
+  50001, // Missing Access
+  50013, // Missing Permissions
+  50007, // Cannot send messages to this user
+  50006, // Cannot send an empty message
+  50035  // Invalid Form Body
+]);
+
+/**
+ * Kiểm tra xem một lỗi Discord API có phải là lỗi tương tác hết hạn / kênh đã bị xóa hay không
+ */
+function isIgnorableInteractionError(err) {
+  if (!err) return false;
+  if (err.code && IGNORABLE_INTERACTION_ERROR_CODES.has(err.code)) return true;
+  const msg = String(err.message || '').toLowerCase();
+  return (
+    msg.includes('unknown interaction') ||
+    msg.includes('already been acknowledged') ||
+    msg.includes('unknown channel') ||
+    msg.includes('unknown message') ||
+    msg.includes('unknown webhook') ||
+    msg.includes('unknown guild') ||
+    msg.includes('unknown member') ||
+    msg.includes('invalid webhook token') ||
+    msg.includes('missing access') ||
+    msg.includes('missing permissions') ||
+    msg.includes('cannot send messages to this user') ||
+    msg.includes('cannot send an empty message') ||
+    msg.includes('invalid form body') ||
+    msg.includes('request aborted') ||
+    msg.includes('aborted')
+  );
+}
+
+/**
+ * Phản hồi interaction an toàn tuyệt đối chống race condition và không bao giờ throw error
+ */
+async function safeReply(interaction, options) {
+  if (!interaction || interaction.isAutocomplete?.()) return null;
+  try {
+    let payload = typeof options === 'string' ? { content: options } : { ...options };
+
+    // Đảm bảo payload không rỗng khi gửi qua REST API
+    if (!payload.content && (!payload.embeds || payload.embeds.length === 0) && (!payload.files || payload.files.length === 0)) {
+      if (payload.components && payload.components.length > 0) {
+        payload.content = ' ';
+      }
+    }
+
+    const isDeferred = Boolean(interaction.deferred || interaction._state?.deferred);
+    const isReplied = Boolean(interaction.replied || interaction._state?.replied);
+
+    // 1. Đã defer nhưng chưa reply -> editReply
+    if (isDeferred && !isReplied) {
+      try {
+        return await interaction.editReply(payload);
+      } catch (editErr) {
+        if (isIgnorableInteractionError(editErr)) return null;
+        try {
+          return await interaction.followUp(payload);
+        } catch (followErr) {
+          if (!isIgnorableInteractionError(followErr)) {
+            console.warn(`⚠️ [safeReply followUp Fallback Error] ${followErr.message}`);
+          }
+          return null;
+        }
+      }
+    }
+
+    // 2. Đã reply (hoặc đã defer + editReply trước đó)
+    if (isReplied) {
+      try {
+        return await interaction.followUp(payload);
+      } catch (followErr) {
+        if (isIgnorableInteractionError(followErr)) return null;
+        try {
+          return await interaction.editReply(payload);
+        } catch (_) {
+          return null;
+        }
+      }
+    }
+
+    // 3. Chưa acknowledge -> reply bình thường
+    try {
+      return await interaction.reply(payload);
+    } catch (replyErr) {
+      if (replyErr?.code === 40060 || replyErr?.code === 10062) {
+        if (interaction.deferred || interaction.replied) {
+          try {
+            return await interaction.editReply(payload);
+          } catch (_) {
+            try {
+              return await interaction.followUp(payload);
+            } catch (_) {
+              return null;
+            }
+          }
+        }
+        try {
+          return await interaction.followUp(payload);
+        } catch (_) {
+          return null;
+        }
+      }
+      if (isIgnorableInteractionError(replyErr)) return null;
+      console.warn(`⚠️ [safeReply Warning] ${replyErr.message}`);
+      return null;
+    }
+  } catch (err) {
+    if (!isIgnorableInteractionError(err)) {
+      console.warn(`⚠️ [safeReply Error] ${err.message}`);
+    }
+    return null;
+  }
+}
+
+/**
+ * Hoãn phản hồi an toàn (deferReply) chống 3-second timeout và không làm crash nếu interaction đã acknowledge
+ */
+async function safeDeferReply(interaction, options = {}) {
+  if (!interaction || interaction.isAutocomplete?.()) return false;
+  if (interaction.deferred || interaction.replied) return true;
+  try {
+    await interaction.deferReply(options);
+    return true;
+  } catch (err) {
+    if (isIgnorableInteractionError(err)) return false;
+    console.warn(`⚠️ [safeDeferReply Warning] ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Hoãn cập nhật component an toàn (deferUpdate) chống 3-second timeout
+ */
+async function safeDeferUpdate(interaction) {
+  if (!interaction || interaction.isAutocomplete?.()) return false;
+  if (interaction.deferred || interaction.replied) return true;
+  try {
+    if (typeof interaction.deferUpdate === 'function') {
+      await interaction.deferUpdate();
+      return true;
+    }
+    return false;
+  } catch (err) {
+    if (isIgnorableInteractionError(err)) return false;
+    console.warn(`⚠️ [safeDeferUpdate Warning] ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Chỉnh sửa phản hồi đã hoãn an toàn (editReply)
+ */
+async function safeEditReply(interaction, options) {
+  if (!interaction || interaction.isAutocomplete?.()) return null;
+  try {
+    const payload = typeof options === 'string' ? { content: options } : { ...options };
+    return await interaction.editReply(payload);
+  } catch (err) {
+    if (isIgnorableInteractionError(err)) return null;
+    console.warn(`⚠️ [safeEditReply Warning] ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Gửi tin nhắn tiếp theo an toàn (followUp)
+ */
+async function safeFollowUp(interaction, options) {
+  if (!interaction || interaction.isAutocomplete?.()) return null;
+  try {
+    const payload = typeof options === 'string' ? { content: options } : { ...options };
+    return await interaction.followUp(payload);
+  } catch (err) {
+    if (isIgnorableInteractionError(err)) return null;
+    console.warn(`⚠️ [safeFollowUp Warning] ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * Cập nhật component interaction an toàn (update) chống crash
+ */
+async function safeUpdate(interaction, options) {
+  if (!interaction || interaction.isAutocomplete?.()) return null;
+  try {
+    if (typeof interaction.update === 'function') {
+      return await interaction.update(options);
+    }
+    return await safeReply(interaction, options);
+  } catch (err) {
+    if (isIgnorableInteractionError(err)) return null;
+    return await safeReply(interaction, options);
+  }
+}
+
+/**
+ * Mở modal an toàn (showModal) chống lỗi interaction already replied
+ */
+async function safeShowModal(interaction, modal) {
+  if (!interaction || !modal) return false;
+  if (interaction.replied || interaction.deferred) {
+    console.warn("⚠️ [safeShowModal] Không thể showModal trên interaction đã replied/deferred.");
+    return false;
+  }
+  try {
+    await interaction.showModal(modal);
+    return true;
+  } catch (err) {
+    if (isIgnorableInteractionError(err)) return false;
+    console.warn(`⚠️ [safeShowModal Error] ${err.message}`);
+    return false;
+  }
+}
+
+// =========================================================================
 // 7. XỬ LÝ INTERACTIONS (BUTTON, SELECT MENU, SLASH COMMANDS, MODALS)
 // =========================================================================
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
     // 0. AUTOCOMPLETE INTERACTIONS (Xử lý gợi ý tự động an toàn)
-    if (interaction.isAutocomplete()) {
+    if (interaction.isAutocomplete?.()) {
       await interaction.respond([]).catch(() => {});
       return;
     }
 
     // 1. SLASH COMMANDS
-    if (interaction.isChatInputCommand()) {
+    if (interaction.isChatInputCommand?.()) {
       const { commandName } = interaction;
 
       // /ping
       if (commandName === 'ping') {
-        const wsPing = client.ws.ping;
+        const wsPing = client.ws?.ping ?? 0;
         const apiLatency = Math.max(0, Date.now() - interaction.createdTimestamp);
-        return interaction.reply({ 
+        return safeReply(interaction, { 
           content: `🏓 Pong! WebSocket: \`${wsPing}ms\` | API Latency: \`${apiLatency}ms\``, 
           ephemeral: true 
         });
@@ -1454,7 +2896,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // /stk
       if (commandName === 'stk') {
-        await interaction.deferReply();
+        await safeDeferReply(interaction);
         const qrUrl = generateVietQRUrl({ template: 'compact2' });
         const qrBuffer = await fetchVietQRBuffer(qrUrl);
 
@@ -1462,7 +2904,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setColor("#00E676")
           .setTitle("💳 THÔNG TIN THANH TOÁN / PAYMENT INFORMATION")
           .setDescription(
-            `🏦 **Ngân hàng / Bank:** MBBank (Ngân Hàng Quân Đội VN)\n` +
+            `🏦 **Ngân hàng / Bank:** MBBank (Ngân Hàng TMCP Quân Đội)\n` +
+            `🏷️ **Mã ngân hàng / BIN:** \`MB\` / \`970422\`\n` +
             `🔢 **Số tài khoản / Account Number:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
             `👤 **Chủ tài khoản / Account Holder:** **${BANK_CONFIG.ACCOUNT_NAME}**\n\n` +
             `*Khách hàng Việt Nam có thể quét mã VietQR bên dưới để thanh toán siêu tốc 24/7.*\n` +
@@ -1480,21 +2923,41 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (qrBuffer) {
           const attachment = new AttachmentBuilder(qrBuffer, { name: 'vietqr_stk.png' });
           embedStk.setImage('attachment://vietqr_stk.png');
-          return interaction.editReply({ embeds: [embedStk], files: [attachment], components: [btnRow] });
+          return safeReply(interaction, { embeds: [embedStk], files: [attachment], components: [btnRow] });
         } else {
-          embedStk.setImage(qrUrl);
-          embedStk.addFields({
-            name: "⚠️ Lưu Ý Quét Mã / QR Preview Notice",
-            value: "Nếu ảnh QR không tải được do đường truyền, bạn có thể bấm nút **[🔗 Mở mã VietQR]** bên dưới hoặc chuyển khoản theo số tài khoản ở trên.\n*If QR preview fails to load, please click the button below or copy bank details manually.*"
-          });
-          return interaction.editReply({ embeds: [embedStk], components: [btnRow] });
+          embedStk.setColor("#FFA500");
+          embedStk.setDescription(
+            `🏦 **Ngân hàng / Bank:** MBBank (Ngân Hàng TMCP Quân Đội)\n` +
+            `🏷️ **Mã ngân hàng / BIN:** \`MB\` / \`970422\`\n` +
+            `🔢 **Số tài khoản / Account Number:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
+            `👤 **Chủ tài khoản / Account Holder:** **${BANK_CONFIG.ACCOUNT_NAME}**\n\n` +
+            `⚠️ *Cổng tạo ảnh VietQR tự động tạm thời phản hồi chậm hoặc đang bảo trì. Quý khách vui lòng chuyển khoản thủ công theo thông tin bên dưới hoặc bấm nút **[🔗 Mở mã VietQR / Open QR]** bên dưới.*\n` +
+            `*International customers: Please open a Ticket for PayPal / International payment methods.*`
+          );
+          embedStk.addFields(
+            {
+              name: "⚠️ CỔNG TẠO MÃ QR TẠM THỜI BẢO TRÌ / VIETQR OFFLINE",
+              value: "Cổng kết nối tạo ảnh VietQR tự động tạm thời phản hồi chậm hoặc đang bảo trì đường truyền.\n**Hệ thống Ngân hàng 24/7 vẫn nhận tiền bình thường 100%!** Quý khách có thể chuyển khoản thủ công liên ngân hàng Napas 24/7 theo thông tin dưới đây:"
+            },
+            {
+              name: "📋 THÔNG TIN CHUYỂN KHOẢN THỦ CÔNG (MANUAL TRANSFER)",
+              value:
+                `🏦 **Ngân hàng / Bank:** \`MBBank (Ngân Hàng TMCP Quân Đội - MB)\`\n` +
+                `🏷️ **Mã ngân hàng / BIN:** \`MB\` (\`970422\`)\n` +
+                `🔢 **Số tài khoản / Account No:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
+                `👤 **Chủ tài khoản / Account Name:** \`${BANK_CONFIG.ACCOUNT_NAME}\`\n` +
+                `📝 **Nội dung / Memo:** \`LSSTUDIO\` hoặc \`Tên Discord của bạn\`\n` +
+                `💡 *Gợi ý: Quý khách chạm/click vào số tài khoản ở trên để copy nhanh.*`
+            }
+          );
+          return safeReply(interaction, { embeds: [embedStk], components: [btnRow] });
         }
       }
 
       // /khachhang (Staff Only)
       if (commandName === 'khachhang') {
-        if (!interaction.inGuild() || !interaction.guild) {
-          return interaction.reply({ 
+        if (!interaction.inGuild?.() || !interaction.guild) {
+          return safeReply(interaction, { 
             content: "❌ Lệnh này chỉ có thể sử dụng bên trong máy chủ Discord!", 
             ephemeral: true 
           });
@@ -1504,7 +2967,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const isStaff = isStaffMember(interaction.member);
 
         if (!isStaff) {
-          return interaction.reply({ 
+          return safeReply(interaction, { 
             content: "❌ Bạn không có quyền sử dụng lệnh này! (Dành riêng cho Staff/Admin) / Staff Only!", 
             ephemeral: true 
           });
@@ -1512,65 +2975,82 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const targetUser = interaction.options.getUser('user', true);
         if (targetUser.bot) {
-          return interaction.reply({ 
+          return safeReply(interaction, { 
             content: "❌ Không thể cấp role Khách Hàng cho tài khoản Bot!", 
             ephemeral: true 
           });
         }
 
         // Hoãn phản hồi (deferReply) để chống 3-second timeout khi gọi API Discord
-        await interaction.deferReply({ ephemeral: false });
+        await safeDeferReply(interaction, { ephemeral: false });
 
         const member = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
         if (!member) {
-          return interaction.editReply({ 
+          return safeReply(interaction, { 
             content: "❌ Không tìm thấy thành viên này trong server / Member not found in server!" 
           });
         }
         
-        let customerRole = interaction.guild.roles.cache.find(r => r.name.includes("Khách Hàng"));
+        let customerRole = interaction.guild.roles.cache.find(r => r.name.includes("Khách Hàng") && !r.managed) ||
+                           interaction.guild.roles.cache.find(r => r.name.includes("Khách Hàng"));
         if (!customerRole) {
           const fetchedRoles = await interaction.guild.roles.fetch().catch(() => null);
-          customerRole = fetchedRoles?.find(r => r.name.includes("Khách Hàng"));
+          customerRole = fetchedRoles?.find(r => r.name.includes("Khách Hàng") && !r.managed) ||
+                         fetchedRoles?.find(r => r.name.includes("Khách Hàng"));
         }
 
         if (!customerRole) {
-          return interaction.editReply({ 
+          return safeReply(interaction, { 
             content: "❌ Không tìm thấy role Khách Hàng trên máy chủ / Customer role not found!" 
           });
         }
 
-        if (member.roles.cache.has(customerRole.id)) {
-          return interaction.editReply({
+        // 1. Kiểm tra nếu role là Managed / Integration Role
+        if (customerRole.managed) {
+          return safeReply(interaction, {
+            content: `❌ Role **${customerRole.name}** là Role Quản lý / Tích hợp tự động (Managed/Integration Role) của Discord, không thể gán thủ công!`
+          });
+        }
+
+        // 2. Kiểm tra Role @everyone
+        if (customerRole.id === interaction.guild.id) {
+          return safeReply(interaction, {
+            content: "❌ Không thể gán role `@everyone` cho thành viên!"
+          });
+        }
+
+        // 3. Kiểm tra Redundant Role Assignment
+        if (member.roles?.cache ? member.roles.cache.has(customerRole.id) : false) {
+          return safeReply(interaction, {
             content: `⚠️ Thành viên <@${member.id}> đã sở hữu role **${customerRole.name}** trước đó rồi!`
           });
         }
 
         const botMember = interaction.guild.members.me || await interaction.guild.members.fetchMe().catch(() => null);
         if (!botMember || !botMember.permissions.has(PermissionsBitField.Flags.ManageRoles)) {
-          return interaction.editReply({ 
+          return safeReply(interaction, { 
             content: "❌ Bot thiếu quyền `Manage Roles` (Quản Lý Vai Trò) để cấp role cho thành viên!" 
           });
         }
 
-        // Kiểm tra thứ bậc Role của Role Khách Hàng so với Bot
+        // 4. Kiểm tra thứ bậc Role của Role Khách Hàng so với Bot
         if (customerRole.position >= botMember.roles.highest.position) {
-          return interaction.editReply({ 
-            content: `❌ Role **${customerRole.name}** có vị trí cao hơn hoặc ngang bằng với Role cao nhất của Bot trong Server Settings (Role Hierarchy)!` 
+          return safeReply(interaction, { 
+            content: `❌ Role **${customerRole.name}** có vị trí cao hơn hoặc ngang bằng với Role cao nhất của Bot trong Server Settings (Role Hierarchy)! Vui lòng kéo Role của Bot lên trên Role này.` 
           });
         }
 
-        // Kiểm tra nếu mục tiêu là Server Owner (Bot không thể sửa role của Server Owner)
+        // 5. Kiểm tra nếu mục tiêu là Server Owner (Bot không thể sửa role của Server Owner)
         if (interaction.guild.ownerId === member.id) {
-          return interaction.editReply({
+          return safeReply(interaction, {
             content: "❌ Không thể chỉnh sửa role của Chủ Sở Hữu Máy Chủ (Server Owner)!"
           });
         }
 
-        // Kiểm tra thứ bậc Role của thành viên mục tiêu so với Bot
+        // 6. Kiểm tra thứ bậc Role của thành viên mục tiêu so với Bot
         if (member.roles.highest.position >= botMember.roles.highest.position) {
-          return interaction.editReply({
-            content: `❌ Không thể cấp role cho <@${member.id}> vì thành viên này có thứ bậc Role cao hơn hoặc ngang bằng với Bot trong Server Settings!`
+          return safeReply(interaction, { 
+            content: `❌ Không thể cấp role cho <@${member.id}> vì thành viên này có thứ bậc Role cao hơn hoặc ngang bằng với Bot trong Server Settings!` 
           });
         }
 
@@ -1578,7 +3058,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await member.roles.add(customerRole, `Cấp role Khách Hàng bởi ${interaction.user.tag} (${interaction.user.id})`);
         } catch (roleErr) {
           console.error("❌ Lỗi khi add role cho member:", roleErr);
-          return interaction.editReply({
+          return safeReply(interaction, {
             content: `❌ Không thể cấp role do lỗi phân quyền Discord: \`${roleErr.message}\`. Vui lòng kiểm tra lại thứ bậc Role trong Server Settings!`
           });
         }
@@ -1593,13 +3073,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
           )
           .setTimestamp();
 
-        return interaction.editReply({ embeds: [successEmbed] });
+        return safeReply(interaction, { embeds: [successEmbed] });
       }
 
       // /transcript (Staff Only - Xuất transcript kênh ticket trực tiếp)
       if (commandName === 'transcript') {
-        if (!interaction.inGuild() || !interaction.guild) {
-          return interaction.reply({ 
+        if (!interaction.inGuild?.() || !interaction.guild) {
+          return safeReply(interaction, { 
             content: "❌ Lệnh này chỉ có thể sử dụng bên trong máy chủ Discord!", 
             ephemeral: true 
           });
@@ -1608,56 +3088,75 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const isStaff = isStaffMember(interaction.member);
 
         if (!isStaff) {
-          return interaction.reply({ 
+          return safeReply(interaction, { 
             content: "❌ Bạn không có quyền sử dụng lệnh này! (Dành riêng cho Staff/Admin) / Staff Only!", 
             ephemeral: true 
           });
         }
 
-        await interaction.deferReply({ ephemeral: true });
+        await safeDeferReply(interaction, { ephemeral: true });
 
         const channel = interaction.channel;
+        if (!channel || !channel.isTextBased()) {
+          return safeReply(interaction, {
+            content: "❌ Kênh này không hỗ trợ xuất transcript!",
+            ephemeral: true
+          });
+        }
+
         const transcriptText = await generateTranscript(channel);
-        const transcriptBuffer = Buffer.from(transcriptText, 'utf-8');
         const fileName = `transcript-${channel.name}.txt`;
-        const attachment = new AttachmentBuilder(transcriptBuffer, { name: fileName });
+        const attachmentResult = createTranscriptAttachments(transcriptText, fileName);
+
+        const sizeFormatted = attachmentResult.totalBytes >= 1024 * 1024
+          ? `${(attachmentResult.totalBytes / (1024 * 1024)).toFixed(2)} MB`
+          : `${(attachmentResult.totalBytes / 1024).toFixed(1)} KB`;
 
         const exportEmbed = new EmbedBuilder()
           .setColor("#00E676")
           .setTitle("📑 XUẤT NHẬT KÝ TICKET THÀNH CÔNG / TRANSCRIPT EXPORTED")
           .setDescription(
-            `• **Kênh / Channel:** <#${channel.id}> (\`${channel.name}\`)\n` +
+            `• **Kênh / Channel:** <#${channel.id}> (\`${sanitizeMarkdownForEmbed(channel.name, 50)}\`)\n` +
             `• **Người thực hiện:** <@${interaction.user.id}>\n` +
-            `• **Dung lượng file:** \`${(transcriptBuffer.length / 1024).toFixed(1)} KB\`\n` +
+            `• **Dung lượng file:** \`${sizeFormatted}\`${attachmentResult.isSplit ? ` (${attachmentResult.partsCount} tệp)` : ''}\n` +
             `• **Thời gian:** <t:${Math.floor(Date.now() / 1000)}:F>`
           )
           .setFooter({ text: "LS STUDIO Audit & Security" })
           .setTimestamp();
 
-        return interaction.editReply({ embeds: [exportEmbed], files: [attachment] });
+        if (attachmentResult.isSplit) {
+          const primaryFiles = [attachmentResult.summaryAttachment, attachmentResult.attachments[0]].filter(Boolean);
+          await safeReply(interaction, { embeds: [exportEmbed], files: primaryFiles, ephemeral: true });
+          for (let i = 1; i < attachmentResult.attachments.length; i++) {
+            await interaction.followUp({ files: [attachmentResult.attachments[i]], ephemeral: true }).catch(() => {});
+          }
+          return;
+        }
+
+        return safeReply(interaction, { embeds: [exportEmbed], files: attachmentResult.attachments, ephemeral: true });
       }
 
       // /feedback (Mở Modal gửi nhận xét & đánh giá dịch vụ)
       if (commandName === 'feedback') {
         const feedbackModal = createFeedbackModal();
-        return interaction.showModal(feedbackModal);
+        return safeShowModal(interaction, feedbackModal);
       }
 
       // Fallback cho Slash Command chưa hỗ trợ
-      return interaction.reply({ 
+      return safeReply(interaction, { 
         content: "❌ Lệnh không xác định hoặc chưa được hỗ trợ!", 
         ephemeral: true 
       });
     }
 
     // 2. BUTTON INTERACTIONS
-    if (interaction.isButton()) {
+    if (interaction.isButton?.()) {
       const { customId, user, guild } = interaction;
 
       // Nút Xem Bảng Giá
       if (customId === 'ticket_pricing') {
         const chPricing = guild?.channels.cache.find(c => c.name.includes('bảng-giá'));
-        return interaction.reply({
+        return safeReply(interaction, {
           content: `💰 Bảng giá chi tiết / Price List: ${chPricing ? `<#${chPricing.id}>` : '#bảng-giá'}`,
           ephemeral: true
         });
@@ -1704,63 +3203,63 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setFooter({ text: isEn ? "Staff will assist and deliver your files right here!" : "Sau khi chuyển khoản, Staff sẽ duyệt và giao file ngay tại đây!" })
           .setTimestamp();
 
-        return interaction.update({ embeds: [embed], components: [menuRow, langSwitchRow] });
+        return safeUpdate(interaction, { embeds: [embed], components: [menuRow, langSwitchRow] });
       }
 
       // Nút Mở Modal Yêu Cầu Custom Dev (Plugin / Mod Java / AI Service)
       if (customId === 'ticket_custom' || customId === 'btn_open_custom_modal') {
         if (!guild) {
-          return interaction.reply({ content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
+          return safeReply(interaction, { content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
         }
         const cooldownRemaining = getRateLimitRemaining(user.id, 5000);
         if (cooldownRemaining > 0) {
-          return interaction.reply({
+          return safeReply(interaction, {
             content: `⏳ Bạn thao tác quá nhanh! Vui lòng đợi **${cooldownRemaining} giây** trước khi mở form tiếp theo.\n*Please wait **${cooldownRemaining}s** before opening form.*`,
             ephemeral: true
           });
         }
         const modal = createCustomOrderModal();
-        return interaction.showModal(modal);
+        return safeShowModal(interaction, modal);
       }
 
       // Nút Mở Modal Hỗ Trợ Kỹ Thuật (Tech Support Modal)
       if (customId === 'ticket_support') {
         if (!guild) {
-          return interaction.reply({ content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
+          return safeReply(interaction, { content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
         }
         const cooldownRemaining = getRateLimitRemaining(user.id, 5000);
         if (cooldownRemaining > 0) {
-          return interaction.reply({
+          return safeReply(interaction, {
             content: `⏳ Bạn thao tác quá nhanh! Vui lòng đợi **${cooldownRemaining} giây** trước khi mở form tiếp theo.\n*Please wait **${cooldownRemaining}s** before opening form.*`,
             ephemeral: true
           });
         }
         const modal = createSupportTicketModal();
-        return interaction.showModal(modal);
+        return safeShowModal(interaction, modal);
       }
 
       // Nút Mở Modal Đóng Kèm Lý Do
       if (customId === 'btn_close_with_reason') {
         const modal = createCloseTicketReasonModal();
-        return interaction.showModal(modal);
+        return safeShowModal(interaction, modal);
       }
 
       // Nút Mở Modal Gửi Nhận Xét & Đánh Giá
       if (customId === 'btn_ticket_feedback') {
         const modal = createFeedbackModal();
-        return interaction.showModal(modal);
+        return safeShowModal(interaction, modal);
       }
 
       // Nút Mở Ticket Mua Hàng (Select Menu Dropdown)
       if (customId === 'ticket_buy') {
         if (!guild) {
-          return interaction.reply({ content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
+          return safeReply(interaction, { content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
         }
 
         // 1. Kiểm tra Rate Limit
         const cooldownRemaining = getRateLimitRemaining(user.id, 5000);
         if (cooldownRemaining > 0) {
-          return interaction.reply({
+          return safeReply(interaction, {
             content: `⏳ Bạn thao tác quá nhanh! Vui lòng đợi **${cooldownRemaining} giây** trước khi mở ticket tiếp theo.\n*Please wait **${cooldownRemaining}s** before opening another ticket.*`,
             ephemeral: true
           });
@@ -1768,14 +3267,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // 2. Kiểm tra Concurrency Lock
         if (ticketCreationLocks.has(user.id)) {
-          return interaction.reply({
+          return safeReply(interaction, {
             content: "⏳ Hệ thống đang tạo ticket cho bạn, vui lòng không bấm liên tục!\n*Ticket is being created, please wait...*",
             ephemeral: true
           });
         }
 
         ticketCreationLocks.add(user.id);
-        await interaction.deferReply({ ephemeral: true });
+        await safeDeferReply(interaction, { ephemeral: true });
 
         try {
           const { existingTicket, ticketChannel, staffMentionString } = await createTicketChannel({
@@ -1786,7 +3285,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           });
 
           if (existingTicket) {
-            return interaction.editReply({
+            return safeReply(interaction, {
               content: `⚠️ Bạn đã có một ticket đang mở tại / You already have an open ticket at: <#${existingTicket.id}>.`
             });
           }
@@ -1826,28 +3325,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
             content: `<@${user.id}> ${staffMentionString}`,
             embeds: [introEmbed],
             components: [menuRow, langSwitchRow]
+          }).catch(err => {
+            console.error("❌ Lỗi gửi intro embed vào ticket channel:", err);
           });
 
-          return interaction.editReply({
+          return safeReply(interaction, {
             content: `✅ Ticket của bạn đã sẵn sàng tại / Your ticket is ready at: <#${ticketChannel.id}>`
           });
 
         } catch (ticketErr) {
           console.error("Lỗi khởi tạo Ticket:", ticketErr);
           if (ticketErr.code === 30005) {
-            return interaction.editReply({
+            return safeReply(interaction, {
               content: "❌ Danh mục Ticket đã đạt giới hạn tối đa (50 kênh của Discord)! Vui lòng liên hệ Admin đóng bớt các ticket cũ."
             });
           } else if (ticketErr.code === 30013) {
-            return interaction.editReply({
+            return safeReply(interaction, {
               content: "❌ Máy chủ đã đạt giới hạn tối đa số lượng kênh của Discord (500 kênh)! Vui lòng liên hệ Admin."
             });
           } else if (ticketErr.code === 50013) {
-            return interaction.editReply({
+            return safeReply(interaction, {
               content: "❌ Bot thiếu quyền phân quyền Discord (`Manage Channels` hoặc `Manage Roles`) để tạo kênh ticket!"
             });
           }
-          return interaction.editReply({
+          return safeReply(interaction, {
             content: `❌ Không thể tạo Ticket do lỗi hệ thống: \`${ticketErr.message}\`. Vui lòng liên hệ Admin!`
           });
         } finally {
@@ -1859,7 +3360,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (customId.startsWith('approve_')) {
         const parts = customId.split('_');
         if (parts.length < 4) {
-          return interaction.reply({
+          return safeReply(interaction, {
             content: "❌ Dữ liệu nút duyệt không hợp lệ! / Invalid approve button payload.",
             ephemeral: true
           });
@@ -1868,18 +3369,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const buyerId = parts[2];
         const pkgKey = parts.slice(3).join('_');
 
-        // 1. Kiểm tra định dạng mã đơn hàng
-        if (!isValidOrderCode(rawOrderCode)) {
-          return interaction.reply({
+        // 1. Kiểm tra và làm sạch định dạng mã đơn hàng
+        const orderCode = sanitizeOrderCode(rawOrderCode);
+        if (!orderCode) {
+          return safeReply(interaction, {
             content: `❌ Mã đơn hàng \`${rawOrderCode}\` không đúng định dạng! / Invalid order code format.`,
             ephemeral: true
           });
         }
-        const orderCode = rawOrderCode.replace(/[\s-_]/g, '').toUpperCase();
 
         // 2. Kiểm tra định dạng Snowflake Discord ID của Buyer
         if (!/^\d{17,20}$/.test(buyerId)) {
-          return interaction.reply({
+          return safeReply(interaction, {
             content: "❌ ID khách hàng không hợp lệ! / Invalid buyer ID format.",
             ephemeral: true
           });
@@ -1902,7 +3403,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const isStaff = isStaffMember(interaction.member);
 
         if (!isStaff) {
-          return interaction.reply({
+          return safeReply(interaction, {
             content: "❌ Chỉ có Quản Trị Viên / Staff mới có quyền duyệt đơn hàng này! / Staff only action!",
             ephemeral: true
           });
@@ -1910,7 +3411,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // 5. Chống race condition & duyệt trùng (Concurrency & Idempotency Guard)
         if (processingApprovals.has(orderCode) || approvedOrderCodes.has(orderCode)) {
-          return interaction.reply({
+          return safeReply(interaction, {
             content: `⚠️ Đơn hàng **\`${orderCode}\`** đã được xác nhận hoặc đang được một Staff khác xử lý!\n*This order is already approved or being processed.*`,
             ephemeral: true
           });
@@ -1932,15 +3433,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
           );
 
           // Phản hồi ngay lập tức để chống 3-second timeout và chặn bấm đúp nút (race condition)
-          await interaction.update({ components: [disabledRow] }).catch(err => {
-            console.warn("⚠️ Không thể update components nút duyệt:", err.message);
-          });
+          await safeUpdate(interaction, { components: [disabledRow] });
 
           const buyerMember = await guild.members.fetch(buyerId).catch(() => null);
-          let customerRole = guild.roles.cache.find(r => r.name.includes("Khách Hàng"));
+          let customerRole = guild.roles.cache.find(r => r.name.includes("Khách Hàng") && !r.managed) ||
+                             guild.roles.cache.find(r => r.name.includes("Khách Hàng"));
           if (!customerRole) {
             const fetchedRoles = await guild.roles.fetch().catch(() => null);
-            customerRole = fetchedRoles?.find(r => r.name.includes("Khách Hàng"));
+            customerRole = fetchedRoles?.find(r => r.name.includes("Khách Hàng") && !r.managed) ||
+                           fetchedRoles?.find(r => r.name.includes("Khách Hàng"));
           }
 
           let roleStatusText = "";
@@ -1948,7 +3449,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
             roleStatusText = "⚠️ Khách hàng đã rời khỏi máy chủ (không thể cấp role tự động).";
           } else if (!customerRole) {
             roleStatusText = "⚠️ Không tìm thấy role Khách Hàng trên máy chủ.";
-          } else if (buyerMember.roles.cache.has(customerRole.id)) {
+          } else if (customerRole.managed) {
+            roleStatusText = `⚠️ Role **${customerRole.name}** là Role Quản lý / Tích hợp tự động (Managed Role), không thể gán tự động.`;
+          } else if (customerRole.id === guild.id) {
+            roleStatusText = "⚠️ Không thể gán role `@everyone` cho thành viên.";
+          } else if (buyerMember.roles?.cache ? buyerMember.roles.cache.has(customerRole.id) : false) {
             roleStatusText = `• Khách hàng đã sở hữu role <@&${customerRole.id}> trước đó.`;
           } else {
             const botMember = guild.members.me || await guild.members.fetchMe().catch(() => null);
@@ -1962,7 +3467,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
               roleStatusText = "⚠️ Khách hàng có thứ bậc Role cao hơn hoặc ngang bằng Bot trong Server Settings.";
             } else {
               try {
-                await buyerMember.roles.add(customerRole, `Duyệt đơn hàng ${orderCode} bởi ${interaction.user.tag}`);
+                const sanitizedStaffTag = sanitizeCustomerName(interaction.user.tag || interaction.user.username, 32, 'Staff');
+                await buyerMember.roles.add(customerRole, `Duyệt đơn hàng ${orderCode} bởi ${sanitizedStaffTag}`);
                 roleStatusText = `• Đã cấp Role **<@&${customerRole.id}>** cho khách hàng.`;
               } catch (rErr) {
                 console.warn(`⚠️ [Approve Role Add Warning] Không thể cấp role cho buyer ${buyerId}: ${rErr.message}`);
@@ -1971,12 +3477,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
           }
 
+          const sanitizedBuyerName = sanitizeCustomerName(buyerMember ? (buyerMember.displayName || buyerMember.user?.username) : 'Khách Hàng', 32);
+
           const successEmbed = new EmbedBuilder()
             .setColor("#00E676")
             .setTitle("🎉 XÁC NHẬN THANH TOÁN THÀNH CÔNG / PAYMENT APPROVED!")
             .setDescription(
               `✅ Đơn hàng **\`${orderCode}\`** đã được <@${interaction.user.id}> xác nhận tiền về tài khoản!\n\n` +
-              `👤 **Khách hàng / Customer:** <@${buyerId}> ${buyerMember ? '' : '*(Đã rời server)*'}\n` +
+              `👤 **Khách hàng / Customer:** <@${buyerId}> (${sanitizedBuyerName}) ${buyerMember ? '' : '*(Đã rời server)*'}\n` +
               `📦 **Sản phẩm / Product:** **${pkg.name_vi}**\n` +
               `💰 **Số tiền / Amount:** \`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})\n\n` +
               `👑 **Quyền lợi & Trạng thái / Status:**\n` +
@@ -2003,7 +3511,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               .setTitle("📊 GIAO DỊCH THÀNH CÔNG / TRANSACTION SUCCESS")
               .setDescription(
                 `• **Mã đơn / Order:** \`${orderCode}\`\n` +
-                `• **Khách hàng / Customer:** <@${buyerId}> (\`${buyerId}\`)${buyerMember ? '' : ' *(Đã rời server)*'}\n` +
+                `• **Khách hàng / Customer:** <@${buyerId}> (\`${sanitizedBuyerName}\` - \`${buyerId}\`)${buyerMember ? '' : ' *(Đã rời server)*'}\n` +
                 `• **Sản phẩm / Product:** ${pkg.name_vi}\n` +
                 `• **Số tiền / Amount:** \`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})\n` +
                 `• **Trạng thái Role:** ${roleStatusText.replace(/• /g, '')}\n` +
@@ -2036,7 +3544,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                                 interaction.channel?.parent?.name?.includes('HỖ TRỢ');
 
         if (!isTicketChannel) {
-          return interaction.reply({ 
+          return safeReply(interaction, { 
             content: "⚠️ Nút này chỉ có thể sử dụng bên trong các kênh Ticket!", 
             ephemeral: true 
           });
@@ -2068,7 +3576,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             .setStyle(ButtonStyle.Secondary)
         );
 
-        return interaction.reply({ embeds: [confirmEmbed], components: [confirmRow] });
+        return safeReply(interaction, { embeds: [confirmEmbed], components: [confirmRow] });
       }
 
       // Nút Hủy Đóng Ticket
@@ -2077,169 +3585,33 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setColor("#4CAF50")
           .setDescription("✅ **Đã hủy thao tác đóng ticket.** Bạn có thể tiếp tục trao đổi với Staff!\n*Ticket close cancelled. You can continue chatting.*");
 
-        return interaction.update({ embeds: [cancelEmbed], components: [] });
+        return safeUpdate(interaction, { embeds: [cancelEmbed], components: [] });
       }
 
-      // Nút Xác Nhận Đóng Ticket (Tạo transcript, gửi log và xóa kênh)
+      // Nút Xác Nhận Đóng Ticket (Tạo transcript, gửi log và xóa kênh qua executeTicketClosure)
       if (customId === 'confirm_close_ticket') {
+        const channel = interaction.channel;
+        if (!channel || !channel.isTextBased()) {
+          return safeReply(interaction, { content: "❌ Không thể thực hiện thao tác trên kênh này!", ephemeral: true });
+        }
+
+        if (closingTicketChannels.has(channel.id)) {
+          return safeReply(interaction, { content: "⏳ Kênh ticket này đang trong tiến trình đóng & lưu transcript...", ephemeral: true });
+        }
+
         const closingEmbed = new EmbedBuilder()
           .setColor("#ED4245")
           .setTitle("🔒 ĐANG ĐÓNG TICKET & LƯU TRANSCRIPT...")
           .setDescription("Đang tổng hợp toàn bộ tin nhắn và lưu trữ nhật ký hội thoại. Kênh sẽ tự động xóa sau 5 giây...\n*Generating full transcript and closing ticket. Channel will be deleted in 5 seconds...*");
 
-        await interaction.update({ embeds: [closingEmbed], components: [] });
-
-        const channel = interaction.channel;
-        const transcriptText = await generateTranscript(channel);
-        const transcriptBuffer = Buffer.from(transcriptText, 'utf-8');
-        const fileName = `transcript-${channel.name}.txt`;
-
-        // Trích xuất ID người mở ticket từ Topic
-        const openerMatch = channel.topic ? channel.topic.match(/\((\d{17,20})\)/) : null;
-        const openerId = openerMatch ? openerMatch[1] : null;
-
-        // 1. Gửi Transcript qua tin nhắn riêng (DM) cho người mở ticket (Bắt lỗi an toàn khi user chặn DM / tắt DM)
-        let dmSent = false;
-        let dmStatusNote = "Không tìm thấy thông tin người mở trong topic";
-        if (openerId) {
-          try {
-            const openerUser = await client.users.fetch(openerId).catch(() => null);
-            if (openerUser) {
-              const dmEmbed = new EmbedBuilder()
-                .setColor("#5865F2")
-                .setTitle("📑 BẢN LƯU NHẬT KÝ TICKET - LS STUDIO")
-                .setDescription(
-                  `👋 Chào <@${openerId}>!\n\n` +
-                  `Ticket **#${channel.name}** của bạn tại **LS STUDIO** đã được đóng bởi <@${user.id}>.\n` +
-                  `Đính kèm bên dưới là toàn bộ lịch sử tin nhắn (Transcript) để bạn tiện theo dõi và tra cứu khi cần.\n\n` +
-                  `*Thank you for contacting LS STUDIO! Your ticket transcript is attached below.*`
-                )
-                .setFooter({ text: "LS STUDIO • Hỗ Trợ 24/7" })
-                .setTimestamp();
-
-              const dmAttachment = new AttachmentBuilder(transcriptBuffer, { name: fileName });
-
-              await openerUser.send({ embeds: [dmEmbed], files: [dmAttachment] });
-              dmSent = true;
-              dmStatusNote = "✅ Đã gửi bản sao qua DM thành công";
-            } else {
-              dmStatusNote = "⚠️ Không tìm thấy tài khoản người dùng trên Discord";
-            }
-          } catch (dmErr) {
-            dmSent = false;
-            if (dmErr.code === 50007) {
-              dmStatusNote = "⚠️ Khách tắt nhận DM từ server hoặc chặn Bot (Code 50007)";
-            } else {
-              dmStatusNote = `⚠️ Lỗi gửi DM: ${dmErr.message || 'Không xác định'}`;
-            }
-            console.warn(`⚠️ [Transcript DM] Không thể gửi DM cho user ${openerId}: ${dmStatusNote}`);
-          }
-        }
-
-        // 2. Gửi Transcript về kênh Quản Trị / Log Channel (Xử lý an toàn khi thiếu kênh hoặc thiếu quyền)
-        try {
-          let logChannel = guild?.channels.cache.find(c => 
-            c.isTextBased() && (
-              c.name.includes("nhật-ký-giao-dịch") || 
-              c.name.includes("nhật-ký") ||
-              c.name.includes("ticket-log") ||
-              c.name.includes("transcripts") ||
-              c.name.includes("log")
-            )
-          );
-
-          if (!logChannel && guild) {
-            const fetchedChannels = await guild.channels.fetch().catch(() => null);
-            if (fetchedChannels) {
-              logChannel = fetchedChannels.find(c => 
-                c && c.isTextBased() && (
-                  c.name.includes("nhật-ký-giao-dịch") || 
-                  c.name.includes("nhật-ký") ||
-                  c.name.includes("ticket-log") ||
-                  c.name.includes("transcripts") ||
-                  c.name.includes("log")
-                )
-              );
-            }
-          }
-
-          if (logChannel) {
-            const botMember = guild.members.me || (client.user ? await guild.members.fetch(client.user.id).catch(() => null) : null);
-            const permissions = botMember ? logChannel.permissionsFor(botMember) : null;
-
-            const canView = !permissions || permissions.has(PermissionsBitField.Flags.ViewChannel);
-            const canSend = !permissions || permissions.has(PermissionsBitField.Flags.SendMessages);
-            const canAttach = !permissions || permissions.has(PermissionsBitField.Flags.AttachFiles);
-            const canEmbed = !permissions || permissions.has(PermissionsBitField.Flags.EmbedLinks);
-
-            if (!canView || !canSend) {
-              console.error(`❌ [Log Channel] Bot thiếu quyền ViewChannel hoặc SendMessages trong #${logChannel.name}`);
-            } else {
-              const logEmbed = new EmbedBuilder()
-                .setColor("#FF5252")
-                .setTitle("📑 NHẬT KÝ ĐÓNG TICKET / TICKET TRANSCRIPT LOG")
-                .addFields(
-                  { name: "📁 Kênh / Channel", value: `\`${channel.name}\` (\`${channel.id}\`)`, inline: true },
-                  { name: "👤 Người mở / Opener", value: openerId ? `<@${openerId}> (\`${openerId}\`)` : "N/A", inline: true },
-                  { name: "🔒 Người đóng / Closed By", value: `<@${user.id}> (\`${user.id}\`)`, inline: true },
-                  { name: "⏰ Thời gian / Time", value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true },
-                  { name: "📨 Trạng thái gửi DM Khách", value: dmStatusNote, inline: false }
-                )
-                .setFooter({ text: "LS STUDIO Ticket Security & Audit" })
-                .setTimestamp();
-
-              const files = [];
-              if (canAttach) {
-                files.push(new AttachmentBuilder(transcriptBuffer, { name: fileName }));
-              } else {
-                logEmbed.addFields({ name: "⚠️ Quyền đính kèm", value: "Bot thiếu quyền `AttachFiles` để gửi kèm file transcript." });
-              }
-
-              if (canEmbed) {
-                await logChannel.send({ embeds: [logEmbed], files }).catch(err => {
-                  console.error("❌ Lỗi gửi log transcript có embed:", err);
-                });
-              } else {
-                await logChannel.send({
-                  content: `📑 **NHẬT KÝ ĐÓNG TICKET**\n• Kênh: \`${channel.name}\`\n• Người mở: <@${openerId || 'N/A'}>\n• Người đóng: <@${user.id}>\n• DM Khách: ${dmStatusNote}`,
-                  files
-                }).catch(err => {
-                  console.error("❌ Lỗi gửi log transcript dạng text:", err);
-                });
-              }
-            }
-          } else {
-            console.warn(`⚠️ [Transcript Warning] Không tìm thấy kênh nhật ký (nhật-ký-giao-dịch) trên server ${guild?.name}`);
-          }
-        } catch (logErr) {
-          console.error("❌ Lỗi xử lý gửi transcript về log channel:", logErr);
-        }
-
-        // 3. Xóa kênh sau 5 giây an toàn & giải phóng bộ nhớ cache
-        setTimeout(async () => {
-          try {
-            const ch = await guild?.channels.fetch(channel.id).catch(() => null);
-            if (ch && ch.deletable) {
-              ch.messages?.cache?.clear();
-              await ch.delete(`Ticket closed by ${user.tag} (${user.id})`).catch(delErr => {
-                if (delErr.code !== 10003) {
-                  console.error("❌ Lỗi xóa kênh ticket sau khi lưu transcript:", delErr);
-                }
-              });
-            }
-          } catch (e) {
-            if (e.code !== 10003) {
-              console.error("❌ Lỗi xóa kênh ticket sau khi lưu transcript:", e);
-            }
-          }
-        }, 5000).unref();
-
+        await safeUpdate(interaction, { embeds: [closingEmbed], components: [] });
+        await executeTicketClosure({ channel, guild, closerUser: user, closeReason: null });
         return;
       }
     }
 
     // 3. SELECT MENU (CHỌN GÓI MUA - VIỆT NAM HOẶC ENGLISH)
-    if (interaction.isStringSelectMenu()) {
+    if (interaction.isStringSelectMenu?.()) {
       if (interaction.customId.startsWith('select_package_')) {
         const parts = interaction.customId.split('_');
         const lang = parts[2] || 'vi'; // 'vi' or 'en'
@@ -2249,7 +3621,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const pkg = getPackage(selectedKey);
 
         if (!pkg) {
-          return interaction.reply({
+          return safeReply(interaction, {
             content: isEn 
               ? "❌ The selected package is deprecated or no longer available. Please select from the updated menu!" 
               : "❌ Gói sản phẩm không tồn tại hoặc đã được cập nhật. Vui lòng chọn lại gói từ menu!",
@@ -2261,7 +3633,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const isStaff = isStaffMember(interaction.member);
 
         if (interaction.user.id !== ticketOwnerId && !isStaff) {
-          return interaction.reply({
+          return safeReply(interaction, {
             content: "❌ Bạn không phải là chủ sở hữu của Ticket này! / You are not the owner of this ticket!",
             ephemeral: true
           });
@@ -2316,17 +3688,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
               .setStyle(ButtonStyle.Danger)
           );
 
-          return interaction.reply({ embeds: [customEmbed], components: [btnClose] });
+          return safeReply(interaction, { embeds: [customEmbed], components: [btnClose] });
         }
 
-        await interaction.deferReply();
+        await safeDeferReply(interaction);
 
-        const orderCode = generateUniqueOrderCode();
-        activeOrderCodes.set(orderCode, {
-          createdAt: Date.now(),
-          pkgKey: selectedKey,
-          buyerId: ticketOwnerId
-        });
+        // Tái sử dụng mã đơn hàng đang hoạt động của phiên ticket này (nếu có trong 30 phút) để tối ưu cache ảnh QR khi đổi gói
+        let orderCode = null;
+        for (const [code, data] of activeOrderCodes.entries()) {
+          if (data.buyerId === ticketOwnerId && !approvedOrderCodes.has(code) && (Date.now() - (data.createdAt || 0) < 30 * 60 * 1000)) {
+            orderCode = code;
+            data.pkgKey = selectedKey;
+            break;
+          }
+        }
+
+        if (!orderCode) {
+          orderCode = generateUniqueOrderCode();
+          activeOrderCodes.set(orderCode, {
+            createdAt: Date.now(),
+            pkgKey: selectedKey,
+            buyerId: ticketOwnerId
+          });
+        }
 
         const qrUrl = generateVietQRUrl({
           template: 'compact2',
@@ -2343,7 +3727,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             isEn 
               ? `You selected: **${pkg.name_en}**\n\n` +
                 `💰 **Amount Due:** \`${formatVND(pkg.price_vnd)}\` (~**${formatUSD(pkg.price_usd)}**)\n` +
-                `🏦 **Bank:** **MBBank Vietnam**\n` +
+                `🏦 **Bank:** **MBBank Vietnam (BIN: 970422)**\n` +
                 `🔢 **Account No:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
                 `👤 **Account Name:** **${BANK_CONFIG.ACCOUNT_NAME}**\n` +
                 `📝 **Transfer Memo / Note:** **\`${orderCode}\`** *(Required)*\n\n` +
@@ -2353,7 +3737,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 `• Once transferred, staff will approve and deliver your files / API Key / Account immediately!`
               : `Quý khách đã chọn: **${pkg.name_vi}**\n\n` +
                 `💰 **Số tiền cần thanh toán:** \`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})\n` +
-                `🏦 **Ngân hàng:** **MBBank (Ngân Hàng Quân Đội)**\n` +
+                `🏦 **Ngân hàng:** **MBBank (Ngân Hàng TMCP Quân Đội - BIN: 970422)**\n` +
                 `🔢 **Số tài khoản:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
                 `👤 **Chủ tài khoản:** **${BANK_CONFIG.ACCOUNT_NAME}**\n` +
                 `📝 **Nội dung chuyển khoản:** **\`${orderCode}\`** *(Bắt buộc ghi đúng)*\n\n` +
@@ -2383,78 +3767,138 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (qrBuffer) {
           const attachment = new AttachmentBuilder(qrBuffer, { name: `vietqr_${orderCode}.png` });
           invoiceEmbed.setImage(`attachment://vietqr_${orderCode}.png`);
-          return interaction.editReply({ embeds: [invoiceEmbed], files: [attachment], components: [actionRow] });
+          return safeReply(interaction, { embeds: [invoiceEmbed], files: [attachment], components: [actionRow] });
         } else {
-          invoiceEmbed.setImage(qrUrl);
-          invoiceEmbed.addFields({
-            name: isEn ? "⚠️ QR Image Notice" : "⚠️ Lưu Ý Quét Mã QR",
-            value: isEn
-              ? "If QR image is loading slowly, please click **[🔗 Open VietQR Link]** or transfer manually using the bank account info above."
-              : "Nếu ảnh QR tải chậm hoặc không hiện trên Discord, bạn hãy bấm nút **[🔗 Mở mã VietQR]** hoặc chuyển khoản theo số tài khoản và nội dung ở trên nhé!"
-          });
-          return interaction.editReply({ embeds: [invoiceEmbed], components: [actionRow] });
+          invoiceEmbed.setColor("#FFA500");
+          invoiceEmbed.setDescription(
+            isEn 
+              ? `You selected: **${pkg.name_en}**\n\n` +
+                `💰 **Amount Due:** \`${formatVND(pkg.price_vnd)}\` (~**${formatUSD(pkg.price_usd)}**)\n` +
+                `🏦 **Bank:** **MBBank Vietnam (MB / BIN: 970422)**\n` +
+                `🔢 **Account No:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
+                `👤 **Account Name:** **${BANK_CONFIG.ACCOUNT_NAME}**\n` +
+                `📝 **Transfer Memo / Note:** **\`${orderCode}\`** *(Required)*\n\n` +
+                `📱 **Payment Options (VietQR Image Offline):**\n` +
+                `• **Vietnam Banking 24/7:** Automatic QR image server is temporarily offline, but **Bank Transfers are 100% operational**! Please transfer manually using the details below or click **[🔗 Open VietQR Link]**.\n` +
+                `• **International Customers (PayPal / Crypto / Card):** Please message staff in this ticket to receive payment instructions!\n` +
+                `• Once transferred, staff will approve and deliver your files / API Key / Account immediately!`
+              : `Quý khách đã chọn: **${pkg.name_vi}**\n\n` +
+                `💰 **Số tiền cần thanh toán:** \`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})\n` +
+                `🏦 **Ngân hàng:** **MBBank (Ngân Hàng TMCP Quân Đội - MB / BIN: 970422)**\n` +
+                `🔢 **Số tài khoản:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
+                `👤 **Chủ tài khoản:** **${BANK_CONFIG.ACCOUNT_NAME}**\n` +
+                `📝 **Nội dung chuyển khoản:** **\`${orderCode}\`** *(Bắt buộc ghi đúng)*\n\n` +
+                `📱 **Hướng dẫn chuyển khoản thủ công (Khi mã QR bảo trì):**\n` +
+                `• Cổng tạo ảnh QR tự động tạm thời phản hồi chậm, nhưng **Hệ thống Ngân hàng 24/7 vẫn nhận tiền bình thường 100%**!\n` +
+                `• Mở App **MBBank** hoặc bất kỳ ứng dụng ngân hàng / MoMo nào trên điện thoại.\n` +
+                `• Chọn chuyển tiền liên ngân hàng 24/7 đến MBBank -> Nhập STK \`${BANK_CONFIG.ACCOUNT_NO}\`, Số tiền \`${formatVND(pkg.price_vnd)}\`, và Nội dung \`${orderCode}\`.\n` +
+                `• Chuyển khoản xong, vui lòng đợi Staff bấm duyệt để nhận File / Key / Tài khoản ngay tại đây!`
+          );
+          invoiceEmbed.addFields(
+            {
+              name: isEn 
+                ? "⚠️ VIETQR GATEWAY TEMPORARILY OFFLINE / BẢO TRÌ MÃ QR" 
+                : "⚠️ CỔNG TẠO ẢNH VIETQR TẠM THỜI BẢO TRÌ / OFFLINE NOTICE",
+              value: isEn
+                ? "The automatic VietQR image gateway is temporarily offline or experiencing high traffic.\n**Banking transfers are 100% operational!** Please use the manual transfer details below or click **[🔗 Open VietQR Link]**."
+                : "Cổng tạo ảnh VietQR tự động tạm thời phản hồi chậm hoặc đang bảo trì đường truyền.\n**Hệ thống Ngân hàng 24/7 vẫn hoạt động bình thường!** Quý khách vui lòng chuyển khoản thủ công theo thông tin bên dưới hoặc bấm nút **[🔗 Mở mã VietQR]**:"
+            },
+            {
+              name: isEn ? "📋 MANUAL TRANSFER INSTRUCTIONS" : "📋 HƯỚNG DẪN CHUYỂN KHOẢN THỦ CÔNG",
+              value: isEn
+                ? `🏦 **Bank:** \`MBBank (Military Commercial Joint Stock Bank - BIN: 970422)\`\n` +
+                  `🔢 **Account No:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
+                  `👤 **Account Name:** \`${BANK_CONFIG.ACCOUNT_NAME}\`\n` +
+                  `💰 **Amount Due:** \`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})\n` +
+                  `📝 **Required Memo / Note:** \`${orderCode}\`\n\n` +
+                  `👉 *Tap/click on Account No or Memo above to copy instantly!*`
+                : `🏦 **Ngân hàng:** \`MBBank (Ngân Hàng TMCP Quân Đội - BIN: 970422)\`\n` +
+                  `🔢 **Số tài khoản:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
+                  `👤 **Chủ tài khoản:** \`${BANK_CONFIG.ACCOUNT_NAME}\`\n` +
+                  `💰 **Số tiền chính xác:** \`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})\n` +
+                  `📝 **Nội dung bắt buộc:** \`${orderCode}\`\n\n` +
+                  `👉 *Quý khách chạm/click vào Số tài khoản hoặc Mã đơn để sao chép nhanh!*`
+            }
+          );
+          return safeReply(interaction, { embeds: [invoiceEmbed], components: [actionRow] });
         }
       }
     }
 
     // 4. MODAL SUBMISSIONS (XỬ LÝ BIỂU MẪU NHẬP LIỆU CHUẨN DISCORD SPECS)
-    if (interaction.isModalSubmit()) {
+    if (interaction.isModalSubmit?.()) {
       const { customId, user, guild } = interaction;
 
       // 4.1 Modal Đặt Làm Plugin / Mod Custom (modal_custom_order)
       if (customId === 'modal_custom_order') {
         if (!guild) {
-          return interaction.reply({ 
+          return safeReply(interaction, { 
             content: "❌ Biểu mẫu này chỉ có thể xử lý bên trong máy chủ Discord!", 
             ephemeral: true 
           });
         }
 
-        // Bóc tách text inputs an toàn qua interaction.fields.getTextInputValue
-        const projectType = interaction.fields.getTextInputValue('custom_project_type')?.trim() || 'Custom Plugin/Mod';
-        const version = interaction.fields.getTextInputValue('custom_version')?.trim() || 'Paper/Purpur 1.20+';
-        const features = interaction.fields.getTextInputValue('custom_features')?.trim() || 'N/A';
-        const budgetDeadline = interaction.fields.getTextInputValue('custom_budget_deadline')?.trim() || 'Thỏa thuận / Flexible';
-        const contact = interaction.fields.getTextInputValue('custom_contact')?.trim() || 'Trực tiếp tại ticket Discord';
+        // Bóc tách text inputs an toàn qua interaction.fields.getTextInputValue và làm sạch dữ liệu
+        const projectType = sanitizeModalInlineText(interaction.fields.getTextInputValue('custom_project_type'), 50, 'Custom Plugin/Mod');
+        const version = sanitizeModalInlineText(interaction.fields.getTextInputValue('custom_version'), 50, 'Paper/Purpur 1.20+');
+        const features = sanitizeModalCodeBlockText(interaction.fields.getTextInputValue('custom_features'), 1500, 'N/A');
+        const budgetDeadline = sanitizeModalInlineText(interaction.fields.getTextInputValue('custom_budget_deadline'), 100, 'Thỏa thuận / Flexible');
+        const contact = sanitizeModalInlineText(interaction.fields.getTextInputValue('custom_contact'), 100, 'Trực tiếp tại ticket Discord');
 
-        // Hoãn phản hồi (deferReply) chống 3-second timeout vì tạo kênh và thiết lập phân quyền mất 1-2s
-        await interaction.deferReply({ ephemeral: true });
-
-        // Nếu người dùng đang submit từ bên trong một kênh ticket đã có
-        const isInExistingTicket = interaction.channel?.topic?.includes(`(${user.id})`);
-        if (isInExistingTicket) {
-          const detailEmbed = new EmbedBuilder()
-            .setColor("#FF4500")
-            .setTitle("📝 THÔNG TIN YÊU CẦU ĐẶT CODE (CUSTOM DEV)")
-            .setDescription(
-              `Khách hàng <@${user.id}> vừa cập nhật form thông tin chi tiết:\n\n` +
-              `• 📦 **Loại sản phẩm:** \`${projectType}\`\n` +
-              `• ⚙️ **Phiên bản & Nền tảng:** \`${version}\`\n` +
-              `• 💰 **Ngân sách & Thời hạn:** \`${budgetDeadline}\`\n` +
-              `• 📞 **Ghi chú / Liên hệ:** \`${contact}\`\n\n` +
-              `📋 **Chi tiết tính năng yêu cầu:**\n` +
-              `\`\`\`text\n${features}\n\`\`\``
-            )
-            .setFooter({ text: "LS STUDIO • Lead Developer sẽ phản hồi và báo giá sớm nhất!" })
-            .setTimestamp();
-
-          await interaction.channel.send({ embeds: [detailEmbed] });
-          return interaction.editReply({
-            content: "✅ Đã gửi thông tin yêu cầu của bạn vào kênh Ticket thành công! Lead Developer sẽ phản hồi ngay tại đây."
+        // 1. Chống race condition: kiểm tra và gán lock đồng bộ ngay trước bất kỳ await nào
+        if (ticketCreationLocks.has(user.id)) {
+          return safeReply(interaction, {
+            content: "⏳ Hệ thống đang xử lý yêu cầu của bạn, vui lòng đợi trong giây lát!\n*Your request is being processed, please wait...*",
+            ephemeral: true
           });
         }
+        ticketCreationLocks.add(user.id);
 
-        // Nếu submit từ panel kênh chung -> Khởi tạo ticket custom mới
         try {
+          // Hoãn phản hồi (deferReply) chống 3-second timeout vì tạo kênh và thiết lập phân quyền mất 1-2s
+          await safeDeferReply(interaction, { ephemeral: true });
+
+          // Nếu người dùng đang submit từ bên trong một kênh ticket đã có
+          const isInExistingTicket = interaction.channel?.topic?.includes(`(${user.id})`);
+          if (isInExistingTicket) {
+            const detailEmbed = new EmbedBuilder()
+              .setColor("#FF4500")
+              .setTitle("📝 THÔNG TIN YÊU CẦU ĐẶT CODE (CUSTOM DEV)")
+              .setDescription(
+                `Khách hàng <@${user.id}> vừa cập nhật form thông tin chi tiết:\n\n` +
+                `• 📦 **Loại sản phẩm:** \`${projectType}\`\n` +
+                `• ⚙️ **Phiên bản & Nền tảng:** \`${version}\`\n` +
+                `• 💰 **Ngân sách & Thời hạn:** \`${budgetDeadline}\`\n` +
+                `• 📞 **Ghi chú / Liên hệ:** \`${contact}\`\n\n` +
+                `📋 **Chi tiết tính năng yêu cầu:**\n` +
+                `\`\`\`text\n${features}\n\`\`\``
+              )
+              .setFooter({ text: "LS STUDIO • Lead Developer sẽ phản hồi và báo giá sớm nhất!" })
+              .setTimestamp();
+
+            await interaction.channel.send({ embeds: [detailEmbed] }).catch(() => {});
+
+            // Cập nhật topic kênh kèm tóm tắt yêu cầu
+            try {
+              const newTopic = sanitizeDiscordChannelTopic(`Ticket của @${user.tag || user.username} (${user.id}) • Type: custom_dev • Spec: ${projectType}`);
+              await interaction.channel.setTopic(newTopic).catch(() => {});
+            } catch (_) {}
+
+            return safeReply(interaction, {
+              content: "✅ Đã cập nhật yêu cầu và gửi thông tin vào kênh Ticket thành công! Lead Developer sẽ phản hồi ngay tại đây."
+            });
+          }
+
+          // Nếu submit từ panel kênh chung -> Khởi tạo ticket custom mới
           const { existingTicket, ticketChannel, staffMentionString } = await createTicketChannel({
             guild,
             user,
             ticketType: '📝-custom',
-            customTopic: `Ticket Custom của @${user.tag || user.username} (${user.id}) • Type: custom_dev`
+            customTopic: `Ticket Custom của @${user.tag || user.username} (${user.id}) • Type: custom_dev • Spec: ${projectType}`
           });
 
           if (existingTicket) {
-            return interaction.editReply({
+            return safeReply(interaction, {
               content: `⚠️ Bạn đã có một ticket đang mở tại: <#${existingTicket.id}>.`
             });
           }
@@ -2490,59 +3934,84 @@ client.on(Events.InteractionCreate, async (interaction) => {
             content: `<@${user.id}> ${staffMentionString}`,
             embeds: [orderEmbed],
             components: [btnRow]
-          });
+          }).catch(() => {});
 
-          return interaction.editReply({
+          return safeReply(interaction, {
             content: `✅ Ticket đặt làm Custom của bạn đã sẵn sàng tại: <#${ticketChannel.id}>`
           });
 
         } catch (err) {
           console.error("❌ Lỗi xử lý submit modal custom order:", err);
-          return interaction.editReply({
+          if (err.code === 30005) {
+            return safeReply(interaction, {
+              content: "❌ Danh mục Ticket đã đạt giới hạn tối đa (50 kênh của Discord)! Vui lòng liên hệ Admin đóng bớt các ticket cũ."
+            });
+          } else if (err.code === 30013) {
+            return safeReply(interaction, {
+              content: "❌ Máy chủ đã đạt giới hạn tối đa số lượng kênh của Discord (500 kênh)! Vui lòng liên hệ Admin."
+            });
+          } else if (err.code === 50013) {
+            return safeReply(interaction, {
+              content: "❌ Bot thiếu quyền phân quyền Discord (`Manage Channels` hoặc `Manage Roles`) để tạo kênh ticket!"
+            });
+          }
+          return safeReply(interaction, {
             content: `❌ Không thể tạo Ticket do lỗi: \`${err.message}\`. Vui lòng liên hệ Admin!`
           });
+        } finally {
+          ticketCreationLocks.delete(user.id);
         }
       }
 
       // 4.2 Modal Yêu Cầu Hỗ Trợ Kỹ Thuật (modal_support_ticket)
       if (customId === 'modal_support_ticket') {
         if (!guild) {
-          return interaction.reply({ 
+          return safeReply(interaction, { 
             content: "❌ Biểu mẫu này chỉ có thể xử lý bên trong máy chủ Discord!", 
             ephemeral: true 
           });
         }
 
-        const issueTitle = interaction.fields.getTextInputValue('support_issue_title')?.trim() || 'Hỗ trợ kỹ thuật';
-        const serverEnv = interaction.fields.getTextInputValue('support_server_env')?.trim() || 'Paper/Purpur';
-        const description = interaction.fields.getTextInputValue('support_description')?.trim() || 'N/A';
+        const issueTitle = sanitizeModalInlineText(interaction.fields.getTextInputValue('support_issue_title'), 100, 'Hỗ trợ kỹ thuật');
+        const serverEnv = sanitizeModalInlineText(interaction.fields.getTextInputValue('support_server_env'), 50, 'Paper/Purpur');
+        const description = sanitizeModalCodeBlockText(interaction.fields.getTextInputValue('support_description'), 1500, 'N/A');
 
-        await interaction.deferReply({ ephemeral: true });
-
-        // Nếu người dùng đang submit từ bên trong một kênh ticket đã có
-        const isInExistingTicket = interaction.channel?.topic?.includes(`(${user.id})`);
-        if (isInExistingTicket) {
-          const detailEmbed = new EmbedBuilder()
-            .setColor("#3D5AFE")
-            .setTitle("🛠️ CẬP NHẬT THÔNG TIN LỖI / TECH SUPPORT")
-            .setDescription(
-              `Khách hàng <@${user.id}> vừa cập nhật chi tiết vấn đề:\n\n` +
-              `• 📌 **Tiêu đề lỗi:** \`${issueTitle}\`\n` +
-              `• ⚙️ **Môi trường & Phiên bản:** \`${serverEnv}\`\n\n` +
-              `📋 **Chi tiết mô tả & Log:**\n` +
-              `\`\`\`text\n${description}\n\`\`\``
-            )
-            .setFooter({ text: "LS STUDIO Support Team" })
-            .setTimestamp();
-
-          await interaction.channel.send({ embeds: [detailEmbed] });
-          return interaction.editReply({
-            content: "✅ Đã gửi chi tiết lỗi vào kênh Ticket thành công! Kỹ thuật viên sẽ hỗ trợ ngay."
+        // 1. Chống race condition: kiểm tra và gán lock đồng bộ ngay trước bất kỳ await nào
+        if (ticketCreationLocks.has(user.id)) {
+          return safeReply(interaction, {
+            content: "⏳ Hệ thống đang xử lý yêu cầu của bạn, vui lòng đợi trong giây lát!\n*Your request is being processed, please wait...*",
+            ephemeral: true
           });
         }
+        ticketCreationLocks.add(user.id);
 
-        // Tạo ticket hỗ trợ mới
         try {
+          // Hoãn phản hồi (deferReply) chống 3-second timeout
+          await safeDeferReply(interaction, { ephemeral: true });
+
+          // Nếu người dùng đang submit từ bên trong một kênh ticket đã có
+          const isInExistingTicket = interaction.channel?.topic?.includes(`(${user.id})`);
+          if (isInExistingTicket) {
+            const detailEmbed = new EmbedBuilder()
+              .setColor("#3D5AFE")
+              .setTitle("🛠️ CẬP NHẬT THÔNG TIN LỖI / TECH SUPPORT")
+              .setDescription(
+                `Khách hàng <@${user.id}> vừa cập nhật chi tiết vấn đề:\n\n` +
+                `• 📌 **Tiêu đề lỗi:** \`${issueTitle}\`\n` +
+                `• ⚙️ **Môi trường & Phiên bản:** \`${serverEnv}\`\n\n` +
+                `📋 **Chi tiết mô tả & Log:**\n` +
+                `\`\`\`text\n${description}\n\`\`\``
+              )
+              .setFooter({ text: "LS STUDIO Support Team" })
+              .setTimestamp();
+
+            await interaction.channel.send({ embeds: [detailEmbed] }).catch(() => {});
+            return safeReply(interaction, {
+              content: "✅ Đã gửi chi tiết lỗi vào kênh Ticket thành công! Kỹ thuật viên sẽ hỗ trợ ngay."
+            });
+          }
+
+          // Tạo ticket hỗ trợ mới
           const { existingTicket, ticketChannel, staffMentionString } = await createTicketChannel({
             guild,
             user,
@@ -2551,7 +4020,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           });
 
           if (existingTicket) {
-            return interaction.editReply({
+            return safeReply(interaction, {
               content: `⚠️ Bạn đã có một ticket đang mở tại: <#${existingTicket.id}>.`
             });
           }
@@ -2581,30 +4050,50 @@ client.on(Events.InteractionCreate, async (interaction) => {
             content: `<@${user.id}> ${staffMentionString}`,
             embeds: [supportEmbed],
             components: [btnRow]
-          });
+          }).catch(() => {});
 
-          return interaction.editReply({
+          return safeReply(interaction, {
             content: `✅ Ticket hỗ trợ kỹ thuật của bạn đã sẵn sàng tại: <#${ticketChannel.id}>`
           });
 
         } catch (err) {
           console.error("❌ Lỗi xử lý submit modal support:", err);
-          return interaction.editReply({
+          if (err.code === 30005) {
+            return safeReply(interaction, {
+              content: "❌ Danh mục Ticket đã đạt giới hạn tối đa (50 kênh của Discord)! Vui lòng liên hệ Admin đóng bớt các ticket cũ."
+            });
+          } else if (err.code === 30013) {
+            return safeReply(interaction, {
+              content: "❌ Máy chủ đã đạt giới hạn tối đa số lượng kênh của Discord (500 kênh)! Vui lòng liên hệ Admin."
+            });
+          } else if (err.code === 50013) {
+            return safeReply(interaction, {
+              content: "❌ Bot thiếu quyền phân quyền Discord (`Manage Channels` hoặc `Manage Roles`) để tạo kênh ticket!"
+            });
+          }
+          return safeReply(interaction, {
             content: `❌ Không thể tạo Ticket do lỗi: \`${err.message}\`. Vui lòng liên hệ Admin!`
           });
+        } finally {
+          ticketCreationLocks.delete(user.id);
         }
       }
 
       // 4.3 Modal Đóng Ticket Kèm Lý Do (modal_close_ticket_reason)
       if (customId === 'modal_close_ticket_reason') {
-        const closeReason = interaction.fields.getTextInputValue('close_reason')?.trim() || 'Không có lý do cụ thể';
-
-        await interaction.deferReply({ ephemeral: true });
+        const closeReason = sanitizeModalInlineText(interaction.fields.getTextInputValue('close_reason'), 500, 'Không có lý do cụ thể');
 
         const channel = interaction.channel;
         if (!channel || !channel.isTextBased()) {
-          return interaction.editReply({ content: "❌ Không thể thực hiện thao tác trên kênh này!" });
+          return safeReply(interaction, { content: "❌ Không thể thực hiện thao tác trên kênh này!", ephemeral: true });
         }
+
+        if (closingTicketChannels.has(channel.id)) {
+          return safeReply(interaction, { content: "⏳ Kênh ticket này đang trong tiến trình đóng và lưu transcript...", ephemeral: true });
+        }
+        closingTicketChannels.add(channel.id);
+
+        await safeDeferReply(interaction, { ephemeral: true });
 
         const closingEmbed = new EmbedBuilder()
           .setColor("#ED4245")
@@ -2616,125 +4105,35 @@ client.on(Events.InteractionCreate, async (interaction) => {
           );
 
         await channel.send({ embeds: [closingEmbed] }).catch(() => {});
-
-        const transcriptText = await generateTranscript(channel, closeReason);
-        const transcriptBuffer = Buffer.from(transcriptText, 'utf-8');
-        const fileName = `transcript-${channel.name}.txt`;
-
-        const openerMatch = channel.topic ? channel.topic.match(/\((\d{17,20})\)/) : null;
-        const openerId = openerMatch ? openerMatch[1] : null;
-
-        let dmSent = false;
-        let dmStatusNote = "Không tìm thấy thông tin người mở trong topic";
-        if (openerId) {
-          try {
-            const openerUser = await client.users.fetch(openerId).catch(() => null);
-            if (openerUser) {
-              const dmEmbed = new EmbedBuilder()
-                .setColor("#5865F2")
-                .setTitle("📑 BẢN LƯU NHẬT KÝ TICKET - LS STUDIO")
-                .setDescription(
-                  `👋 Chào <@${openerId}>!\n\n` +
-                  `Ticket **#${channel.name}** của bạn tại **LS STUDIO** đã được đóng bởi <@${user.id}>.\n` +
-                  `📝 **Lý do đóng / Ghi chú:** \`${closeReason}\`\n\n` +
-                  `Đính kèm bên dưới là toàn bộ lịch sử tin nhắn (Transcript) để bạn tiện theo dõi và tra cứu khi cần.`
-                )
-                .setFooter({ text: "LS STUDIO • Hỗ Trợ 24/7" })
-                .setTimestamp();
-
-              const dmAttachment = new AttachmentBuilder(transcriptBuffer, { name: fileName });
-              await openerUser.send({ embeds: [dmEmbed], files: [dmAttachment] });
-              dmSent = true;
-              dmStatusNote = "✅ Đã gửi bản sao qua DM thành công";
-            }
-          } catch (dmErr) {
-            dmSent = false;
-            dmStatusNote = dmErr.code === 50007 ? "⚠️ Khách tắt DM hoặc chặn Bot" : `⚠️ Lỗi gửi DM: ${dmErr.message}`;
-          }
-        }
-
-        // Gửi về kênh nhật ký quản trị
-        try {
-          let logChannel = guild?.channels.cache.find(c => 
-            c.isTextBased() && (
-              c.name.includes("nhật-ký-giao-dịch") || 
-              c.name.includes("nhật-ký") ||
-              c.name.includes("ticket-log") ||
-              c.name.includes("transcripts") ||
-              c.name.includes("log")
-            )
-          );
-
-          if (!logChannel && guild) {
-            const fetchedChannels = await guild.channels.fetch().catch(() => null);
-            if (fetchedChannels) {
-              logChannel = fetchedChannels.find(c => 
-                c && c.isTextBased() && (
-                  c.name.includes("nhật-ký-giao-dịch") || 
-                  c.name.includes("nhật-ký") ||
-                  c.name.includes("ticket-log") ||
-                  c.name.includes("transcripts") ||
-                  c.name.includes("log")
-                )
-              );
-            }
-          }
-
-          if (logChannel) {
-            const logEmbed = new EmbedBuilder()
-              .setColor("#FF5252")
-              .setTitle("📑 NHẬT KÝ ĐÓNG TICKET / TICKET TRANSCRIPT LOG")
-              .addFields(
-                { name: "📁 Kênh / Channel", value: `\`${channel.name}\` (\`${channel.id}\`)`, inline: true },
-                { name: "👤 Người mở / Opener", value: openerId ? `<@${openerId}> (\`${openerId}\`)` : "N/A", inline: true },
-                { name: "🔒 Người đóng / Closed By", value: `<@${user.id}> (\`${user.id}\`)`, inline: true },
-                { name: "📝 Lý do đóng / Reason", value: closeReason, inline: false },
-                { name: "⏰ Thời gian / Time", value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true },
-                { name: "📨 Trạng thái gửi DM Khách", value: dmStatusNote, inline: false }
-              )
-              .setFooter({ text: "LS STUDIO Ticket Security & Audit" })
-              .setTimestamp();
-
-            const fileAttachment = new AttachmentBuilder(transcriptBuffer, { name: fileName });
-            await logChannel.send({ embeds: [logEmbed], files: [fileAttachment] }).catch(err => {
-              console.error("❌ Lỗi gửi log transcript có embed:", err);
-            });
-          }
-        } catch (logErr) {
-          console.error("❌ Lỗi gửi log transcript về admin:", logErr);
-        }
-
-        // Phản hồi editReply trước khi xóa kênh
-        await interaction.editReply({
+        await safeReply(interaction, {
           content: "✅ Đã ghi nhận lý do và tiến hành đóng ticket lưu trữ transcript thành công!"
         });
 
-        // Xóa kênh sau 5s
-        setTimeout(async () => {
-          try {
-            const ch = await guild?.channels.fetch(channel.id).catch(() => null);
-            if (ch && ch.deletable) {
-              ch.messages?.cache?.clear();
-              await ch.delete(`Ticket closed with reason by ${user.tag} (${user.id})`).catch(() => {});
-            }
-          } catch (e) {}
-        }, 5000).unref();
-
+        await executeTicketClosure({ channel, guild, closerUser: user, closeReason });
         return;
       }
 
       // 4.4 Modal Gửi Đánh Giá Dịch Vụ (modal_feedback)
       if (customId === 'modal_feedback') {
-        const rating = interaction.fields.getTextInputValue('feedback_rating')?.trim() || '5 sao';
-        const comment = interaction.fields.getTextInputValue('feedback_comment')?.trim() || 'Không có nhận xét';
+        if (!guild) {
+          return safeReply(interaction, {
+            content: "❌ Biểu mẫu này chỉ có thể xử lý bên trong máy chủ Discord!",
+            ephemeral: true
+          });
+        }
 
-        await interaction.deferReply({ ephemeral: true });
+        const rating = sanitizeModalInlineText(interaction.fields.getTextInputValue('feedback_rating'), 15, '5 sao ⭐⭐⭐⭐⭐');
+        const comment = sanitizeModalCodeBlockText(interaction.fields.getTextInputValue('feedback_comment'), 1000, 'Không có nhận xét');
+
+        await safeDeferReply(interaction, { ephemeral: true });
+
+        const safeUserTag = sanitizeCustomerName(user.tag || user.username, 32, 'Khách Hàng');
 
         const feedbackEmbed = new EmbedBuilder()
           .setColor("#FFD700")
           .setTitle("⭐ ĐÁNH GIÁ DỊCH VỤ MỚI / CUSTOMER FEEDBACK")
           .setDescription(
-            `👤 **Khách hàng:** <@${user.id}> (\`${user.tag || user.username}\`)\n` +
+            `👤 **Khách hàng:** <@${user.id}> (\`${safeUserTag}\`)\n` +
             `🌟 **Đánh giá:** **${rating}**\n\n` +
             `💬 **Nhận xét & Trải nghiệm:**\n` +
             `\`\`\`text\n${comment}\n\`\`\``
@@ -2744,7 +4143,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         // Gửi vào kênh đánh giá hoặc log
         try {
-          const fbChannel = guild?.channels.cache.find(c => 
+          let fbChannel = guild?.channels.cache.find(c => 
             c.isTextBased() && (
               c.name.includes("đánh-giá") ||
               c.name.includes("nhận-xét") ||
@@ -2753,6 +4152,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
               c.name.includes("nhật-ký")
             )
           );
+
+          if (!fbChannel && guild) {
+            const fetched = await guild.channels.fetch().catch(() => null);
+            if (fetched) {
+              fbChannel = fetched.find(c => 
+                c && c.isTextBased() && (
+                  c.name.includes("đánh-giá") ||
+                  c.name.includes("nhận-xét") ||
+                  c.name.includes("feedback") ||
+                  c.name.includes("nhật-ký-giao-dịch") ||
+                  c.name.includes("nhật-ký")
+                )
+              );
+            }
+          }
 
           if (fbChannel) {
             await fbChannel.send({ embeds: [feedbackEmbed] }).catch(err => {
@@ -2763,30 +4177,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
           console.error("❌ Lỗi tìm kênh gửi feedback:", fbErr);
         }
 
-        return interaction.editReply({
+        return safeReply(interaction, {
           content: "🌟 Cảm ơn bạn rất nhiều đã dành thời gian gửi đánh giá quý báu cho **LS STUDIO**! Chúc bạn có trải nghiệm tuyệt vời! / Thank you for your feedback!"
         });
       }
     }
 
   } catch (error) {
-    console.error("❌ Lỗi tương tác bot:", error);
-    try {
-      if (interaction.isAutocomplete?.()) return;
-      const errorMsg = { 
-        content: "❌ Đã có lỗi xảy ra khi xử lý yêu cầu! Vui lòng thử lại sau.", 
-        ephemeral: true 
-      };
-      if (interaction.deferred && !interaction.replied) {
-        await interaction.editReply(errorMsg).catch(() => {});
-      } else if (interaction.replied) {
-        await interaction.followUp(errorMsg).catch(() => {});
-      } else {
-        await interaction.reply(errorMsg).catch(() => {});
-      }
-    } catch (err) {
-      // Bỏ qua lỗi phụ nếu interaction đã đóng
+    if (!isIgnorableInteractionError(error)) {
+      console.error("❌ Lỗi tương tác bot:", error);
     }
+    await safeReply(interaction, { 
+      content: "❌ Đã có lỗi xảy ra khi xử lý yêu cầu! Vui lòng thử lại sau.", 
+      ephemeral: true 
+    });
   }
 });
 
@@ -2805,6 +4209,9 @@ function handleGracefulShutdown(signal) {
   }
   ticketCreationLocks.clear();
   userCooldowns.clear();
+  vietQRBufferCache.clear();
+  failedVietQRUrls.clear();
+  pendingVietQRRequests.clear();
   client.destroy();
   console.log('✅ Đã giải phóng bộ nhớ, ngắt kết nối Discord và thoát tiến trình sạch sẽ.');
   process.exit(0);
@@ -2812,13 +4219,15 @@ function handleGracefulShutdown(signal) {
 
 process.on('SIGINT', () => handleGracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => handleGracefulShutdown('SIGTERM'));
+process.on('SIGHUP', () => handleGracefulShutdown('SIGHUP'));
 
 // =========================================================================
 // 9. BOT LOGIN & MODULE EXPORTS
 // =========================================================================
 if (require.main === module) {
-  if (!TOKEN || TOKEN === 'YOUR_BOT_TOKEN_HERE') {
+  if (!TOKEN || TOKEN === 'YOUR_BOT_TOKEN_HERE' || TOKEN.trim() === '') {
     console.error("❌ [LỖI KHỞI ĐỘNG]: DISCORD_TOKEN chưa được cung cấp trong biến môi trường hoặc token.local.js!");
+    process.exit(1);
   } else {
     client.login(TOKEN).catch((err) => {
       console.error("❌ [LỖI ĐĂNG NHẬP DISCORD]:", err.message);
@@ -2838,6 +4247,11 @@ module.exports = {
   extractOrderCode,
   isValidOrderCode,
   sanitizeVietQRText,
+  sanitizeCustomerName,
+  sanitizeOrderCode,
+  sanitizeModalInlineText,
+  sanitizeModalCodeBlockText,
+  sanitizeDiscordChannelTopic,
   formatVND,
   formatUSD,
   paymentHttpClient,
@@ -2845,7 +4259,14 @@ module.exports = {
   fetchVietQRBuffer,
   getPackage,
   getRateLimitRemaining,
+  formatVNTime,
+  sanitizeTranscriptControlChars,
+  sanitizeSingleLineHeader,
+  sanitizeMarkdownForEmbed,
+  extractTranscriptMessageData,
   generateTranscript,
+  createTranscriptAttachments,
+  executeTicketClosure,
   buildPackageSelectMenu,
   createCustomOrderModal,
   createSupportTicketModal,
@@ -2853,10 +4274,32 @@ module.exports = {
   createFeedbackModal,
   createTicketChannel,
   ticketCreationLocks,
+  closingTicketChannels,
   userCooldowns,
   activeOrderCodes,
   processingApprovals,
   approvedOrderCodes,
+  normalizeAntiSpamText,
+  extractAllLinkTargets,
+  containsDiscordInvite,
+  containsEveryonePing,
+  redactSensitiveData,
+  vietQRBufferCache,
+  failedVietQRUrls,
+  pendingVietQRRequests,
+  clearVietQRCache,
+  getVietQRCacheStats,
+  safeDeleteMessage,
+  handleAutoMod,
+  IGNORABLE_INTERACTION_ERROR_CODES,
+  isIgnorableInteractionError,
+  safeReply,
+  safeDeferReply,
+  safeDeferUpdate,
+  safeEditReply,
+  safeFollowUp,
+  safeUpdate,
+  safeShowModal,
   handleGracefulShutdown
 };
 

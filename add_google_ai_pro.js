@@ -1,4 +1,6 @@
+const path = require('path');
 const fs = require('fs');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { 
   Client,
   Events, 
@@ -11,12 +13,17 @@ const {
   ButtonStyle 
 } = require('discord.js');
 
-const TOKEN = process.env.DISCORD_TOKEN || (fs.existsSync('./token.local.js') ? require('./token.local.js').TOKEN : 'YOUR_BOT_TOKEN_HERE');
-const LS_STUDIO_GUILD_ID = "1542476657825419334";
+const tokenLocalPath = path.join(__dirname, 'token.local.js');
+const localConfig = fs.existsSync(tokenLocalPath) ? require(tokenLocalPath) : {};
+const TOKEN = process.env.DISCORD_TOKEN || localConfig.TOKEN || localConfig.DISCORD_TOKEN || '';
+const LS_STUDIO_GUILD_ID = process.env.GUILD_ID || (typeof localConfig !== "undefined" && localConfig.GUILD_ID) || "1542476657825419334";
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
+
+// Helper: Pacing delay to prevent Discord 429 Rate Limits
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Watchdog timeout to prevent script hanging indefinitely
 const WATCHDOG_TIMEOUT_MS = 30000;
@@ -33,13 +40,38 @@ client.on(Events.Error, (err) => {
   console.error('❌ Lỗi Discord Client:', err.message || err);
 });
 
-process.on('unhandledRejection', async (reason) => {
+let isExiting = false;
+async function cleanupAndExit(code = 0) {
+  if (isExiting) return;
+  isExiting = true;
   clearTimeout(watchdog);
-  console.error('❌ Lỗi không kiểm soát (Unhandled Rejection):', reason);
   try {
     await client.destroy();
   } catch {}
-  process.exit(1);
+  process.exit(code);
+}
+
+process.on('SIGINT', async () => {
+  console.log('🛑 [SIGINT] Đang dừng tiến trình...');
+  await cleanupAndExit(0);
+});
+process.on('SIGTERM', async () => {
+  console.log('🛑 [SIGTERM] Đang dừng tiến trình...');
+  await cleanupAndExit(0);
+});
+process.on('SIGHUP', async () => {
+  console.log('🛑 [SIGHUP] Đang dừng tiến trình...');
+  await cleanupAndExit(0);
+});
+
+process.on('unhandledRejection', async (reason) => {
+  console.error('❌ Lỗi không kiểm soát (Unhandled Rejection):', reason);
+  await cleanupAndExit(1);
+});
+
+process.on('uncaughtException', async (err) => {
+  console.error('❌ Lỗi ngoại lệ chưa bắt (Uncaught Exception):', err);
+  await cleanupAndExit(1);
 });
 
 
@@ -47,7 +79,14 @@ client.once(Events.ClientReady, async () => {
   console.log(`🤖 Logged in as ${client.user.tag}! Đang thêm kênh Google AI Pro...`);
 
   try {
-    const guild = await client.guilds.fetch(LS_STUDIO_GUILD_ID);
+    const guild = await client.guilds.fetch(LS_STUDIO_GUILD_ID).catch(err => {
+      console.error(`❌ [ERROR] Không thể fetch Guild (${LS_STUDIO_GUILD_ID}):`, err.message || err);
+      return null;
+    });
+    if (!guild) {
+      console.error(`❌ [ERROR] Không tìm thấy Guild (${LS_STUDIO_GUILD_ID}) hoặc Bot chưa tham gia.`);
+      return await cleanupAndExit(1);
+    }
     const channels = await guild.channels.fetch();
 
     const catAI = channels.find(c => c && c.type === ChannelType.GuildCategory && c.name.includes("DỊCH VỤ AI"));
@@ -63,7 +102,12 @@ client.once(Events.ClientReady, async () => {
           {
             id: guild.roles.everyone.id,
             allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.ReadMessageHistory],
-            deny: [PermissionsBitField.Flags.SendMessages]
+            deny: [
+              PermissionsBitField.Flags.SendMessages,
+              PermissionsBitField.Flags.CreatePublicThreads,
+              PermissionsBitField.Flags.CreatePrivateThreads,
+              PermissionsBitField.Flags.SendMessagesInThreads
+            ]
           }
         ]
       });
@@ -73,7 +117,10 @@ client.once(Events.ClientReady, async () => {
     // Xóa tin nhắn cũ
     const msgs = await chGoogle.messages.fetch({ limit: 10 });
     for (const [mId, msg] of msgs) {
-      if (msg.author.id === client.user.id) await msg.delete().catch(() => {});
+      if (msg.author.id === client.user.id) {
+        await msg.delete().catch(() => {});
+        await sleep(250);
+      }
     }
 
     const embed = new EmbedBuilder()
@@ -122,9 +169,12 @@ client.once(Events.ClientReady, async () => {
     const chPrice = channels.find(c => c && c.name.includes("bảng-giá"));
     if (chPrice) {
       const pMsgs = await chPrice.messages.fetch({ limit: 10 });
-      for (const [mId, msg] of pMsgs) {
-        if (msg.author.id === client.user.id) await msg.delete().catch(() => {});
+      for (const [mId, msg] of msgs) {
+      if (msg.author.id === client.user.id) {
+        await msg.delete().catch(() => {});
+        await sleep(250);
       }
+    }
 
       const priceEmbed = new EmbedBuilder()
         .setColor("#FEE75C")
@@ -177,9 +227,12 @@ client.once(Events.ClientReady, async () => {
     const chTb = channels.find(c => c && c.name.includes("thông-báo"));
     if (chTb) {
       const tbMsgs = await chTb.messages.fetch({ limit: 10 });
-      for (const [mId, msg] of tbMsgs) {
-        if (msg.author.id === client.user.id) await msg.delete().catch(() => {});
+      for (const [mId, msg] of msgs) {
+      if (msg.author.id === client.user.id) {
+        await msg.delete().catch(() => {});
+        await sleep(250);
       }
+    }
 
       const chAc = channels.find(c => c && c.name === "🛡️・ls-anticheat");
       const chFc = channels.find(c => c && c.name === "👁️・ls-antifreecam");
@@ -229,26 +282,19 @@ client.once(Events.ClientReady, async () => {
     }
 
     console.log("🎉 ĐÃ HOÀN TẤT THÊM GOOGLE AI PRO XONG 100%!");
-    clearTimeout(watchdog);
-    try {
-      await client.destroy();
-    } catch {}
-    process.exit(0);
+    await cleanupAndExit(0);
   } catch (err) {
-    clearTimeout(watchdog);
-    console.error("❌ Lỗi:", err.message || err);
-    try {
-      await client.destroy();
-    } catch {}
-    process.exit(1);
+    console.error("❌ [ERROR] Lỗi thực thi:", err.message || err);
+    await cleanupAndExit(1);
   }
 });
 
-client.login(TOKEN).catch(async (err) => {
-  clearTimeout(watchdog);
-  console.error('❌ Đăng nhập Discord thất bại:', err.message || err);
-  try {
-    await client.destroy();
-  } catch {}
+if (!TOKEN || TOKEN === 'YOUR_BOT_TOKEN_HERE' || TOKEN.trim() === '') {
+  console.error('❌ Lỗi: DISCORD_TOKEN chưa được thiết lập trong .env hoặc token.local.js!');
   process.exit(1);
+}
+
+client.login(TOKEN).catch(async (err) => {
+  console.error("❌ [ERROR] Lỗi thực thi:", err.message || err);
+    await cleanupAndExit(1);
 });

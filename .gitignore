@@ -1,28 +1,74 @@
-# Dependencies
-node_modules/
+# =========================================================================
+# LS STUDIO BOT - GIT IGNORE CONFIGURATION
+# =========================================================================
 
-# Environment & Local Secrets
+# 1. Dependencies & Package Managers
+node_modules/
+.pnp
+.pnp.js
+.npm/
+.yarn/
+package-lock.json.bak
+
+# 2. Environment Variables & Secret Credentials (CRITICAL)
 .env
 .env.*
 *.env
 !.env.example
 token.local.js
 *.local.js
+*.local.json
+*.local.env
 
-# Logs
+# 3. Security Keys & Certificates
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+*.p12
+
+# 4. Logs & Diagnostic Traces
 *.log
 logs/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+bot.log
 
-# OS & Editor files
+# 5. Process & Temporary Files
+*.pid
+*.seed
+*.pid.lock
+.temp/
+temp/
+tmp/
+*.tmp
+
+# 6. Test & Coverage Outputs
+coverage/
+.nyc_output/
+
+# 7. OS & Editor Metadata
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+[Dd]esktop.ini
 .vscode/
 .idea/
+*.sublime-project
+*.sublime-workspace
 
-# Archives & Temporary builds
+# 8. Archives & Packaging Artifacts (Discloud Uploads)
 *.zip
+*.tar
 *.tar.gz
+*.tgz
+*.rar
+*.7z
+
 
