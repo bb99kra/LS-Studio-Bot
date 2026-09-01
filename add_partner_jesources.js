@@ -92,25 +92,8 @@ client.once('clientReady', async () => {
     });
     console.log("✅ Đã đăng thông báo Partner JESOURCES lên LS STUDIO!");
 
-    // 2. CẬP NHẬT TRÊN NGUYEN SMP (NẾU CÓ)
-    try {
-      const nguyenGuild = await client.guilds.fetch(NGUYEN_SMP_GUILD_ID);
-      const nguyenChannels = await nguyenGuild.channels.fetch();
-      const chPartnerNguyen = nguyenChannels.find(c => c && (c.name.includes("hợp-tác") || c.name.includes("partner") || c.name.includes("doi-tac")));
-
-      if (chPartnerNguyen) {
-        await chPartnerNguyen.send({
-          content: "📢 **THÔNG BÁO ĐỐI TÁC / PARTNER** • <@1422862826174681160>",
-          embeds: [makeJesourcesEmbed()],
-          components: [makeJesourcesButtons()]
-        });
-        console.log("✅ Đã đăng thông báo Partner JESOURCES lên Nguyen SMP!");
-      }
-    } catch (e) {
-      console.warn("⚠️ Bỏ qua Nguyen SMP:", e.message);
-    }
-
-    console.log("🎉 ĐÃ HOÀN TẤT THÊM PARTNER JESOURCES 100%!");
+    // 2. CHỈ ĐĂNG TRÊN LS STUDIO
+    console.log("🎉 ĐÃ HOÀN TẤT THÊM PARTNER JESOURCES TRÊN LS STUDIO 100%!");
     process.exit(0);
   } catch (err) {
     console.error("❌ Lỗi:", err);
