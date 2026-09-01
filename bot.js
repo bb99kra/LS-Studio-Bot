@@ -573,7 +573,7 @@ const PACKAGES = {
     name_en: "LS-AntiCheat • WallHit, Inv Checks, Combat & Spoof",
     price_vnd: 30000,
     price_usd: 1.5,
-    desc_vi: "WallHit xuyên mạng nhện/tường, InvMove/Stats click, AutoEat/Fish/Potion/Shield, Fake Máu",
+    desc_vi: "WallHit xuyên mạng nhện/tường, Inv A-F, AutoEat/Fish/Potion/Shield, Fake Máu",
     desc_en: "Anti-WallHit through cobwebs/walls, Inventory checks, AutoEat/Potion, Health spoof"
   },
   "addon_macro_cart": {
@@ -2210,7 +2210,7 @@ function buildPackageSelectMenu(userId, lang = 'vi') {
     // Plugin Minecraft
     new StringSelectMenuOptionBuilder()
       .setLabel(isEn ? 'LS-AntiCheat • $1.50 (30.000 VNĐ)' : 'LS-AntiCheat • 30.000 VNĐ')
-      .setDescription(isEn ? 'WallHit, Inv checks, AutoEat/Potion/Fish, Health spoof' : 'WallHit xuyên web/tường, Inv A-F, AutoEat/Fish/Potion, Fake Máu')
+      .setDescription(isEn ? 'WallHit, Inv checks, AutoEat/Potion/Fish, Health spoof' : 'WallHit xuyên mạng nhện/tường, Inv A-F, AutoEat/Fish/Potion, Fake Máu')
       .setValue('ls_anticheat')
       .setEmoji('🛡️'),
     new StringSelectMenuOptionBuilder()
@@ -2256,7 +2256,7 @@ function buildPackageSelectMenu(userId, lang = 'vi') {
       .setValue('acc_gemini_family_18m')
       .setEmoji('🌟'),
     new StringSelectMenuOptionBuilder()
-      .setLabel(isEn ? 'Gemini Pro 18M Activation Link • $2.00 (49.000 VNĐ)' : 'Link Kích Hoạt Gemini Pro 18M • 49.000 VNĐ')
+      .setLabel(isEn ? 'Gemini Pro Activation Link (18 Mo) • $2.00 (49.000 VNĐ)' : 'Link Kích Hoạt Gemini Pro (18 Tháng) • 49.000 VNĐ')
       .setDescription(isEn ? 'Direct upgrade link for your Google account' : 'Link nâng cấp trực tiếp vào tài khoản Google, bảo hành lần đầu')
       .setValue('link_gemini_pro_18m')
       .setEmoji('🚀'),
@@ -2298,58 +2298,6 @@ function buildPackageSelectMenu(userId, lang = 'vi') {
   );
 
   return menu;
-}
-
-// =========================================================================
-// 6.1 SANITIZATION HELPERS & MODAL BUILDERS (DISCORD SPECS COMPLIANT)
-// =========================================================================
-
-/**
- * Chuẩn hóa và làm sạch văn bản nhập từ Modal một dòng (Inline Text)
- * - Thay thế dấu backtick ` thành nháy đơn '
- * - Thay thế ký tự xuống dòng bằng khoảng trắng
- * - Thoát các ping nguy hiểm (@everyone, @here) thành (@ everyone, @ here)
- * - Giới hạn độ dài và hỗ trợ giá trị mặc định fallback an toàn
- */
-function sanitizeModalInlineText(text, maxLength = 100, fallback = '') {
-  if (text === null || text === undefined) return fallback;
-  const str = typeof text === 'string' ? text : String(text);
-  if (!str.trim()) return fallback;
-  const cleaned = str
-    .replace(/`/g, "'")
-    .replace(/\r?\n/g, ' ')
-    .replace(/@(everyone|here)/gi, '@ $1')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return (cleaned.slice(0, maxLength).trim()) || fallback;
-}
-
-/**
- * Chuẩn hóa và làm sạch văn bản nhập từ Modal nhiều dòng (Code Block / Paragraph)
- * - Thoát các khối mã 3 dấu backtick ``` thành ''' để tránh vỡ embed markdown
- * - Giới hạn độ dài và hỗ trợ giá trị mặc định fallback an toàn
- */
-function sanitizeModalCodeBlockText(text, maxLength = 1500, fallback = '') {
-  if (text === null || text === undefined) return fallback;
-  const str = typeof text === 'string' ? text : String(text);
-  if (!str.trim()) return fallback;
-  const cleaned = str
-    .replace(/```/g, "'''")
-    .trim();
-  return (cleaned.slice(0, maxLength).trim()) || fallback;
-}
-
-/**
- * Chuẩn hóa chuỗi Topic cho kênh Discord (giới hạn 1024 ký tự theo Discord API)
- */
-function sanitizeDiscordChannelTopic(text, maxLength = 1024) {
-  if (text === null || text === undefined) return '';
-  const str = typeof text === 'string' ? text : String(text);
-  return str
-    .replace(/```/g, "'''")
-    .replace(/\r?\n/g, ' ')
-    .trim()
-    .slice(0, maxLength);
 }
 
 // Helper: Khởi tạo kênh Ticket an toàn với đầy đủ phân quyền và kiểm tra trùng lặp

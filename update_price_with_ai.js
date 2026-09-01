@@ -86,12 +86,12 @@ client.once(Events.ClientReady, async () => {
 
     if (chPrice) {
       const messages = await chPrice.messages.fetch({ limit: 15 });
-      for (const [mId, msg] of msgs) {
-      if (msg.author.id === client.user.id) {
-        await msg.delete().catch(() => {});
-        await sleep(250);
+      for (const [mId, msg] of messages) {
+        if (msg.author.id === client.user.id) {
+          await msg.delete().catch(() => {});
+          await sleep(250);
+        }
       }
-    }
 
       const embed = new EmbedBuilder()
         .setColor("#FEE75C")

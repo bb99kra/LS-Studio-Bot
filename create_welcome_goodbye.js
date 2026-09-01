@@ -88,7 +88,7 @@ client.once(Events.ClientReady, async () => {
     const catInfo = channels.find(c => c && c.type === ChannelType.GuildCategory && c.name.includes("THÔNG TIN"));
 
     // Check or create chào-mừng
-    let chWelcome = channels.find(c => c && c.name.includes("chào-mừng") || c.name.includes("welcome"));
+    let chWelcome = channels.find(c => c && (c.name.includes("chào-mừng") || c.name.includes("welcome")));
     if (!chWelcome) {
       chWelcome = await guild.channels.create({
         name: "👋・chào-mừng",
@@ -109,10 +109,11 @@ client.once(Events.ClientReady, async () => {
         ]
       });
       console.log(`✅ Created ${chWelcome.name}`);
+      await sleep(350);
     }
 
     // Check or create tạm-biệt
-    let chGoodbye = channels.find(c => c && c.name.includes("tạm-biệt") || c.name.includes("goodbye"));
+    let chGoodbye = channels.find(c => c && (c.name.includes("tạm-biệt") || c.name.includes("goodbye")));
     if (!chGoodbye) {
       chGoodbye = await guild.channels.create({
         name: "🚪・tạm-biệt",
@@ -133,6 +134,7 @@ client.once(Events.ClientReady, async () => {
         ]
       });
       console.log(`✅ Created ${chGoodbye.name}`);
+      await sleep(350);
     }
 
     console.log("🎉 Xong kênh chào mừng và tạm biệt!");

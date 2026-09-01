@@ -15,7 +15,7 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Watchdog timeout to prevent script hanging indefinitely
-const WATCHDOG_TIMEOUT_MS = 30000;
+const WATCHDOG_TIMEOUT_MS = 60000;
 const watchdog = setTimeout(async () => {
   console.error(`⏱️ [WATCHDOG] Quá thời gian thực thi (${WATCHDOG_TIMEOUT_MS / 1000}s). Tự động hủy kết nối Discord và dừng tiến trình.`);
   try {
@@ -91,7 +91,10 @@ client.once(Events.ClientReady, async () => {
 
     for (const [id, name] of Object.entries(catMap)) {
       const cat = channels.get(id);
-      if (cat) await cat.setName(name).catch(console.error);
+      if (cat) {
+        await cat.setName(name).catch(console.error);
+        await sleep(350);
+      }
     }
 
     // 2. TÊN KÊNH CHUẨN, TO RÕ RÀNG, KHÔNG DÙNG KÝ TỰ DỊ
@@ -125,6 +128,7 @@ client.once(Events.ClientReady, async () => {
       if (ch) {
         await ch.setName(name).catch(console.error);
         console.log(`   + Renamed: ${name}`);
+        await sleep(350);
       }
     }
 
