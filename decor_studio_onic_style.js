@@ -107,6 +107,7 @@ client.once(Events.ClientReady, async () => {
       if (cat) {
         await cat.setName(name).catch(console.error);
         console.log(`   + Category: ${name}`);
+        await sleep(350);
       }
     }
 
@@ -141,6 +142,7 @@ client.once(Events.ClientReady, async () => {
       if (ch) {
         await ch.setName(name).catch(console.error);
         console.log(`   + Channel: ${name}`);
+        await sleep(350);
       }
     }
 

@@ -74,7 +74,6 @@ process.on('uncaughtException', async (err) => {
   await cleanupAndExit(1);
 });
 
-
 client.once(Events.ClientReady, async () => {
   console.log(`🤖 Logged in as ${client.user.tag}! Decorating partner systems on both servers...`);
 
@@ -82,7 +81,7 @@ client.once(Events.ClientReady, async () => {
     // 1. POST EMBED ĐỐI TÁC TRÊN SERVER NGUYEN SMP
     const nguyenGuild = await client.guilds.fetch(NGUYEN_SMP_GUILD_ID);
     const nguyenChannels = await nguyenGuild.channels.fetch();
-    const partnerChannel = nguyenChannels.find(c => c && c.name.includes("hợᴘ・táᴄ") || c.name.includes("hop-tac") || c.name.includes("partner"));
+    const partnerChannel = nguyenChannels.find(c => c && (c.name.includes("hợᴘ・táᴄ") || c.name.includes("hop-tac") || c.name.includes("partner")));
 
     if (partnerChannel) {
       const partnerEmbed = new EmbedBuilder()
@@ -119,6 +118,7 @@ client.once(Events.ClientReady, async () => {
 
       await partnerChannel.send({ embeds: [partnerEmbed], components: [btnRow] });
       console.log("✅ Đã đăng Embed đối tác LS STUDIO lên Nguyen SMP!");
+      await sleep(500);
     }
 
     // 2. CẬP NHẬT KÊNH DEMO & ĐỐI TÁC TRÊN SERVER LS STUDIO
@@ -130,7 +130,10 @@ client.once(Events.ClientReady, async () => {
       // Xóa tin nhắn cũ của bot
       const oldMsgs = await demoChannel.messages.fetch({ limit: 10 });
       for (const [id, msg] of oldMsgs) {
-        if (msg.author.id === client.user.id) await msg.delete().catch(() => {});
+        if (msg.author.id === client.user.id) {
+          await msg.delete().catch(() => {});
+          await sleep(250);
+        }
       }
 
       const demoEmbed = new EmbedBuilder()

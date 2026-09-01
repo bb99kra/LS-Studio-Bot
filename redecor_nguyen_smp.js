@@ -2,7 +2,7 @@ const path = require('path');
 const fs = require('fs');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { 
-  Client,
+  Client, 
   Events, 
   GatewayIntentBits, 
   EmbedBuilder, 
@@ -92,16 +92,28 @@ client.once(Events.ClientReady, async () => {
 
     // 1. CẬP NHẬT TÊN VÀ PHÂN LOẠI CATEGORIES
     const catInfo = channels.get("1503038475866476694");
-    if (catInfo) await catInfo.setName("📌 ━━━ THÔNG TIN SMP ━━━").catch(console.error);
+    if (catInfo) {
+      await catInfo.setName("📌 ━━━ THÔNG TIN SMP ━━━").catch(console.error);
+      await sleep(350);
+    }
 
     const catCommunity = channels.get("1462028925944336587");
-    if (catCommunity) await catCommunity.setName("💬 ━━━ SẢNH SINH TỒN ━━━").catch(console.error);
+    if (catCommunity) {
+      await catCommunity.setName("💬 ━━━ SẢNH SINH TỒN ━━━").catch(console.error);
+      await sleep(350);
+    }
 
     const catLogs = channels.get("1504408794451673158");
-    if (catLogs) await catLogs.setName("📊 ━━━ HỆ THỐNG & LOGS ━━━").catch(console.error);
+    if (catLogs) {
+      await catLogs.setName("📊 ━━━ HỆ THỐNG & LOGS ━━━").catch(console.error);
+      await sleep(350);
+    }
 
     const catVoice = channels.get("1462028925944336590");
-    if (catVoice) await catVoice.setName("🔊 ━━━ KÊNH ĐÀM THOẠI ━━━").catch(console.error);
+    if (catVoice) {
+      await catVoice.setName("🔊 ━━━ KÊNH ĐÀM THOẠI ━━━").catch(console.error);
+      await sleep(350);
+    }
 
     // Tạo thêm Category Cửa Hàng & Hỗ Trợ nếu chưa có
     let catShop = channels.find(c => c && c.type === ChannelType.GuildCategory && c.name.includes("CỬA HÀNG"));
@@ -110,6 +122,7 @@ client.once(Events.ClientReady, async () => {
         name: "🛒 ━━━ CỬA HÀNG & HỖ TRỢ ━━━",
         type: ChannelType.GuildCategory
       });
+      await sleep(350);
     }
 
     // 2. CHUẨN HÓA TÊN KÊNH
@@ -145,18 +158,25 @@ client.once(Events.ClientReady, async () => {
         } catch (e) {
           console.warn(`   ! Error renaming ${chId}: ${e.message}`);
         }
+        await sleep(350);
       }
     }
 
     // Di chuyển kênh shop và ticket vào Category Shop
     const chSell = channels.get("1536021323766042754");
-    if (chSell && catShop) await chSell.setParent(catShop.id).catch(() => {});
+    if (chSell && catShop) {
+      await chSell.setParent(catShop.id).catch(() => {});
+      await sleep(350);
+    }
 
     const chTicket = channels.get("1498374824752451886");
-    if (chTicket && catShop) await chTicket.setParent(catShop.id).catch(() => {});
+    if (chTicket && catShop) {
+      await chTicket.setParent(catShop.id).catch(() => {});
+      await sleep(350);
+    }
 
     // Kiểm tra kênh IP kết nối nếu chưa có thì tạo
-    let chIp = channels.find(c => c && c.name.includes("ip-kết-nối") || c.name.includes("ip-server"));
+    let chIp = channels.find(c => c && (c.name.includes("ip-kết-nối") || c.name.includes("ip-server")));
     if (!chIp && catInfo) {
       chIp = await guild.channels.create({
         name: "🌐・ip-kết-nối-game",
@@ -164,6 +184,7 @@ client.once(Events.ClientReady, async () => {
         parent: catInfo.id,
         topic: "Thông tin IP kết nối và cổng vào máy chủ Nguyen SMP"
       });
+      await sleep(350);
     }
 
     console.log("📝 Đang đăng các Embeds thiết kế mới siêu đẹp...");
@@ -199,6 +220,7 @@ client.once(Events.ClientReady, async () => {
         .setTimestamp();
 
       await chRules.send({ embeds: [embedRules] });
+      await sleep(350);
     }
 
     // 2. EMBED IP KẾT NỐI
@@ -222,6 +244,7 @@ client.once(Events.ClientReady, async () => {
         .setFooter({ text: "Chúc anh em chơi game vui vẻ tại Nguyen SMP!" });
 
       await chIp.send({ embeds: [embedIp] });
+      await sleep(350);
     }
 
     // 3. EMBED DONATE & CỬA HÀNG
@@ -243,6 +266,7 @@ client.once(Events.ClientReady, async () => {
         .setFooter({ text: "Cảm ơn tất cả anh em đã luôn đồng hành cùng Nguyen SMP!" });
 
       await chSell.send({ embeds: [embedDonate] });
+      await sleep(350);
     }
 
     // 4. EMBED TICKET HỖ TRỢ
@@ -256,6 +280,7 @@ client.once(Events.ClientReady, async () => {
         );
 
       await chTicket.send({ embeds: [embedTicket] });
+      await sleep(350);
     }
 
     console.log("🎉 RE-DECOR NGUYEN SMP HOÀN TẤT 100%!");

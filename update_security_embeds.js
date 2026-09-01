@@ -2,7 +2,7 @@ const path = require('path');
 const fs = require('fs');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { 
-  Client,
+  Client, 
   Events, 
   GatewayIntentBits, 
   EmbedBuilder, 
@@ -14,7 +14,7 @@ const {
 const tokenLocalPath = path.join(__dirname, 'token.local.js');
 const localConfig = fs.existsSync(tokenLocalPath) ? require(tokenLocalPath) : {};
 const TOKEN = process.env.DISCORD_TOKEN || localConfig.TOKEN || localConfig.DISCORD_TOKEN || '';
-const GUILD_ID = "1542476657825419334";
+const GUILD_ID = process.env.GUILD_ID || (typeof localConfig !== "undefined" && localConfig.GUILD_ID) || "1542476657825419334";
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
@@ -72,7 +72,6 @@ process.on('uncaughtException', async (err) => {
   await cleanupAndExit(1);
 });
 
-
 client.once(Events.ClientReady, async () => {
   console.log(`🤖 Logged in as ${client.user.tag}! Cập nhật nội dung chuyên về Anti-Cheat / Anti-Client...`);
 
@@ -98,10 +97,12 @@ client.once(Events.ClientReady, async () => {
         const messages = await channel.messages.fetch({ limit: 20 });
         for (const [id, msg] of messages) {
           if (msg.author.id === client.user.id) {
-            await msg.delete();
+            await msg.delete().catch(() => {});
+            await sleep(250);
           }
         }
         await createEmbedsFn(channel);
+        await sleep(350);
         console.log(`✅ Đã cập nhật nội dung kênh: ${channel.name}`);
       } catch (err) {
         console.error(`❌ Lỗi khi cập nhật kênh ${chName}:`, err.message);
@@ -124,9 +125,9 @@ client.once(Events.ClientReady, async () => {
           "• 🚀 **Tối Ưu Packet Tột Đỉnh:** Thuật toán kiểm tra Asynchronous, không gây tụt TPS / giật lag server kể cả khi có 100+ người chơi online cùng lúc!"
         )
         .addFields(
-          { name: "🛡️ Xem Sản Phẩm Anti", value: `<#${channels.find(c => c.name.includes('danh-sách-plugin'))?.id}>`, inline: true },
-          { name: "💰 Xem Bảng Giá", value: `<#${channels.find(c => c.name.includes('bảng-giá-dịch-vụ'))?.id}>`, inline: true },
-          { name: "🛒 Mua & Đặt Hàng", value: `<#${channels.find(c => c.name.includes('mua-plugin'))?.id}>`, inline: true }
+          { name: "🛡️ Xem Sản Phẩm Anti", value: `<#${channels.find(c => c && c.name.includes('danh-sách-plugin'))?.id || 'danh-sách-plugin'}>`, inline: true },
+          { name: "💰 Xem Bảng Giá", value: `<#${channels.find(c => c && c.name.includes('bảng-giá-dịch-vụ'))?.id || 'bảng-giá'}>`, inline: true },
+          { name: "🛒 Mua & Đặt Hàng", value: `<#${channels.find(c => c && c.name.includes('mua-plugin'))?.id || 'mua-plugin'}>`, inline: true }
         )
         .setFooter({ text: "LS STUDIO • Bảo Vệ Toàn Diện Cho Máy Chủ Của Bạn", iconURL: client.user.displayAvatarURL() });
 
@@ -141,9 +142,9 @@ client.once(Events.ClientReady, async () => {
         .setDescription("Tất cả các Plugin Anti của LS Studio đều được viết trên nền tảng **Packet ProtocolLib / PacketEvents**, kiểm tra bất đồng bộ (Async) giúp Server giữ vững **20.0 TPS**.")
         .addFields(
           {
-            name: "👁️ 1. LS-AntiFreeCam & Obfuscator (Chống Freecam / ESP / X-Ray)",
+            name: "👁️ 1. LS-AntiFreeCam & Obfuscator (Chống Freecam & X-Ray)",
             value: 
-              "• **Tính năng:** Thuật toán ẩn hoàn toàn Entity, Rương đồ (TileEntity) và Block khoáng sản khi bị che khuất hoặc ngoài góc nhìn của Player.\n" +
+              "• **Tính năng:** Giấu dữ liệu TileEntity (Rương, Shulker, Dispenser) và Block quặng ngầm ngoài tầm nhìn.\n" +
               "• **Khắc chế triệt để:** Freecam Mod, Baritone Auto-Mine, Chest ESP, Player ESP, Tracers.\n" +
               "• **Ưu điểm:** Cực nhẹ, không tốn RAM như Orebfuscator truyền thống.\n" +
               "• **Hỗ trợ:** Spigot / Paper / Purpur / Folia (1.16 - 1.21+)\n" +

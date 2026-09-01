@@ -2,7 +2,7 @@ const path = require('path');
 const fs = require('fs');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { 
-  Client,
+  Client, 
   Events, 
   GatewayIntentBits, 
   ChannelType, 
@@ -74,7 +74,6 @@ process.on('uncaughtException', async (err) => {
   await cleanupAndExit(1);
 });
 
-
 client.once(Events.ClientReady, async () => {
   console.log(`🤖 Logged in as ${client.user.tag}! Bắt đầu chia từng kênh riêng biệt không dùng ngoặc đơn...`);
 
@@ -96,6 +95,7 @@ client.once(Events.ClientReady, async () => {
     if (oldGenericCh) {
       await oldGenericCh.delete().catch(() => {});
       console.log("🗑️ Đã xóa kênh gộp cũ #sản-phẩm-plugin");
+      await sleep(350);
     }
 
     // Danh sách các kênh sản phẩm cần có
@@ -220,16 +220,17 @@ client.once(Events.ClientReady, async () => {
           ]
         });
         console.log(`✅ Đã tạo kênh mới: #${ch.name}`);
+        await sleep(350);
       }
 
       // Xóa tin nhắn cũ của bot
       const msgs = await ch.messages.fetch({ limit: 10 });
       for (const [mId, msg] of msgs) {
-      if (msg.author.id === client.user.id) {
-        await msg.delete().catch(() => {});
-        await sleep(250);
+        if (msg.author.id === client.user.id) {
+          await msg.delete().catch(() => {});
+          await sleep(250);
+        }
       }
-    }
 
       const embed = new EmbedBuilder()
         .setColor(p.color)
@@ -250,6 +251,7 @@ client.once(Events.ClientReady, async () => {
 
       await ch.send({ embeds: [embed], components: [buyBtn] });
       console.log(`   + Đã đăng bài vào: #${ch.name}`);
+      await sleep(350);
     }
 
     // Cập nhật lại Bảng Giá không có ngoặc đơn
@@ -257,11 +259,11 @@ client.once(Events.ClientReady, async () => {
     if (pricingCh) {
       const msgs = await pricingCh.messages.fetch({ limit: 10 });
       for (const [mId, msg] of msgs) {
-      if (msg.author.id === client.user.id) {
-        await msg.delete().catch(() => {});
-        await sleep(250);
+        if (msg.author.id === client.user.id) {
+          await msg.delete().catch(() => {});
+          await sleep(250);
+        }
       }
-    }
 
       const priceEmbed = new EmbedBuilder()
         .setColor("#FEE75C")
@@ -305,6 +307,7 @@ client.once(Events.ClientReady, async () => {
 
       await pricingCh.send({ embeds: [priceEmbed] });
       console.log("✅ Đã cập nhật lại kênh #bảng-giá!");
+      await sleep(350);
     }
 
     console.log("🎉 ĐÃ HOÀN TẤT CHIA TỪNG KÊNH RIÊNG VÀ XÓA BỎ DẤU NGOẶC ĐƠN 100%!");

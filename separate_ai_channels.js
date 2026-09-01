@@ -295,16 +295,17 @@ client.once(Events.ClientReady, async () => {
           ]
         });
         console.log(`✅ Đã tạo kênh: #${ch.name}`);
+        await sleep(350);
       }
 
       // Xóa tin nhắn cũ của bot
       const msgs = await ch.messages.fetch({ limit: 10 });
       for (const [mId, msg] of msgs) {
-      if (msg.author.id === client.user.id) {
-        await msg.delete().catch(() => {});
-        await sleep(250);
+        if (msg.author.id === client.user.id) {
+          await msg.delete().catch(() => {});
+          await sleep(250);
+        }
       }
-    }
 
       const embed = new EmbedBuilder()
         .setColor(p.color)
@@ -314,6 +315,7 @@ client.once(Events.ClientReady, async () => {
 
       await ch.send({ embeds: [embed], components: [makeActionButtons()] });
       console.log(`   + Đã đăng bài vào: #${ch.name}`);
+      await sleep(350);
     }
 
     console.log("🎉 ĐÃ CHIA XONG TẤT CẢ 7 KÊNH RIÊNG BIỆT CHO DỊCH VỤ AI 100%!");
