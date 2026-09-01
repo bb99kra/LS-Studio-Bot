@@ -77,8 +77,8 @@ const activeOrderCodes = new Map(); // orderCode -> { createdAt: number, pkgKey?
 const processingApprovals = new Set(); // orderCode đang trong tiến trình duyệt
 const approvedOrderCodes = new Set(); // orderCode đã duyệt thành công
 
-// Regex chuẩn nhận diện & bóc tách mã đơn hàng (hỗ trợ LS1234, LS123456, LS-123456, LS 123456)
-const ORDER_CODE_REGEX = /\b(LS[\s-_]?[0-9A-Z]{4,8})\b/i;
+// Regex chuẩn nhận diện & bóc tách mã đơn hàng (hỗ trợ LS123456, LS-123456, LS 123456)
+const ORDER_CODE_REGEX = /\b(LS[\s-_]?[0-9A-Z]{6})\b/i;
 
 // Sinh mã đơn hàng ngẫu nhiên chuẩn e-commerce, cryptographically secure và chống trùng lặp tuyệt đối
 function generateUniqueOrderCode() {
@@ -86,12 +86,18 @@ function generateUniqueOrderCode() {
   let attempts = 0;
   
   do {
-    // Tạo 6 chữ số ngẫu nhiên bằng crypto.randomBytes (100000 -> 999999)
+    // Tạo 6 chữ số ngẫu nhiên cryptographically secure bằng crypto.randomBytes (100000 -> 999999)
     const randomBytes = crypto.randomBytes(4);
     const num = (randomBytes.readUInt32BE(0) % 900000) + 100000;
     code = `LS${num}`;
     attempts++;
-  } while (activeOrderCodes.has(code) && attempts < 50);
+  } while ((activeOrderCodes.has(code) || approvedOrderCodes.has(code) || processingApprovals.has(code)) && attempts < 50);
+
+  // Nếu quá 50 lần phát hiện trùng lặp (xác suất < 1/10^30), tự động fallback sang mã 6 ký tự Hex có entropy tuyệt đối
+  if (activeOrderCodes.has(code) || approvedOrderCodes.has(code) || processingApprovals.has(code)) {
+    const highEntropyHex = crypto.randomBytes(3).toString('hex').toUpperCase();
+    code = `LS${highEntropyHex}`;
+  }
 
   // Lưu mã vào memory pool
   activeOrderCodes.set(code, { createdAt: Date.now() });
@@ -111,7 +117,7 @@ function extractOrderCode(text) {
   return match ? sanitizeOrderCode(match[1]) : null;
 }
 
-// Kiểm tra mã đơn có đúng cấu trúc LS + 4-8 ký tự số/chữ hay không
+// Kiểm tra mã đơn có đúng cấu trúc LS + 6 ký tự số/chữ hay không
 function isValidOrderCode(code) {
   if (code === null || code === undefined) return false;
   const str = typeof code === 'string' ? code : String(code);
@@ -124,29 +130,48 @@ function isValidOrderCode(code) {
 }
 
 /**
- * Kiểm tra xem mức giá có phải là dạng báo giá thỏa thuận (0 VNĐ / Custom Dev / Mod) hay không
+ * Kiểm tra xem mức giá có phải là dạng báo giá thỏa thuận (0 VNĐ / Custom Dev / Mod / Non-numeric) hay không
  * @param {number|string|null|undefined} amount 
  * @returns {boolean}
  */
 function isNegotiatedPrice(amount) {
-  if (amount === null || amount === undefined) return true;
-  const num = typeof amount === 'number' ? amount : Number(amount);
+  if (amount === null || amount === undefined || typeof amount === 'boolean') return true;
+  if (typeof amount === 'object') return true;
+  let num;
+  if (typeof amount === 'number') {
+    num = amount;
+  } else if (typeof amount === 'bigint') {
+    num = Number(amount);
+  } else if (typeof amount === 'string') {
+    const cleaned = amount.trim().replace(/[₫đĐ\$\s_]/gi, '').replace(/,/g, '');
+    if (!cleaned) return true;
+    num = Number(cleaned);
+  } else {
+    return true;
+  }
   return !Number.isFinite(num) || num <= 0;
 }
 
 /**
- * Chuẩn hóa chuỗi text dùng cho nội dung chuyển khoản VietQR / Banking Memo
- * - Loại bỏ dấu tiếng Việt (Unicode NFD)
- * - Loại bỏ ký tự đặc biệt, emoji, newline, BiDi overrides, control chars
- * - Chỉ giữ chữ cái A-Z, số 0-9 và dấu cách
- * - Chuyển sang chữ in hoa
- * - Cắt ngắn tối đa maxLength ký tự theo chuẩn VietQR / NAPAS
+ * Chuẩn hóa chuỗi text dùng cho nội dung chuyển khoản VietQR / Banking Memo theo chuẩn NAPAS 247 / VietQR
+ * - Chuẩn hóa Unicode NFKC và loại bỏ dấu tiếng Việt (Unicode NFD)
+ * - Chuyển đổi các ký tự đặc biệt đ/Đ -> D, ø/Ø -> O, æ/Æ -> AE, ß -> SS, ł/Ł -> L
+ * - Loại bỏ ký tự điều khiển, BiDi overrides, zero-width chars, emoji, dấu câu
+ * - Chỉ giữ lại chữ cái A-Z, số 0-9 và khoảng trắng đơn
+ * - Chuyển toàn bộ sang chữ in hoa
+ * - Cắt ngắn tối đa maxLength (giới hạn cứng không quá 50 ký tự theo chuẩn Napas Tag 62 Subtag 08)
+ * @param {string|number} text - Chuỗi văn bản cần chuẩn hóa
+ * @param {number} maxLength - Độ dài tối đa (Mặc định 50 ký tự, giới hạn tối đa 50)
+ * @returns {string}
  */
-function sanitizeVietQRText(text, maxLength = 25) {
-  if (text === null || text === undefined) return '';
+function sanitizeVietQRText(text, maxLength = 50) {
+  if (text === null || text === undefined || typeof text === 'boolean') return '';
   const str = typeof text === 'string' ? text : String(text);
   if (!str.trim()) return '';
-  const maxLen = typeof maxLength === 'number' && maxLength > 0 ? maxLength : 25;
+  
+  const parsedMax = typeof maxLength === 'number' && Number.isFinite(maxLength) && maxLength > 0 ? Math.floor(maxLength) : 50;
+  const safeMaxLen = Math.min(Math.max(1, parsedMax), 50);
+
   return str
     .normalize('NFKC')
     .replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2066-\u2069\x00-\x1F\x7F-\x9F]/g, '')
@@ -161,7 +186,7 @@ function sanitizeVietQRText(text, maxLength = 25) {
     .replace(/\s+/g, ' ')            // Gộp khoảng trắng liên tiếp
     .trim()
     .toUpperCase()
-    .slice(0, maxLen);
+    .slice(0, safeMaxLen);
 }
 
 /**
@@ -367,30 +392,74 @@ function redactSensitiveData(text) {
     .replace(/(?<=\b(?:password|passwd|pass|matkhau|mật\s*khẩu|api[_-]?secret|client[_-]?secret|db_pass|database_password)\s*[:=]\s*)(\S+)/gi, '[REDACTED_SECRET]');
 }
 
-// Định dạng tiền tệ VND chuẩn Việt Nam
+// Định dạng tiền tệ VND chuẩn Việt Nam (Làm tròn số nguyên, phân tách hàng nghìn dấu chấm, chống -0 VNĐ & Non-numeric)
 function formatVND(amount) {
-  if (amount === null || amount === undefined) return '0 VNĐ';
-  const num = typeof amount === 'number' ? amount : Number(amount);
-  if (!Number.isFinite(num) || num === 0) {
+  if (amount === null || amount === undefined || typeof amount === 'boolean') return '0 VNĐ';
+  if (typeof amount === 'object' && !Array.isArray(amount) && !(amount instanceof Number)) return '0 VNĐ';
+  if (Array.isArray(amount)) return '0 VNĐ';
+
+  let num;
+  if (typeof amount === 'number') {
+    num = amount;
+  } else if (typeof amount === 'bigint') {
+    num = Number(amount);
+  } else if (typeof amount === 'string') {
+    const cleaned = amount.trim().replace(/[₫đĐ\s_]|vnd|vnđ/gi, '').replace(/,/g, '');
+    if (!cleaned) return '0 VNĐ';
+    num = Number(cleaned);
+  } else {
     return '0 VNĐ';
   }
-  if (num < 0) {
-    return `-${Math.abs(Math.round(num)).toLocaleString('vi-VN')} VNĐ`;
+
+  if (!Number.isFinite(num)) {
+    return '0 VNĐ';
   }
-  return `${Math.round(num).toLocaleString('vi-VN')} VNĐ`;
+
+  const rounded = Math.round(num);
+  if (rounded === 0 || Object.is(rounded, -0)) {
+    return '0 VNĐ';
+  }
+
+  const absVal = Math.abs(rounded);
+  const formatted = new Intl.NumberFormat('vi-VN').format(absVal);
+  return rounded < 0 ? `-${formatted} VNĐ` : `${formatted} VNĐ`;
 }
 
-// Định dạng tiền tệ USD chuẩn quốc tế (2 chữ số thập phân)
+// Định dạng tiền tệ USD chuẩn quốc tế (2 chữ số thập phân, phân tách hàng nghìn en-US, chống -$0.00 USD & Non-numeric)
 function formatUSD(amount) {
-  if (amount === null || amount === undefined) return '$0.00 USD';
-  const num = typeof amount === 'number' ? amount : Number(amount);
-  if (!Number.isFinite(num) || num === 0) {
+  if (amount === null || amount === undefined || typeof amount === 'boolean') return '$0.00 USD';
+  if (typeof amount === 'object' && !Array.isArray(amount) && !(amount instanceof Number)) return '$0.00 USD';
+  if (Array.isArray(amount)) return '$0.00 USD';
+
+  let num;
+  if (typeof amount === 'number') {
+    num = amount;
+  } else if (typeof amount === 'bigint') {
+    num = Number(amount);
+  } else if (typeof amount === 'string') {
+    const cleaned = amount.trim().replace(/[\$\s_]|usd/gi, '').replace(/,/g, '');
+    if (!cleaned) return '$0.00 USD';
+    num = Number(cleaned);
+  } else {
     return '$0.00 USD';
   }
-  if (num < 0) {
-    return `-$${Math.abs(num).toFixed(2)} USD`;
+
+  if (!Number.isFinite(num)) {
+    return '$0.00 USD';
   }
-  return `$${num.toFixed(2)} USD`;
+
+  const absVal = Math.abs(num);
+  // Nếu giá trị làm tròn ở 2 chữ số thập phân bằng 0 (ví dụ -0.001 hoặc 0.004)
+  if (Math.round(absVal * 100) === 0) {
+    return '$0.00 USD';
+  }
+
+  const formatted = new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(absVal);
+
+  return num < 0 ? `-$${formatted} USD` : `$${formatted} USD`;
 }
 
 // Client HTTP chuyên dụng cho VietQR & Banking với timeout 5s và giới hạn kích thước 5MB
@@ -444,8 +513,8 @@ function generateVietQRUrl({ bankId, accountNo, template = 'compact2', amount = 
   const baseUrl = `https://img.vietqr.io/image/${cleanBank}-${cleanAcc}-${cleanTemplate}.png`;
   const params = new URLSearchParams();
 
-  // Chỉ thêm tham số amount nếu số tiền > 0 và hợp lệ (hỗ trợ trường hợp 0 VND / báo giá thỏa thuận)
-  if (amount !== null && amount !== undefined) {
+  // Chỉ thêm tham số amount nếu số tiền > 0 và hợp lệ (tự động bỏ qua đối với 0 VND / báo giá thỏa thuận / non-numeric)
+  if (amount !== null && amount !== undefined && !isNegotiatedPrice(amount)) {
     const parsedAmount = typeof amount === 'number' ? amount : Number(amount);
     if (Number.isFinite(parsedAmount) && parsedAmount > 0) {
       params.append('amount', Math.round(parsedAmount).toString());
@@ -453,7 +522,7 @@ function generateVietQRUrl({ bankId, accountNo, template = 'compact2', amount = 
   }
 
   if (addInfo) {
-    const sanitizedMemo = sanitizeVietQRText(String(addInfo), 25);
+    const sanitizedMemo = sanitizeVietQRText(String(addInfo), 50);
     if (sanitizedMemo) {
       params.append('addInfo', sanitizedMemo);
     }
@@ -922,6 +991,7 @@ client.once(Events.ClientReady, async (readyClient) => {
   let activityIndex = 0;
   const updateActivity = () => {
     try {
+      if (!readyClient?.user) return;
       const act = ACTIVITIES[activityIndex];
       readyClient.user.setPresence({
         activities: [act],
@@ -935,7 +1005,8 @@ client.once(Events.ClientReady, async (readyClient) => {
 
   updateActivity();
   if (activityInterval) clearInterval(activityInterval);
-  activityInterval = setInterval(updateActivity, 25000).unref();
+  activityInterval = setInterval(updateActivity, 25000);
+  if (activityInterval?.unref) activityInterval.unref();
 
   await registerCommands(readyClient.user.id);
 });
@@ -1392,18 +1463,42 @@ const ticketCreationLocks = new ExpiringLockMap(30000);
 const closingTicketChannels = new Set(); // Kênh ticket đang trong tiến trình đóng & xuất transcript
 const userCooldowns = new Map();
 
-function getRateLimitRemaining(userId, cooldownMs = 5000) {
+/**
+ * Tính thời gian cooldown/rate limit còn lại
+ * Hỗ trợ phân vùng linh hoạt theo Guild và User (guildId:userId) để chống can thiệp chéo giữa các máy chủ (Cross-Guild Interference)
+ * @param {string} targetOrGuildId - Guild ID hoặc key nhận diện
+ * @param {string|number} userIdOrCooldown - User ID (nếu truyền guildId) hoặc Cooldown Ms
+ * @param {number} maybeCooldownMs - Cooldown Ms (nếu truyền guildId và userId)
+ * @returns {number} Số giây cooldown còn lại (0 nếu đã hết hạn hoặc được phép thực hiện)
+ */
+function getRateLimitRemaining(targetOrGuildId, userIdOrCooldown = 5000, maybeCooldownMs = 5000) {
+  let key;
+  let cooldownMs;
+  if (typeof userIdOrCooldown === 'string' && /^\d{16,21}$/.test(userIdOrCooldown)) {
+    key = userIdOrCooldown;
+    cooldownMs = typeof maybeCooldownMs === 'number' && maybeCooldownMs > 0 ? maybeCooldownMs : 5000;
+  } else if (typeof targetOrGuildId === 'string' && /^\d{16,21}$/.test(targetOrGuildId)) {
+    key = targetOrGuildId;
+    cooldownMs = typeof userIdOrCooldown === 'number' && userIdOrCooldown > 0 ? userIdOrCooldown : 5000;
+  } else if (typeof userIdOrCooldown === 'string') {
+    key = `${targetOrGuildId || 'DM'}:${userIdOrCooldown}`;
+    cooldownMs = typeof maybeCooldownMs === 'number' && maybeCooldownMs > 0 ? maybeCooldownMs : 5000;
+  } else {
+    key = String(targetOrGuildId || 'global');
+    cooldownMs = typeof userIdOrCooldown === 'number' && userIdOrCooldown > 0 ? userIdOrCooldown : 5000;
+  }
+
   const now = Date.now();
-  const lastTime = userCooldowns.get(userId) || 0;
+  const lastTime = userCooldowns.get(key) || 0;
   if (now - lastTime < cooldownMs) {
     return Math.ceil((cooldownMs - (now - lastTime)) / 1000);
   }
 
   // Bảo vệ giới hạn dung lượng bộ nhớ (Max 5,000 entries) chống memory explosion khi bị spam
   if (userCooldowns.size > 5000) {
-    for (const [id, time] of userCooldowns.entries()) {
+    for (const [k, time] of userCooldowns.entries()) {
       if (now - time > 60000) {
-        userCooldowns.delete(id);
+        userCooldowns.delete(k);
       }
     }
     if (userCooldowns.size > 5000) {
@@ -1412,7 +1507,7 @@ function getRateLimitRemaining(userId, cooldownMs = 5000) {
     }
   }
 
-  userCooldowns.set(userId, now);
+  userCooldowns.set(key, now);
   return 0;
 }
 
@@ -1420,16 +1515,16 @@ function getRateLimitRemaining(userId, cooldownMs = 5000) {
 let cleanupInterval = setInterval(() => {
   const now = Date.now();
   // 1. Dọn dẹp cooldowns quá hạn
-  for (const [userId, time] of userCooldowns.entries()) {
+  for (const [key, time] of userCooldowns.entries()) {
     if (now - time > 60000) {
-      userCooldowns.delete(userId);
+      userCooldowns.delete(key);
     }
   }
 
   // 2. Dọn dẹp các lock tạo ticket bị treo quá TTL (30s)
-  for (const [userId, lockTime] of ticketCreationLocks.entries()) {
+  for (const [lockKey, lockTime] of ticketCreationLocks.entries()) {
     if (now - lockTime > ticketCreationLocks.ttlMs) {
-      ticketCreationLocks.delete(userId);
+      ticketCreationLocks.delete(lockKey);
     }
   }
 
@@ -2834,6 +2929,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // /ping
       if (commandName === 'ping') {
+        const cooldownRemaining = getRateLimitRemaining(interaction.guildId, interaction.user.id, 3000);
+        if (cooldownRemaining > 0) {
+          return safeReply(interaction, {
+            content: `⏳ Bạn thao tác quá nhanh! Vui lòng đợi **${cooldownRemaining} giây** trước khi dùng lệnh tiếp theo.`,
+            ephemeral: true
+          });
+        }
         const wsPing = client.ws?.ping ?? 0;
         const apiLatency = Math.max(0, Date.now() - interaction.createdTimestamp);
         return safeReply(interaction, { 
@@ -2844,6 +2946,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // /stk
       if (commandName === 'stk') {
+        const cooldownRemaining = getRateLimitRemaining(interaction.guildId, interaction.user.id, 4000);
+        if (cooldownRemaining > 0) {
+          return safeReply(interaction, {
+            content: `⏳ Bạn thao tác quá nhanh! Vui lòng đợi **${cooldownRemaining} giây** trước khi dùng lệnh tiếp theo.`,
+            ephemeral: true
+          });
+        }
         await safeDeferReply(interaction);
         const qrUrl = generateVietQRUrl({ template: 'compact2' });
         const qrBuffer = await fetchVietQRBuffer(qrUrl);
@@ -3103,7 +3212,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // Nút Xem Bảng Giá
       if (customId === 'ticket_pricing') {
-        const chPricing = guild?.channels.cache.find(c => c.name.includes('bảng-giá'));
+        if (!guild) {
+          return safeReply(interaction, { content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
+        }
+        const chPricing = guild.channels.cache.find(c => c.name.includes('bảng-giá'));
         return safeReply(interaction, {
           content: `💰 Bảng giá chi tiết / Price List: ${chPricing ? `<#${chPricing.id}>` : '#bảng-giá'}`,
           ephemeral: true
@@ -3112,6 +3224,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // Nút chuyển ngôn ngữ trong Ticket
       if (customId.startsWith('switch_lang_')) {
+        if (!guild) {
+          return safeReply(interaction, { content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
+        }
         const parts = customId.split('_');
         const targetLang = parts[2] || 'vi'; // 'vi' or 'en'
         const isEn = targetLang === 'en';
@@ -3159,7 +3274,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!guild) {
           return safeReply(interaction, { content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
         }
-        const cooldownRemaining = getRateLimitRemaining(user.id, 5000);
+        const cooldownRemaining = getRateLimitRemaining(guild.id, user.id, 5000);
         if (cooldownRemaining > 0) {
           return safeReply(interaction, {
             content: `⏳ Bạn thao tác quá nhanh! Vui lòng đợi **${cooldownRemaining} giây** trước khi mở form tiếp theo.\n*Please wait **${cooldownRemaining}s** before opening form.*`,
@@ -3175,7 +3290,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!guild) {
           return safeReply(interaction, { content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
         }
-        const cooldownRemaining = getRateLimitRemaining(user.id, 5000);
+        const cooldownRemaining = getRateLimitRemaining(guild.id, user.id, 5000);
         if (cooldownRemaining > 0) {
           return safeReply(interaction, {
             content: `⏳ Bạn thao tác quá nhanh! Vui lòng đợi **${cooldownRemaining} giây** trước khi mở form tiếp theo.\n*Please wait **${cooldownRemaining}s** before opening form.*`,
@@ -3188,6 +3303,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // Nút Mở Modal Đóng Kèm Lý Do
       if (customId === 'btn_close_with_reason') {
+        if (!guild) {
+          return safeReply(interaction, { content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
+        }
         const modal = createCloseTicketReasonModal();
         return safeShowModal(interaction, modal);
       }
@@ -3204,8 +3322,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return safeReply(interaction, { content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
         }
 
-        // 1. Kiểm tra Rate Limit
-        const cooldownRemaining = getRateLimitRemaining(user.id, 5000);
+        // 1. Kiểm tra Rate Limit phân vùng theo guild:userId
+        const cooldownRemaining = getRateLimitRemaining(guild.id, user.id, 5000);
         if (cooldownRemaining > 0) {
           return safeReply(interaction, {
             content: `⏳ Bạn thao tác quá nhanh! Vui lòng đợi **${cooldownRemaining} giây** trước khi mở ticket tiếp theo.\n*Please wait **${cooldownRemaining}s** before opening another ticket.*`,
@@ -3213,14 +3331,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
           });
         }
 
-        // 2. Kiểm tra Concurrency Lock
-        if (ticketCreationLocks.has(user.id)) {
+        // 2. Kiểm tra Concurrency Lock phân vùng theo guild:userId
+        const lockKey = `${guild.id}:${user.id}`;
+        if (ticketCreationLocks.has(lockKey) || ticketCreationLocks.has(user.id)) {
           return safeReply(interaction, {
             content: "⏳ Hệ thống đang tạo ticket cho bạn, vui lòng không bấm liên tục!\n*Ticket is being created, please wait...*",
             ephemeral: true
           });
         }
 
+        ticketCreationLocks.add(lockKey);
         ticketCreationLocks.add(user.id);
         await safeDeferReply(interaction, { ephemeral: true });
 
@@ -3300,12 +3420,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
             content: `❌ Không thể tạo Ticket do lỗi hệ thống: \`${ticketErr.message}\`. Vui lòng liên hệ Admin!`
           });
         } finally {
+          ticketCreationLocks.delete(lockKey);
           ticketCreationLocks.delete(user.id);
         }
       }
 
       // Nút Duyệt Tiền & Giao File (Dành cho Staff/Admin)
       if (customId.startsWith('approve_')) {
+        if (!guild) {
+          return safeReply(interaction, {
+            content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!",
+            ephemeral: true
+          });
+        }
         const parts = customId.split('_');
         if (parts.length < 4) {
           return safeReply(interaction, {
@@ -3427,6 +3554,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           const sanitizedBuyerName = sanitizeCustomerName(buyerMember ? (buyerMember.displayName || buyerMember.user?.username) : 'Khách Hàng', 32);
 
+          const priceDisplayVi = isNegotiatedPrice(pkg.price_vnd)
+            ? '`Thỏa thuận / Negotiated`'
+            : `\`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})`;
+
           const successEmbed = new EmbedBuilder()
             .setColor("#00E676")
             .setTitle("🎉 XÁC NHẬN THANH TOÁN THÀNH CÔNG / PAYMENT APPROVED!")
@@ -3434,7 +3565,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               `✅ Đơn hàng **\`${orderCode}\`** đã được <@${interaction.user.id}> xác nhận tiền về tài khoản!\n\n` +
               `👤 **Khách hàng / Customer:** <@${buyerId}> (${sanitizedBuyerName}) ${buyerMember ? '' : '*(Đã rời server)*'}\n` +
               `📦 **Sản phẩm / Product:** **${pkg.name_vi}**\n` +
-              `💰 **Số tiền / Amount:** \`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})\n\n` +
+              `💰 **Số tiền / Amount:** ${priceDisplayVi}\n\n` +
               `👑 **Quyền lợi & Trạng thái / Status:**\n` +
               `${roleStatusText}\n` +
               `• Staff sẽ gửi File / Link / API Key / Tài khoản trực tiếp ngay tại Ticket này!\n\n` +
@@ -3461,7 +3592,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 `• **Mã đơn / Order:** \`${orderCode}\`\n` +
                 `• **Khách hàng / Customer:** <@${buyerId}> (\`${sanitizedBuyerName}\` - \`${buyerId}\`)${buyerMember ? '' : ' *(Đã rời server)*'}\n` +
                 `• **Sản phẩm / Product:** ${pkg.name_vi}\n` +
-                `• **Số tiền / Amount:** \`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})\n` +
+                `• **Số tiền / Amount:** ${priceDisplayVi}\n` +
                 `• **Trạng thái Role:** ${roleStatusText.replace(/• /g, '')}\n` +
                 `• **Người duyệt / Approved by:** <@${interaction.user.id}>\n` +
                 `• **Thời gian / Time:** <t:${Math.floor(Date.now() / 1000)}:F>`
@@ -3483,6 +3614,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // Nút Yêu Cầu Đóng Ticket (Hiện hộp thoại xác nhận)
       if (customId === 'btn_close_ticket') {
+        if (!guild) {
+          return safeReply(interaction, { content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
+        }
         const isTicketChannel = interaction.channel?.name?.includes('mua') ||
                                 interaction.channel?.name?.includes('support') ||
                                 interaction.channel?.name?.includes('custom') ||
@@ -3529,6 +3663,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // Nút Hủy Đóng Ticket
       if (customId === 'cancel_close_ticket') {
+        if (!guild) {
+          return safeReply(interaction, { content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
+        }
         const cancelEmbed = new EmbedBuilder()
           .setColor("#4CAF50")
           .setDescription("✅ **Đã hủy thao tác đóng ticket.** Bạn có thể tiếp tục trao đổi với Staff!\n*Ticket close cancelled. You can continue chatting.*");
@@ -3538,6 +3675,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // Nút Xác Nhận Đóng Ticket (Tạo transcript, gửi log và xóa kênh qua executeTicketClosure)
       if (customId === 'confirm_close_ticket') {
+        if (!guild) {
+          return safeReply(interaction, { content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
+        }
         const channel = interaction.channel;
         if (!channel || !channel.isTextBased()) {
           return safeReply(interaction, { content: "❌ Không thể thực hiện thao tác trên kênh này!", ephemeral: true });
@@ -3561,10 +3701,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // 3. SELECT MENU (CHỌN GÓI MUA - VIỆT NAM HOẶC ENGLISH)
     if (interaction.isStringSelectMenu?.()) {
       if (interaction.customId.startsWith('select_package_')) {
+        const { guild, user } = interaction;
+        if (!guild) {
+          return safeReply(interaction, { content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
+        }
         const parts = interaction.customId.split('_');
         const lang = parts[2] || 'vi'; // 'vi' or 'en'
         const isEn = lang === 'en';
-        const ticketOwnerId = parts[3] || interaction.user.id;
+        const ticketOwnerId = parts[3] || user.id;
         const selectedKey = interaction.values[0];
         const pkg = getPackage(selectedKey);
 
@@ -3580,15 +3724,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // Kiểm tra quyền tương tác: Phải là chủ Ticket hoặc Staff
         const isStaff = isStaffMember(interaction.member);
 
-        if (interaction.user.id !== ticketOwnerId && !isStaff) {
+        if (user.id !== ticketOwnerId && !isStaff) {
           return safeReply(interaction, {
             content: "❌ Bạn không phải là chủ sở hữu của Ticket này! / You are not the owner of this ticket!",
             ephemeral: true
           });
         }
 
-        // Xử lý gói Custom Mod hoặc Custom Plugin
-        if (pkg.price_vnd === 0) {
+        // Xử lý gói Custom Mod hoặc Custom Plugin (Báo giá thỏa thuận)
+        if (isNegotiatedPrice(pkg.price_vnd)) {
           const isMod = selectedKey === 'custom_mod';
           const customEmbed = new EmbedBuilder()
             .setColor(isMod ? "#9C27B0" : "#FF4500")
@@ -3641,12 +3785,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         await safeDeferReply(interaction);
 
-        // Tái sử dụng mã đơn hàng đang hoạt động của phiên ticket này (nếu có trong 30 phút) để tối ưu cache ảnh QR khi đổi gói
+        // Tái sử dụng mã đơn hàng đang hoạt động của phiên ticket này (nếu có trong 30 phút) theo guild để tối ưu cache ảnh QR khi đổi gói
         let orderCode = null;
         for (const [code, data] of activeOrderCodes.entries()) {
-          if (data.buyerId === ticketOwnerId && !approvedOrderCodes.has(code) && (Date.now() - (data.createdAt || 0) < 30 * 60 * 1000)) {
+          if (data.buyerId === ticketOwnerId && (!data.guildId || data.guildId === guild.id) && !approvedOrderCodes.has(code) && (Date.now() - (data.createdAt || 0) < 30 * 60 * 1000)) {
             orderCode = code;
             data.pkgKey = selectedKey;
+            data.guildId = guild.id;
             break;
           }
         }
@@ -3656,7 +3801,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           activeOrderCodes.set(orderCode, {
             createdAt: Date.now(),
             pkgKey: selectedKey,
-            buyerId: ticketOwnerId
+            buyerId: ticketOwnerId,
+            guildId: guild.id
           });
         }
 
@@ -3793,13 +3939,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const budgetDeadline = sanitizeModalInlineText(interaction.fields.getTextInputValue('custom_budget_deadline'), 100, 'Thỏa thuận / Flexible');
         const contact = sanitizeModalInlineText(interaction.fields.getTextInputValue('custom_contact'), 100, 'Trực tiếp tại ticket Discord');
 
-        // 1. Chống race condition: kiểm tra và gán lock đồng bộ ngay trước bất kỳ await nào
-        if (ticketCreationLocks.has(user.id)) {
+        // 1. Chống race condition phân vùng theo guild:userId
+        const lockKey = `${guild.id}:${user.id}`;
+        if (ticketCreationLocks.has(lockKey) || ticketCreationLocks.has(user.id)) {
           return safeReply(interaction, {
             content: "⏳ Hệ thống đang xử lý yêu cầu của bạn, vui lòng đợi trong giây lát!\n*Your request is being processed, please wait...*",
             ephemeral: true
           });
         }
+        ticketCreationLocks.add(lockKey);
         ticketCreationLocks.add(user.id);
 
         try {
@@ -3907,6 +4055,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             content: `❌ Không thể tạo Ticket do lỗi: \`${err.message}\`. Vui lòng liên hệ Admin!`
           });
         } finally {
+          ticketCreationLocks.delete(lockKey);
           ticketCreationLocks.delete(user.id);
         }
       }
@@ -3924,13 +4073,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const serverEnv = sanitizeModalInlineText(interaction.fields.getTextInputValue('support_server_env'), 50, 'Paper/Purpur');
         const description = sanitizeModalCodeBlockText(interaction.fields.getTextInputValue('support_description'), 1500, 'N/A');
 
-        // 1. Chống race condition: kiểm tra và gán lock đồng bộ ngay trước bất kỳ await nào
-        if (ticketCreationLocks.has(user.id)) {
+        // 1. Chống race condition phân vùng theo guild:userId
+        const lockKey = `${guild.id}:${user.id}`;
+        if (ticketCreationLocks.has(lockKey) || ticketCreationLocks.has(user.id)) {
           return safeReply(interaction, {
             content: "⏳ Hệ thống đang xử lý yêu cầu của bạn, vui lòng đợi trong giây lát!\n*Your request is being processed, please wait...*",
             ephemeral: true
           });
         }
+        ticketCreationLocks.add(lockKey);
         ticketCreationLocks.add(user.id);
 
         try {
@@ -4023,12 +4174,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
             content: `❌ Không thể tạo Ticket do lỗi: \`${err.message}\`. Vui lòng liên hệ Admin!`
           });
         } finally {
+          ticketCreationLocks.delete(lockKey);
           ticketCreationLocks.delete(user.id);
         }
       }
 
       // 4.3 Modal Đóng Ticket Kèm Lý Do (modal_close_ticket_reason)
       if (customId === 'modal_close_ticket_reason') {
+        if (!guild) {
+          return safeReply(interaction, { 
+            content: "❌ Biểu mẫu này chỉ có thể xử lý bên trong máy chủ Discord!", 
+            ephemeral: true 
+          });
+        }
+
         const closeReason = sanitizeModalInlineText(interaction.fields.getTextInputValue('close_reason'), 500, 'Không có lý do cụ thể');
 
         const channel = interaction.channel;
@@ -4063,13 +4222,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // 4.4 Modal Gửi Đánh Giá Dịch Vụ (modal_feedback)
       if (customId === 'modal_feedback') {
-        if (!guild) {
-          return safeReply(interaction, {
-            content: "❌ Biểu mẫu này chỉ có thể xử lý bên trong máy chủ Discord!",
-            ephemeral: true
-          });
-        }
-
         const rating = sanitizeModalInlineText(interaction.fields.getTextInputValue('feedback_rating'), 15, '5 sao ⭐⭐⭐⭐⭐');
         const comment = sanitizeModalCodeBlockText(interaction.fields.getTextInputValue('feedback_comment'), 1000, 'Không có nhận xét');
 
@@ -4089,37 +4241,40 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setFooter({ text: "LS STUDIO • Customer Feedback System" })
           .setTimestamp();
 
-        // Gửi vào kênh đánh giá hoặc log
+        // Gửi vào kênh đánh giá hoặc log (hỗ trợ cả khi gửi từ DM hoặc Guild)
         try {
-          let fbChannel = guild?.channels.cache.find(c => 
-            c.isTextBased() && (
-              c.name.includes("đánh-giá") ||
-              c.name.includes("nhận-xét") ||
-              c.name.includes("feedback") ||
-              c.name.includes("nhật-ký-giao-dịch") ||
-              c.name.includes("nhật-ký")
-            )
-          );
+          const targetGuild = guild || (GUILD_ID ? client.guilds.cache.get(GUILD_ID) : null) || client.guilds.cache.first();
+          if (targetGuild) {
+            let fbChannel = targetGuild.channels.cache.find(c => 
+              c.isTextBased() && (
+                c.name.includes("đánh-giá") ||
+                c.name.includes("nhận-xét") ||
+                c.name.includes("feedback") ||
+                c.name.includes("nhật-ký-giao-dịch") ||
+                c.name.includes("nhật-ký")
+              )
+            );
 
-          if (!fbChannel && guild) {
-            const fetched = await guild.channels.fetch().catch(() => null);
-            if (fetched) {
-              fbChannel = fetched.find(c => 
-                c && c.isTextBased() && (
-                  c.name.includes("đánh-giá") ||
-                  c.name.includes("nhận-xét") ||
-                  c.name.includes("feedback") ||
-                  c.name.includes("nhật-ký-giao-dịch") ||
-                  c.name.includes("nhật-ký")
-                )
-              );
+            if (!fbChannel) {
+              const fetched = await targetGuild.channels.fetch().catch(() => null);
+              if (fetched) {
+                fbChannel = fetched.find(c => 
+                  c && c.isTextBased() && (
+                    c.name.includes("đánh-giá") ||
+                    c.name.includes("nhận-xét") ||
+                    c.name.includes("feedback") ||
+                    c.name.includes("nhật-ký-giao-dịch") ||
+                    c.name.includes("nhật-ký")
+                  )
+                );
+              }
             }
-          }
 
-          if (fbChannel) {
-            await fbChannel.send({ embeds: [feedbackEmbed] }).catch(err => {
-              console.error("❌ Lỗi gửi embed feedback:", err);
-            });
+            if (fbChannel) {
+              await fbChannel.send({ embeds: [feedbackEmbed] }).catch(err => {
+                console.error("❌ Lỗi gửi embed feedback:", err);
+              });
+            }
           }
         } catch (fbErr) {
           console.error("❌ Lỗi tìm kênh gửi feedback:", fbErr);
@@ -4202,6 +4357,7 @@ module.exports = {
   sanitizeDiscordChannelTopic,
   formatVND,
   formatUSD,
+  isNegotiatedPrice,
   paymentHttpClient,
   generateVietQRUrl,
   fetchVietQRBuffer,
