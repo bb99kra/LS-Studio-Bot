@@ -7,11 +7,167 @@ const { PNG } = require('pngjs');
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB max input file size
 const MAX_IMAGE_DIMENSION = 4096; // 4096px max width / height
 const MAX_TOTAL_PIXELS = 4096 * 4096; // 16,777,216 max pixels (~67MB RGBA buffer)
-const MIN_PNG_FILE_SIZE = 29; // 8 bytes signature + 12 bytes IHDR chunk wrapper + 9 bytes min IHDR payload
+const MIN_PNG_FILE_SIZE = 33; // 8 bytes signature + 4 bytes length + 4 bytes 'IHDR' + 13 bytes IHDR data + 4 bytes CRC
+
+/**
+ * Safely reads the initial header bytes of a file without loading the entire file into memory.
+ * Guarantees file descriptor closure even if errors occur during read.
+ * @param {string} filePath
+ * @param {number} [bytesToRead=64]
+ * @returns {Buffer}
+ */
+function readFileHeaderSafe(filePath, bytesToRead = 64) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const headerBuf = Buffer.alloc(bytesToRead);
+    const bytesRead = fs.readSync(fd, headerBuf, 0, bytesToRead, 0);
+    return headerBuf.subarray(0, bytesRead);
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Suppress descriptor close error during cleanup
+      }
+    }
+  }
+}
+
+/**
+ * Detects image MIME type strictly from magic header bytes.
+ * Supports PNG, JPEG, GIF, WebP.
+ * @param {Buffer} buffer
+ * @returns {string|null}
+ */
+function detectImageMimeType(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 3) return null;
+
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    buffer.length >= 8 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4E &&
+    buffer[3] === 0x47 &&
+    buffer[4] === 0x0D &&
+    buffer[5] === 0x0A &&
+    buffer[6] === 0x1A &&
+    buffer[7] === 0x0A
+  ) {
+    return 'image/png';
+  }
+
+  // JPEG: FF D8 FF
+  if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) {
+    return 'image/jpeg';
+  }
+
+  // GIF: GIF87a or GIF89a
+  if (
+    buffer.length >= 6 &&
+    buffer[0] === 0x47 &&
+    buffer[1] === 0x49 &&
+    buffer[2] === 0x46 &&
+    buffer[3] === 0x38 &&
+    (buffer[4] === 0x37 || buffer[4] === 0x39) &&
+    buffer[5] === 0x61
+  ) {
+    return 'image/gif';
+  }
+
+  // WebP: RIFF....WEBP
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString('ascii') === 'RIFF' &&
+    buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+
+  return null;
+}
+
+/**
+ * Validates PNG header bytes: magic signature, IHDR chunk wrapper, and dimensions.
+ * Prevents PNG decompression bombs before full sync decode or buffer allocation.
+ * @param {Buffer} headerBuffer
+ * @param {string} [filePath='']
+ * @returns {{ width: number, height: number, bitDepth: number, colorType: number }}
+ */
+function validatePngHeader(headerBuffer, filePath = '') {
+  if (!Buffer.isBuffer(headerBuffer) || headerBuffer.length < MIN_PNG_FILE_SIZE) {
+    throw new Error(`Tệp quá nhỏ hoặc thiếu dữ liệu header PNG hợp lệ (yêu cầu tối thiểu ${MIN_PNG_FILE_SIZE} bytes): ${filePath || 'Buffer'}`);
+  }
+
+  const mime = detectImageMimeType(headerBuffer);
+  if (mime !== 'image/png') {
+    if (mime) {
+      throw new Error(`Tệp "${filePath || 'Buffer'}" có định dạng ${mime} nhưng chỉ hỗ trợ ảnh PNG. Vui lòng chuyển đổi sang PNG.`);
+    }
+    throw new Error(`Tệp không có định dạng PNG hợp lệ (sai PNG magic bytes signature): ${filePath || 'Buffer'}`);
+  }
+
+  const ihdrChunkLength = headerBuffer.readUInt32BE(8);
+  if (ihdrChunkLength !== 13) {
+    throw new Error(`Tệp PNG không hợp lệ (độ dài dữ liệu IHDR phải chính xác là 13 bytes, nhận được ${ihdrChunkLength}): ${filePath || 'Buffer'}`);
+  }
+
+  const chunkType = headerBuffer.subarray(12, 16).toString('ascii');
+  if (chunkType !== 'IHDR') {
+    throw new Error(`Tệp PNG không hợp lệ (chunk đầu tiên phải là IHDR, nhận được "${chunkType}"): ${filePath || 'Buffer'}`);
+  }
+
+  const ihdrWidth = headerBuffer.readUInt32BE(16);
+  const ihdrHeight = headerBuffer.readUInt32BE(20);
+
+  if (!Number.isSafeInteger(ihdrWidth) || !Number.isSafeInteger(ihdrHeight) || ihdrWidth <= 0 || ihdrHeight <= 0) {
+    throw new Error(`Kích thước ảnh PNG trong IHDR không hợp lệ (${ihdrWidth}x${ihdrHeight}) trong: ${filePath || 'Buffer'}`);
+  }
+
+  if (ihdrWidth > MAX_IMAGE_DIMENSION || ihdrHeight > MAX_IMAGE_DIMENSION) {
+    throw new Error(`Kích thước ảnh PNG (${ihdrWidth}x${ihdrHeight}) vượt quá giới hạn tối đa cho phép (${MAX_IMAGE_DIMENSION}x${MAX_IMAGE_DIMENSION}): ${filePath || 'Buffer'}`);
+  }
+
+  if ((ihdrWidth * ihdrHeight) > MAX_TOTAL_PIXELS) {
+    throw new Error(`Tổng số điểm ảnh (${(ihdrWidth * ihdrHeight).toLocaleString()} pixels) vượt quá giới hạn an toàn (${MAX_TOTAL_PIXELS.toLocaleString()} pixels) để tránh tràn bộ nhớ: ${filePath || 'Buffer'}`);
+  }
+
+  const bitDepth = headerBuffer[24];
+  const colorType = headerBuffer[25];
+  const compression = headerBuffer[26];
+  const filter = headerBuffer[27];
+  const interlace = headerBuffer[28];
+
+  const validBitDepths = [1, 2, 4, 8, 16];
+  const validColorTypes = [0, 2, 3, 4, 6];
+
+  if (!validBitDepths.includes(bitDepth)) {
+    throw new Error(`Bit depth PNG không hợp lệ (${bitDepth}) trong: ${filePath || 'Buffer'}`);
+  }
+
+  if (!validColorTypes.includes(colorType)) {
+    throw new Error(`Color type PNG không hợp lệ (${colorType}) trong: ${filePath || 'Buffer'}`);
+  }
+
+  if (compression !== 0) {
+    throw new Error(`Phương thức nén PNG không hỗ trợ (${compression}) trong: ${filePath || 'Buffer'}`);
+  }
+
+  if (filter !== 0) {
+    throw new Error(`Phương thức lọc PNG không hỗ trợ (${filter}) trong: ${filePath || 'Buffer'}`);
+  }
+
+  if (interlace !== 0 && interlace !== 1) {
+    throw new Error(`Chế độ interlace PNG không hợp lệ (${interlace}) trong: ${filePath || 'Buffer'}`);
+  }
+
+  return { width: ihdrWidth, height: ihdrHeight, bitDepth, colorType };
+}
 
 /**
  * Searches for an existing file from candidate paths.
- * Safely probes filesystem without leaking descriptors.
+ * Safely probes filesystem without leaking descriptors and verifies PNG header.
  * @param {string[]} candidates
  * @returns {string|null}
  */
@@ -23,12 +179,23 @@ function findCandidateFile(candidates) {
       const resolved = path.resolve(candidate);
       if (fs.existsSync(resolved)) {
         const stats = fs.statSync(resolved);
-        if (stats.isFile() && stats.size > 0 && stats.size <= MAX_FILE_SIZE_BYTES) {
-          return resolved;
+        if (stats.isFile() && stats.size >= MIN_PNG_FILE_SIZE && stats.size <= MAX_FILE_SIZE_BYTES) {
+          // Probe header safely without leaking file descriptor
+          const header = readFileHeaderSafe(resolved, MIN_PNG_FILE_SIZE);
+          if (header.length >= MIN_PNG_FILE_SIZE && detectImageMimeType(header) === 'image/png') {
+            const chunkType = header.subarray(12, 16).toString('ascii');
+            if (chunkType === 'IHDR') {
+              const w = header.readUInt32BE(16);
+              const h = header.readUInt32BE(20);
+              if (w > 0 && h > 0 && w <= MAX_IMAGE_DIMENSION && h <= MAX_IMAGE_DIMENSION && (w * h) <= MAX_TOTAL_PIXELS) {
+                return resolved;
+              }
+            }
+          }
         }
       }
     } catch {
-      // Ignore filesystem probe error
+      // Ignore filesystem probe error and continue candidate search
     }
   }
   return null;
@@ -69,6 +236,7 @@ function resolveOutputDir(customDir) {
 
 /**
  * Safely reads and validates a PNG file with dimension limits and decompression bomb protection.
+ * Pre-inspects header via safe file descriptor before reading entire file into memory.
  * @param {string} filePath
  * @returns {{ png: PNG, buffer: Buffer }}
  */
@@ -92,11 +260,27 @@ function readPngSafe(filePath) {
     throw new Error(`Tệp hình ảnh rỗng (0 bytes): ${filePath}`);
   }
 
+  if (stats.size < MIN_PNG_FILE_SIZE) {
+    throw new Error(`Tệp quá nhỏ để là ảnh PNG hợp lệ (${stats.size} bytes, yêu cầu tối thiểu ${MIN_PNG_FILE_SIZE} bytes): ${filePath}`);
+  }
+
   if (stats.size > MAX_FILE_SIZE_BYTES) {
     const sizeMb = (stats.size / (1024 * 1024)).toFixed(2);
     throw new Error(`Dung lượng tệp "${filePath}" (${sizeMb} MB) vượt quá giới hạn an toàn (${MAX_FILE_SIZE_BYTES / (1024 * 1024)} MB).`);
   }
 
+  // 1. Inspect initial 33-byte header via safe file descriptor before reading full file into memory
+  let headerBuf;
+  try {
+    headerBuf = readFileHeaderSafe(filePath, MIN_PNG_FILE_SIZE);
+  } catch (err) {
+    throw new Error(`Không thể đọc phần đầu tệp "${filePath}": ${err.message}`);
+  }
+
+  // 2. Validate magic bytes and IHDR chunk (decompression bomb check)
+  const headerInfo = validatePngHeader(headerBuf, filePath);
+
+  // 3. Read full file content
   let buffer;
   try {
     buffer = fs.readFileSync(filePath);
@@ -104,46 +288,7 @@ function readPngSafe(filePath) {
     throw new Error(`Không thể đọc dữ liệu tệp "${filePath}": ${err.message}`);
   }
 
-  if (buffer.length < MIN_PNG_FILE_SIZE) {
-    throw new Error(`Tệp quá nhỏ để là ảnh PNG hợp lệ (${buffer.length} bytes, yêu cầu tối thiểu ${MIN_PNG_FILE_SIZE} bytes): ${filePath}`);
-  }
-
-  // Verify PNG signature: 89 50 4E 47 0D 0A 1A 0A
-  const isPngHeader =
-    buffer[0] === 0x89 &&
-    buffer[1] === 0x50 &&
-    buffer[2] === 0x4E &&
-    buffer[3] === 0x47 &&
-    buffer[4] === 0x0D &&
-    buffer[5] === 0x0A &&
-    buffer[6] === 0x1A &&
-    buffer[7] === 0x0A;
-
-  if (!isPngHeader) {
-    throw new Error(`Tệp không có định dạng PNG hợp lệ (sai PNG signature header): ${filePath}`);
-  }
-
-  // Pre-parse IHDR chunk to prevent PNG decompression bombs (OOM) before decoding
-  const chunkType = buffer.subarray(12, 16).toString('ascii');
-  if (chunkType !== 'IHDR') {
-    throw new Error(`Tệp PNG không hợp lệ (chunk đầu tiên phải là IHDR, nhận được "${chunkType}"): ${filePath}`);
-  }
-
-  const ihdrWidth = buffer.readUInt32BE(16);
-  const ihdrHeight = buffer.readUInt32BE(20);
-
-  if (!Number.isSafeInteger(ihdrWidth) || !Number.isSafeInteger(ihdrHeight) || ihdrWidth <= 0 || ihdrHeight <= 0) {
-    throw new Error(`Kích thước ảnh PNG trong IHDR không hợp lệ (${ihdrWidth}x${ihdrHeight}) trong: ${filePath}`);
-  }
-
-  if (ihdrWidth > MAX_IMAGE_DIMENSION || ihdrHeight > MAX_IMAGE_DIMENSION) {
-    throw new Error(`Kích thước ảnh PNG (${ihdrWidth}x${ihdrHeight}) vượt quá giới hạn tối đa cho phép (${MAX_IMAGE_DIMENSION}x${MAX_IMAGE_DIMENSION}): ${filePath}`);
-  }
-
-  if (ihdrWidth * ihdrHeight > MAX_TOTAL_PIXELS) {
-    throw new Error(`Tổng số điểm ảnh (${(ihdrWidth * ihdrHeight).toLocaleString()} pixels) vượt quá giới hạn an toàn (${MAX_TOTAL_PIXELS.toLocaleString()} pixels) để tránh tràn bộ nhớ: ${filePath}`);
-  }
-
+  // 4. Decode PNG synchronously with error catching for corrupted chunks / zlib streams
   let png;
   try {
     png = PNG.sync.read(buffer);
@@ -155,6 +300,8 @@ function readPngSafe(filePath) {
     !png ||
     !Number.isInteger(png.width) ||
     !Number.isInteger(png.height) ||
+    png.width !== headerInfo.width ||
+    png.height !== headerInfo.height ||
     png.width <= 0 ||
     png.height <= 0 ||
     !Buffer.isBuffer(png.data) ||
@@ -167,7 +314,8 @@ function readPngSafe(filePath) {
 }
 
 /**
- * Safely writes a PNG instance to disk with directory check and error handling.
+ * Safely writes a PNG instance to disk with directory check, memory bounds check and error handling.
+ * Automatically cleans up partial files on disk if write fails.
  * @param {string} filePath
  * @param {PNG} pngInstance
  * @param {object} [options={}]
@@ -185,6 +333,7 @@ function writePngSafe(filePath, pngInstance, options = {}) {
     pngInstance.height <= 0 ||
     pngInstance.width > MAX_IMAGE_DIMENSION ||
     pngInstance.height > MAX_IMAGE_DIMENSION ||
+    (pngInstance.width * pngInstance.height) > MAX_TOTAL_PIXELS ||
     !Buffer.isBuffer(pngInstance.data) ||
     pngInstance.data.length !== pngInstance.width * pngInstance.height * 4
   ) {
@@ -208,6 +357,11 @@ function writePngSafe(filePath, pngInstance, options = {}) {
   try {
     fs.writeFileSync(filePath, buffer);
   } catch (err) {
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch {
+      // Suppress unlink cleanup error
+    }
     throw new Error(`Không thể ghi tệp ảnh ra đĩa "${filePath}": ${err.message}`);
   }
 
@@ -223,8 +377,19 @@ function writePngSafe(filePath, pngInstance, options = {}) {
  * @returns {PNG}
  */
 function resizePNG(src, targetW, targetH) {
-  if (!src || !Number.isInteger(src.width) || !Number.isInteger(src.height) || src.width <= 0 || src.height <= 0 || !Buffer.isBuffer(src.data)) {
-    throw new Error('Ảnh nguồn không hợp lệ để resize.');
+  if (
+    !src ||
+    !Number.isInteger(src.width) ||
+    !Number.isInteger(src.height) ||
+    src.width <= 0 ||
+    src.height <= 0 ||
+    src.width > MAX_IMAGE_DIMENSION ||
+    src.height > MAX_IMAGE_DIMENSION ||
+    (src.width * src.height) > MAX_TOTAL_PIXELS ||
+    !Buffer.isBuffer(src.data) ||
+    src.data.length !== src.width * src.height * 4
+  ) {
+    throw new Error('Ảnh nguồn không hợp lệ hoặc vượt ngưỡng an toàn để resize.');
   }
 
   const tw = Number.isFinite(targetW) && targetW > 0 ? Math.max(1, Math.round(targetW)) : 0;
@@ -313,8 +478,19 @@ function resizePNG(src, targetW, targetH) {
  * @returns {PNG}
  */
 function cropAndScaleBG(bg, targetW, targetH) {
-  if (!bg || !Number.isInteger(bg.width) || !Number.isInteger(bg.height) || bg.width <= 0 || bg.height <= 0 || !Buffer.isBuffer(bg.data)) {
-    throw new Error('Ảnh nền không hợp lệ.');
+  if (
+    !bg ||
+    !Number.isInteger(bg.width) ||
+    !Number.isInteger(bg.height) ||
+    bg.width <= 0 ||
+    bg.height <= 0 ||
+    bg.width > MAX_IMAGE_DIMENSION ||
+    bg.height > MAX_IMAGE_DIMENSION ||
+    (bg.width * bg.height) > MAX_TOTAL_PIXELS ||
+    !Buffer.isBuffer(bg.data) ||
+    bg.data.length !== bg.width * bg.height * 4
+  ) {
+    throw new Error('Ảnh nền không hợp lệ hoặc vượt ngưỡng an toàn.');
   }
 
   const tw = Number.isFinite(targetW) && targetW > 0 ? Math.max(1, Math.round(targetW)) : 0;
@@ -372,11 +548,33 @@ function cropAndScaleBG(bg, targetW, targetH) {
  * @returns {PNG}
  */
 function createComposite(bgPng, logoPng, targetW, targetH, logoPaddingRatio = 0.85, darkenBgAlpha = 0.15) {
-  if (!bgPng || !Number.isInteger(bgPng.width) || !Number.isInteger(bgPng.height) || bgPng.width <= 0 || bgPng.height <= 0 || !Buffer.isBuffer(bgPng.data)) {
-    throw new Error('Ảnh nền không hợp lệ.');
+  if (
+    !bgPng ||
+    !Number.isInteger(bgPng.width) ||
+    !Number.isInteger(bgPng.height) ||
+    bgPng.width <= 0 ||
+    bgPng.height <= 0 ||
+    bgPng.width > MAX_IMAGE_DIMENSION ||
+    bgPng.height > MAX_IMAGE_DIMENSION ||
+    (bgPng.width * bgPng.height) > MAX_TOTAL_PIXELS ||
+    !Buffer.isBuffer(bgPng.data) ||
+    bgPng.data.length !== bgPng.width * bgPng.height * 4
+  ) {
+    throw new Error('Ảnh nền không hợp lệ hoặc vượt ngưỡng an toàn.');
   }
-  if (!logoPng || !Number.isInteger(logoPng.width) || !Number.isInteger(logoPng.height) || logoPng.width <= 0 || logoPng.height <= 0 || !Buffer.isBuffer(logoPng.data)) {
-    throw new Error('Ảnh logo không hợp lệ.');
+  if (
+    !logoPng ||
+    !Number.isInteger(logoPng.width) ||
+    !Number.isInteger(logoPng.height) ||
+    logoPng.width <= 0 ||
+    logoPng.height <= 0 ||
+    logoPng.width > MAX_IMAGE_DIMENSION ||
+    logoPng.height > MAX_IMAGE_DIMENSION ||
+    (logoPng.width * logoPng.height) > MAX_TOTAL_PIXELS ||
+    !Buffer.isBuffer(logoPng.data) ||
+    logoPng.data.length !== logoPng.width * logoPng.height * 4
+  ) {
+    throw new Error('Ảnh logo không hợp lệ hoặc vượt ngưỡng an toàn.');
   }
 
   const tw = Number.isFinite(targetW) && targetW > 0 ? Math.max(1, Math.round(targetW)) : 0;

@@ -134,24 +134,33 @@ const activeOrderCodes = new Map(); // orderCode -> { createdAt: number, pkgKey?
 const processingApprovals = new ExpiringLockMap(60000, 200); // orderCode đang trong tiến trình duyệt (TTL 60s)
 const approvedOrderCodes = new Set(); // orderCode đã duyệt thành công
 
-// Regex chuẩn nhận diện & bóc tách mã đơn hàng (hỗ trợ LS123456, LS-123456, LS 123456)
-const ORDER_CODE_REGEX = /\b(LS[\s-_]?[0-9A-Z]{6})\b/i;
+// Regex chuẩn nhận diện & bóc tách mã đơn hàng (hỗ trợ LS123456, LS-123456, LS 123456, MB_LS123456, DON_HANG_LS123456)
+// Sử dụng lookaround boundaries thay vì \b để không bị nuốt bởi dấu gạch dưới (_) trong tên hệ thống / webhook
+const ORDER_CODE_REGEX = /(?<![a-zA-Z0-9])(LS[\s\-_]?[0-9A-Z]{6})(?![a-zA-Z0-9])/i;
 
-// Sinh mã đơn hàng ngẫu nhiên chuẩn e-commerce, cryptographically secure và chống trùng lặp tuyệt đối
+// Sinh mã đơn hàng ngẫu nhiên chuẩn e-commerce, cryptographically secure (crypto.randomBytes), triệt tiêu modulo bias và chống trùng lặp tuyệt đối
 function generateUniqueOrderCode() {
   let code = '';
   let attempts = 0;
-  
+  const isColliding = (c) => activeOrderCodes.has(c) || approvedOrderCodes.has(c) || processingApprovals.has(c);
+
+  // 1. Thử sinh mã 6 chữ số (100000 -> 999999) bằng crypto.randomBytes với kỹ thuật Rejection Sampling (Zero Modulo Bias)
+  const range = 900000;
+  const maxValid = 0xFFFFFFFF - (0xFFFFFFFF % range); // 4,294,500,000
+
   do {
-    // Tạo 6 chữ số ngẫu nhiên cryptographically secure bằng crypto.randomBytes (100000 -> 999999)
-    const randomBytes = crypto.randomBytes(4);
-    const num = (randomBytes.readUInt32BE(0) % 900000) + 100000;
+    let rand;
+    do {
+      rand = crypto.randomBytes(4).readUInt32BE(0);
+    } while (rand >= maxValid);
+
+    const num = 100000 + (rand % range);
     code = `LS${num}`;
     attempts++;
-  } while ((activeOrderCodes.has(code) || approvedOrderCodes.has(code) || processingApprovals.has(code)) && attempts < 50);
+  } while (isColliding(code) && attempts < 50);
 
-  // Nếu quá 50 lần phát hiện trùng lặp (xác suất < 1/10^30), tự động fallback sang mã 6 ký tự Hex có entropy tuyệt đối
-  if (activeOrderCodes.has(code) || approvedOrderCodes.has(code) || processingApprovals.has(code)) {
+  // 2. Nếu sau 50 lần phát hiện trùng (xác suất < 1/10^30), fallback sang mã 6 ký tự Hex có entropy cao và lặp đảm bảo ZERO COLLISION tuyệt đối
+  while (isColliding(code)) {
     const highEntropyHex = crypto.randomBytes(3).toString('hex').toUpperCase();
     code = `LS${highEntropyHex}`;
   }
@@ -174,7 +183,7 @@ function generateOrderCode() {
 
 // Bóc tách và chuẩn hóa mã đơn hàng từ nội dung tin nhắn hoặc SMS/Banking webhook
 function extractOrderCode(text) {
-  if (text === null || text === undefined) return null;
+  if (text === null || text === undefined || typeof text === 'boolean' || typeof text === 'symbol') return null;
   const str = typeof text === 'string' ? text : String(text);
   const input = str.length > 10000 ? str.slice(0, 10000) : str;
   const match = input.match(ORDER_CODE_REGEX);
@@ -183,33 +192,40 @@ function extractOrderCode(text) {
 
 // Kiểm tra mã đơn có đúng cấu trúc LS + 6 ký tự số/chữ hay không
 function isValidOrderCode(code) {
-  if (code === null || code === undefined) return false;
+  if (code === null || code === undefined || typeof code === 'boolean' || typeof code === 'symbol') return false;
   const str = typeof code === 'string' ? code : String(code);
   if (str.length > 50) return false;
   const cleaned = str
     .replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2066-\u2069\x00-\x1F\x7F-\x9F]/g, '')
     .trim()
-    .replace(/[\s-_]/g, '')
+    .replace(/[\s\-_]/g, '')
     .toUpperCase();
   return /^LS[0-9A-Z]{6}$/.test(cleaned);
 }
 
 /**
  * Kiểm tra xem mức giá có phải là dạng báo giá thỏa thuận (0 VNĐ / Custom Dev / Mod / Non-numeric) hay không
- * @param {number|string|null|undefined} amount 
+ * @param {number|string|bigint|null|undefined} amount 
  * @returns {boolean}
  */
 function isNegotiatedPrice(amount) {
-  if (amount === null || amount === undefined || typeof amount === 'boolean') return true;
+  if (amount === null || amount === undefined || typeof amount === 'boolean' || typeof amount === 'symbol') return true;
   if (typeof amount === 'object') return true;
   let num;
   if (typeof amount === 'number') {
     num = amount;
   } else if (typeof amount === 'bigint') {
-    num = Number(amount);
+    return amount <= 0n;
   } else if (typeof amount === 'string') {
-    const cleaned = amount.trim().replace(/[₫đĐ\$\s_]/gi, '').replace(/,/g, '');
+    const raw = amount.trim();
+    if (!raw) return true;
+    let cleaned = raw.replace(/[₫đĐ\$\s_]|vnd|vnđ|usd/gi, '');
     if (!cleaned) return true;
+    if (/^\d{1,3}(\.\d{3})+$/.test(cleaned)) {
+      cleaned = cleaned.replace(/\./g, '');
+    } else {
+      cleaned = cleaned.replace(/,/g, '');
+    }
     num = Number(cleaned);
   } else {
     return true;
@@ -225,13 +241,15 @@ function isNegotiatedPrice(amount) {
  * - Chỉ giữ lại chữ cái A-Z, số 0-9 và khoảng trắng đơn
  * - Chuyển toàn bộ sang chữ in hoa
  * - Cắt ngắn tối đa maxLength (giới hạn cứng không quá 50 ký tự theo chuẩn Napas Tag 62 Subtag 08)
- * @param {string|number} text - Chuỗi văn bản cần chuẩn hóa
+ * - Trim loại bỏ triệt để trailing whitespace sau khi cắt lát
+ * @param {string|number|bigint} text - Chuỗi văn bản cần chuẩn hóa
  * @param {number} maxLength - Độ dài tối đa (Mặc định 50 ký tự, giới hạn tối đa 50)
  * @returns {string}
  */
 function sanitizeVietQRText(text, maxLength = 50) {
-  if (text === null || text === undefined || typeof text === 'boolean') return '';
-  const rawStr = typeof text === 'string' ? text : String(text);
+  if (text === null || text === undefined || typeof text === 'boolean' || typeof text === 'symbol') return '';
+  if (typeof text !== 'string' && typeof text !== 'number' && typeof text !== 'bigint') return '';
+  const rawStr = String(text);
   const str = rawStr.length > 500 ? rawStr.slice(0, 500) : rawStr;
   if (!str.trim()) return '';
   
@@ -252,7 +270,8 @@ function sanitizeVietQRText(text, maxLength = 50) {
     .replace(/\s+/g, ' ')            // Gộp khoảng trắng liên tiếp
     .trim()
     .toUpperCase()
-    .slice(0, safeMaxLen);
+    .slice(0, safeMaxLen)
+    .trim();
 }
 
 /**
@@ -288,15 +307,14 @@ function sanitizeCustomerName(name, maxLength = 32, fallback = 'Khách Hàng') {
  * @returns {string|null}
  */
 function sanitizeOrderCode(rawCode) {
-  if (rawCode === null || rawCode === undefined) return null;
+  if (rawCode === null || rawCode === undefined || typeof rawCode === 'boolean' || typeof rawCode === 'symbol') return null;
   const rawStr = typeof rawCode === 'string' ? rawCode : String(rawCode);
   const str = rawStr.length > 50 ? rawStr.slice(0, 50) : rawStr;
   const cleaned = str
     .replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2066-\u2069\x00-\x1F\x7F-\x9F]/g, '')
     .trim()
     .replace(/[\s\-_]/g, '')
-    .toUpperCase()
-    .slice(0, 12);
+    .toUpperCase();
   return isValidOrderCode(cleaned) ? cleaned : null;
 }
 
@@ -366,20 +384,21 @@ function sanitizeTranscriptControlChars(text) {
   const rawStr = typeof text === 'string' ? text : String(text);
   const str = rawStr.length > 50000 ? rawStr.slice(0, 50000) : rawStr;
   return str
-    // 1. Chuẩn hóa ký tự xuống dòng (\r\n, \r, \u2028, \u2029) thành \n chuẩn
+    // 1. Chuẩn hóa ký tự xuống dòng (\r\n, \r, \u2028, \u2029, \u0085 NEL) thành \n chuẩn
     // Chống Carriage Return Injection (\r) ghi đè dòng trước trên terminal/cat logs
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
-    .replace(/[\u2028\u2029]/g, '\n')
-    // 2. Loại bỏ mã màu và chuỗi thoát lệnh ANSI (CSI, OSC sequences) chống terminal injection
-    .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '')
-    // 3. Loại bỏ ký tự Unicode BiDi Override (chống Trojan Source / visual spoofing / RTL overrides)
-    .replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
-    // 4. Loại bỏ ký tự tàng hình / zero-width space / BOM / Annotation Controls
-    .replace(/[\u180E\u200B-\u200D\u2060\uFEFF\uFFF9-\uFFFB]/g, '')
-    // 5. Loại bỏ Unicode Tag Characters & Variation Selector exploits
-    .replace(/[\uDB40][\uDC00-\uDC7F]/g, '')
-    // 6. Loại bỏ ký tự điều khiển không in được (giữ lại \t và \n)
+    .replace(/[\u2028\u2029\u0085]/g, '\n')
+    // 2. Loại bỏ mã màu và chuỗi thoát lệnh ANSI (CSI, OSC, DCS, ST sequences) chống terminal injection
+    .replace(/\x1B(?:\][^\x07\x1B]*?(?:\x07|\x1B\\|$)|\[[0-?]*[ -/]*[@-~]|[P^_][^\x1B]*?(?:\x1B\\|$)|[@-Z\\-_])/g, '')
+    // 3. Loại bỏ ký tự Unicode BiDi Override & directional marks (chống Trojan Source / visual spoofing / RTL overrides)
+    .replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\u202F\u08E2]/g, '')
+    // 4. Loại bỏ ký tự tàng hình / zero-width space / BOM / Annotation Controls / Soft Hyphen
+    .replace(/[\u180E\u200B-\u200D\u2060\uFEFF\uFFF9-\uFFFB\u00AD]/g, '')
+    // 5. Loại bỏ Unicode Tag Characters & Variation Selector exploits (chống ẩn mã/spoofing)
+    .replace(/[\uFE00-\uFE0F]/g, '')
+    .replace(/[\uDB40][\uDC00-\uDDEF]/g, '')
+    // 6. Loại bỏ ký tự điều khiển không in được (giữ lại \t 0x09 và \n 0x0A)
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
 }
 
@@ -392,11 +411,28 @@ function sanitizeTranscriptControlChars(text) {
 function sanitizeSingleLineHeader(text, maxLen = 300) {
   if (text === null || text === undefined) return 'N/A';
   let str = sanitizeTranscriptControlChars(text);
-  str = str.replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
+  str = str.replace(/[\r\n\u2028\u2029\u0085]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (maxLen && str.length > maxLen) {
     str = str.slice(0, maxLen).trim();
   }
   return str || 'N/A';
+}
+
+/**
+ * Làm sạch liên kết URL trong Transcript chống CRLF injection và khoảng trắng/ký tự điều khiển
+ * @param {string} url - Chuỗi URL
+ * @param {number} maxLen - Giới hạn độ dài
+ * @returns {string} URL an toàn
+ */
+function sanitizeUrlForTranscript(url, maxLen = 1000) {
+  if (!url || typeof url !== 'string') return '';
+  let str = sanitizeTranscriptControlChars(url)
+    .replace(/[\r\n\s\x00-\x1F\x7F-\x9F]+/g, '')
+    .trim();
+  if (maxLen && str.length > maxLen) {
+    str = str.slice(0, maxLen);
+  }
+  return str;
 }
 
 /**
@@ -430,23 +466,27 @@ function sanitizeMarkdownForEmbed(text, maxLen = 1000) {
  */
 function redactSensitiveData(text) {
   if (!text || typeof text !== 'string') return text || '';
-  const input = text.length > 10000 ? text.slice(0, 10000) : text;
+  const input = text.length > 50000 ? text.slice(0, 50000) : text;
   return input
-    // 1. Discord Bot Token & MFA tokens
-    .replace(/\b(?:[a-zA-Z0-9_-]{24,28}\.[a-zA-Z0-9_-]{6,7}\.[a-zA-Z0-9_-]{27,38}|mfa\.[a-zA-Z0-9_-]{70,})\b/g, '***[REDACTED_DISCORD_TOKEN]***')
+    // 1. Discord Bot Token & MFA tokens (Hỗ trợ token modern với HMAC 27-45 ký tự base64url)
+    .replace(/\b(?:[a-zA-Z0-9_-]{24,32}\.[a-zA-Z0-9_-]{6,8}\.[a-zA-Z0-9_-]{27,45}|mfa\.[a-zA-Z0-9_-]{60,100})\b/g, '***[REDACTED_DISCORD_TOKEN]***')
     // 2. Discord Webhook URL with secret token: https://discord.com/api/webhooks/12345/abcdef...
     .replace(/(https?:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/)[A-Za-z0-9_-]+/gi, '$1***[REDACTED_WEBHOOK_TOKEN]***')
-    // 3. AI API Keys (OpenAI, Claude/Anthropic, Gemini, Groq, HuggingFace)
-    .replace(/\b(sk-(?:ant-api\d\d-[a-zA-Z0-9_-]+|proj-[a-zA-Z0-9_-]+|[a-zA-Z0-9]{20,}))\b/g, '***[REDACTED_API_KEY]***')
-    .replace(/\b(AIzaSy[a-zA-Z0-9_-]{25,45})\b/g, '***[REDACTED_API_KEY]***')
-    .replace(/\b(gsk_[a-zA-Z0-9]{40,64})\b/g, '***[REDACTED_API_KEY]***')
+    // 3. AI API Keys (OpenAI sk-proj/sk-admin/sk-svcacct/sk-, Claude/Anthropic sk-ant-, Gemini AIza, Groq gsk_, HuggingFace hf_, Perplexity pplx-)
+    .replace(/\b(?:sk-(?:proj-|admin-|svcacct-)[a-zA-Z0-9_-]{32,160}|sk-[a-zA-Z0-9]{20,64})\b/g, '***[REDACTED_API_KEY]***')
+    .replace(/\bsk-ant-(?:api\d\d-|sid\d\d-)?[a-zA-Z0-9_-]{20,120}\b/g, '***[REDACTED_API_KEY]***')
+    .replace(/\b(AIza[0-9A-Za-z_-]{35})\b/g, '***[REDACTED_API_KEY]***')
+    .replace(/\b(gsk_[a-zA-Z0-9_-]{40,70})\b/g, '***[REDACTED_API_KEY]***')
     .replace(/\b(hf_[a-zA-Z0-9]{34,40})\b/g, '***[REDACTED_API_KEY]***')
-    // 4. GitHub Tokens (ghp_, gho_, ghu_, ghs_, ghr_, github_pat_)
-    .replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{30,45}\b/g, '***[REDACTED_GITHUB_TOKEN]***')
+    .replace(/\b(pplx-[a-zA-Z0-9]{40,})\b/g, '***[REDACTED_API_KEY]***')
+    // 4. GitHub Tokens (ghp_, gho_, ghu_, ghs_, ghr_, ghb_, ghe_, github_pat_)
+    .replace(/\b(?:ghp|gho|ghu|ghs|ghr|ghb|ghe)_[a-zA-Z0-9]{30,60}\b/g, '***[REDACTED_GITHUB_TOKEN]***')
     .replace(/\bgithub_pat_[a-zA-Z0-9_]{30,100}\b/g, '***[REDACTED_GITHUB_TOKEN]***')
-    // 5. Cloud, Payment & Stripe API Keys
-    .replace(/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, '***[REDACTED_AWS_KEY]***')
-    .replace(/\b(?:sk_live|rk_live|pk_live|sk_test)_[0-9a-zA-Z]{24,34}\b/g, '***[REDACTED_STRIPE_KEY]***')
+    // 5. Cloud, AWS & Payment Keys
+    .replace(/\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b/g, '***[REDACTED_AWS_KEY]***')
+    .replace(/(?<=\b(?:aws_secret_access_key|aws_secret_key|secret_access_key|secret_key|aws_key)\s*[:=]\s*)[A-Za-z0-9\/+=]{40}\b/gi, '***[REDACTED_AWS_KEY]***')
+    .replace(/(?<=\b(?:aws_session_token|session_token)\s*[:=]\s*)[A-Za-z0-9\/+=]{100,}\b/gi, '***[REDACTED_AWS_KEY]***')
+    .replace(/\b(?:sk_live|rk_live|pk_live|sk_test|pk_test)_[0-9a-zA-Z]{24,34}\b/g, '***[REDACTED_STRIPE_KEY]***')
     // 6. Database Connection Strings (PostgreSQL, MySQL, MongoDB, Redis passwords)
     .replace(/\b((?:postgres(?:ql)?|mongodb(?:\+srv)?|mysql|redis(?:s)?):\/\/[^\s:@]+:)[^\s@]+(@[^\s\/]+)/gi, '$1***[REDACTED_DB_PASSWORD]***$2')
     // 7. URL Credentials (http://user:pass@host)
@@ -455,84 +495,175 @@ function redactSensitiveData(text) {
     .replace(/(?<=\b(?:bearer|authorization\s*:\s*bearer)\s+)[a-zA-Z0-9_.\-~+/]{20,}/gi, '***[REDACTED_TOKEN]***')
     // 9. Private RSA / OpenSSH / PGP / EC Keys
     .replace(/-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/gi, '[REDACTED_PRIVATE_KEY]')
-    // 10. Credit / Debit Card Numbers (Visa, Mastercard, Amex, Discover 13-19 digits)
-    .replace(/\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12}|(?:[0-9]{4}[ -]){3}[0-9]{4})\b/g, '[REDACTED_CARD_NUMBER]')
+    // 10. Credit / Debit & Napas Bank Cards (Visa, Mastercard, Napas 9704, Amex, Discover 13-19 digits)
+    .replace(/\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|2[2-7][0-9]{14}|9704[0-9]{12,15}|3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12}|(?:[0-9]{4}[ -]){3}[0-9]{4}|3[47][0-9]{2}[ -][0-9]{6}[ -][0-9]{5})\b/g, '[REDACTED_CARD_NUMBER]')
     // 11. CVV / CVC Security Codes
     .replace(/(?<=\b(?:cvv|cvc|cvv2|cvc2)\s*[:=]\s*)\d{3,4}\b/gi, '[REDACTED_CVV]')
     // 12. Banking OTP & Verification Codes
     .replace(/(?<=\b(?:otp|mã\s*otp|mã\s*xác\s*thực|mã\s*xác\s*minh)\s*[:=]?\s*)\d{4,8}\b/gi, '[REDACTED_OTP]')
-    // 13. Passwords & Sensitive Fields with labeled keywords
-    .replace(/(?<=\b(?:password|passwd|pass|matkhau|mật\s*khẩu|api[_-]?secret|client[_-]?secret|db_pass|database_password)\s*[:=]\s*)(\S+)/gi, '[REDACTED_SECRET]');
+    // 13. Bank Account Numbers (STK ngân hàng Việt Nam)
+    .replace(/(?<=\b(?:stk|số\s*tài\s*khoản|so\s*tai\s*khoan|bank\s*account)\s*[:=]?\s*)\d{6,18}\b/gi, '[REDACTED_BANK_ACCOUNT]')
+    // 14. Passwords & Sensitive Fields (Tiếng Việt & English)
+    .replace(/(?<=\b(?:password|passwd|pass|matkhau|mật\s*khẩu|mk|api[_-]?secret|client[_-]?secret|db_pass|database_password|app_password)\s*(?:[:=]|là\s*[:=]?)\s*)(['"]?)([^'"\s\n]+)\1/gi, '[REDACTED_SECRET]');
 }
 
-// Định dạng tiền tệ VND chuẩn Việt Nam (Làm tròn số nguyên, phân tách hàng nghìn dấu chấm, chống -0 VNĐ & Non-numeric)
+// Định dạng tiền tệ VND chuẩn Việt Nam (Làm tròn số nguyên, phân tách hàng nghìn dấu chấm, chống -0 VNĐ, NaN, Huge Integers & Non-numeric)
 function formatVND(amount) {
-  if (amount === null || amount === undefined || typeof amount === 'boolean') return '0 VNĐ';
+  if (amount === null || amount === undefined || typeof amount === 'boolean' || typeof amount === 'symbol') return '0 VNĐ';
   if (typeof amount === 'object' && !Array.isArray(amount) && !(amount instanceof Number)) return '0 VNĐ';
-  if (Array.isArray(amount)) return '0 VNĐ';
+  if (Array.isArray(amount) || typeof amount === 'function') return '0 VNĐ';
 
-  let num;
-  if (typeof amount === 'number') {
-    num = amount;
-  } else if (typeof amount === 'bigint') {
-    num = Number(amount);
-  } else if (typeof amount === 'string') {
-    const cleaned = amount.trim().replace(/[₫đĐ\s_]|vnd|vnđ/gi, '').replace(/,/g, '');
+  // 1. Xử lý BigInt trực tiếp để bảo toàn 100% độ chính xác tuyệt đối cho số nguyên cực lớn
+  if (typeof amount === 'bigint') {
+    if (amount === 0n) return '0 VNĐ';
+    const isNegative = amount < 0n;
+    const absVal = isNegative ? -amount : amount;
+    const formatted = new Intl.NumberFormat('vi-VN').format(absVal);
+    return isNegative ? `-${formatted} VNĐ` : `${formatted} VNĐ`;
+  }
+
+  // 2. Xử lý chuỗi (String input)
+  if (typeof amount === 'string') {
+    const raw = amount.trim();
+    if (!raw) return '0 VNĐ';
+    let cleaned = raw.replace(/[₫đĐ\s_]|vnd|vnđ/gi, '');
     if (!cleaned) return '0 VNĐ';
-    num = Number(cleaned);
-  } else {
-    return '0 VNĐ';
+
+    // Nhận diện dấu phân cách hàng nghìn kiểu Việt Nam: 30.000 hoặc 1.000.000
+    if (/^-?\d{1,3}(\.\d{3})+$/.test(cleaned)) {
+      cleaned = cleaned.replace(/\./g, '');
+    } else {
+      cleaned = cleaned.replace(/,/g, '');
+    }
+
+    // Nếu là chuỗi số nguyên thuần túy (có thể kèm dấu âm)
+    if (/^-?\d+$/.test(cleaned)) {
+      try {
+        const big = BigInt(cleaned);
+        if (big === 0n) return '0 VNĐ';
+        const isNegative = big < 0n;
+        const absVal = isNegative ? -big : big;
+        const formatted = new Intl.NumberFormat('vi-VN').format(absVal);
+        return isNegative ? `-${formatted} VNĐ` : `${formatted} VNĐ`;
+      } catch {
+        // Fallback sang Number nếu BigInt lỗi cú pháp
+      }
+    }
+
+    const num = Number(cleaned);
+    if (!Number.isFinite(num)) return '0 VNĐ';
+    const rounded = Math.round(num);
+    if (rounded === 0 || Object.is(rounded, -0)) return '0 VNĐ';
+    const absVal = Math.abs(rounded);
+    const formatted = new Intl.NumberFormat('vi-VN').format(absVal);
+    return rounded < 0 ? `-${formatted} VNĐ` : `${formatted} VNĐ`;
   }
 
-  if (!Number.isFinite(num)) {
-    return '0 VNĐ';
+  // 3. Xử lý kiểu số (Number input)
+  if (typeof amount === 'number') {
+    if (!Number.isFinite(amount)) return '0 VNĐ';
+    if (amount === 0 || Object.is(amount, -0)) return '0 VNĐ';
+
+    const rounded = Math.round(amount);
+    if (rounded === 0 || Object.is(rounded, -0)) return '0 VNĐ';
+
+    // Nếu vượt quá giới hạn an toàn Number.MAX_SAFE_INTEGER, chuyển sang BigInt
+    if (Math.abs(rounded) > Number.MAX_SAFE_INTEGER) {
+      try {
+        const big = BigInt(Math.trunc(amount));
+        const isNegative = big < 0n;
+        const absVal = isNegative ? -big : big;
+        const formatted = new Intl.NumberFormat('vi-VN').format(absVal);
+        return isNegative ? `-${formatted} VNĐ` : `${formatted} VNĐ`;
+      } catch {}
+    }
+
+    const absVal = Math.abs(rounded);
+    const formatted = new Intl.NumberFormat('vi-VN').format(absVal);
+    return rounded < 0 ? `-${formatted} VNĐ` : `${formatted} VNĐ`;
   }
 
-  const rounded = Math.round(num);
-  if (rounded === 0 || Object.is(rounded, -0)) {
-    return '0 VNĐ';
-  }
-
-  const absVal = Math.abs(rounded);
-  const formatted = new Intl.NumberFormat('vi-VN').format(absVal);
-  return rounded < 0 ? `-${formatted} VNĐ` : `${formatted} VNĐ`;
+  return '0 VNĐ';
 }
 
-// Định dạng tiền tệ USD chuẩn quốc tế (2 chữ số thập phân, phân tách hàng nghìn en-US, chống -$0.00 USD & Non-numeric)
+// Định dạng tiền tệ USD chuẩn quốc tế (2 chữ số thập phân, phân tách hàng nghìn en-US, chống -$0.00 USD, NaN, Huge Numbers & Non-numeric)
 function formatUSD(amount) {
-  if (amount === null || amount === undefined || typeof amount === 'boolean') return '$0.00 USD';
+  if (amount === null || amount === undefined || typeof amount === 'boolean' || typeof amount === 'symbol') return '$0.00 USD';
   if (typeof amount === 'object' && !Array.isArray(amount) && !(amount instanceof Number)) return '$0.00 USD';
-  if (Array.isArray(amount)) return '$0.00 USD';
+  if (Array.isArray(amount) || typeof amount === 'function') return '$0.00 USD';
 
-  let num;
-  if (typeof amount === 'number') {
-    num = amount;
-  } else if (typeof amount === 'bigint') {
-    num = Number(amount);
-  } else if (typeof amount === 'string') {
-    const cleaned = amount.trim().replace(/[\$\s_]|usd/gi, '').replace(/,/g, '');
+  // 1. Xử lý BigInt trực tiếp với định dạng 2 chữ số thập phân (.00)
+  if (typeof amount === 'bigint') {
+    if (amount === 0n) return '$0.00 USD';
+    const isNegative = amount < 0n;
+    const absVal = isNegative ? -amount : amount;
+    const formatted = new Intl.NumberFormat('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(absVal);
+    return isNegative ? `-$${formatted} USD` : `$${formatted} USD`;
+  }
+
+  // 2. Xử lý chuỗi (String input)
+  if (typeof amount === 'string') {
+    const raw = amount.trim();
+    if (!raw) return '$0.00 USD';
+    let cleaned = raw.replace(/[\$\s_]|usd/gi, '');
     if (!cleaned) return '$0.00 USD';
-    num = Number(cleaned);
-  } else {
-    return '$0.00 USD';
+
+    // Nếu là chuỗi số nguyên thuần túy (không có phần thập phân)
+    if (/^-?\d+$/.test(cleaned)) {
+      try {
+        const big = BigInt(cleaned);
+        if (big === 0n) return '$0.00 USD';
+        const isNegative = big < 0n;
+        const absVal = isNegative ? -big : big;
+        const formatted = new Intl.NumberFormat('en-US', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2
+        }).format(absVal);
+        return isNegative ? `-$${formatted} USD` : `$${formatted} USD`;
+      } catch {}
+    }
+
+    // Bỏ dấu phẩy phân cách hàng nghìn kiểu US
+    cleaned = cleaned.replace(/,/g, '');
+    const num = Number(cleaned);
+    if (!Number.isFinite(num)) return '$0.00 USD';
+
+    const absVal = Math.abs(num);
+    // Nếu giá trị làm tròn ở 2 chữ số thập phân bằng 0 (ví dụ -0.001 hoặc 0.004)
+    if (Math.round(absVal * 100) === 0 || Object.is(num, -0)) {
+      return '$0.00 USD';
+    }
+
+    const formatted = new Intl.NumberFormat('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(absVal);
+
+    return num < 0 ? `-$${formatted} USD` : `$${formatted} USD`;
   }
 
-  if (!Number.isFinite(num)) {
-    return '$0.00 USD';
+  // 3. Xử lý kiểu số (Number input)
+  if (typeof amount === 'number') {
+    if (!Number.isFinite(amount)) return '$0.00 USD';
+    if (amount === 0 || Object.is(amount, -0)) return '$0.00 USD';
+
+    const absVal = Math.abs(amount);
+    if (Math.round(absVal * 100) === 0) {
+      return '$0.00 USD';
+    }
+
+    const formatted = new Intl.NumberFormat('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(absVal);
+
+    return amount < 0 ? `-$${formatted} USD` : `$${formatted} USD`;
   }
 
-  const absVal = Math.abs(num);
-  // Nếu giá trị làm tròn ở 2 chữ số thập phân bằng 0 (ví dụ -0.001 hoặc 0.004)
-  if (Math.round(absVal * 100) === 0) {
-    return '$0.00 USD';
-  }
-
-  const formatted = new Intl.NumberFormat('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  }).format(absVal);
-
-  return num < 0 ? `-$${formatted} USD` : `$${formatted} USD`;
+  return '$0.00 USD';
 }
 
 // Client HTTP chuyên dụng cho VietQR & Banking với timeout 5s và giới hạn kích thước 5MB
@@ -549,22 +680,100 @@ const paymentHttpClient = axios.create({
 const vietQRBufferCache = new Map(); // qrUrl -> { buffer: Buffer, cachedAt: number, size: number }
 const VIETQR_CACHE_TTL = 10 * 60 * 1000; // 10 phút TTL
 const VIETQR_CACHE_MAX_SIZE = 100; // Tối đa 100 ảnh QR trong bộ nhớ RAM
+const VIETQR_CACHE_MAX_BYTES = 15 * 1024 * 1024; // Giới hạn 15MB RAM cho cache QR (Discloud 100MB Watchdog)
 
 // Deduplication map cho các request HTTP đang xử lý dở (In-flight request coalescing)
 const pendingVietQRRequests = new Map(); // qrUrl -> Promise<Buffer|null>
 
-// Circuit Breaker / Negative Cache cho các URL lỗi/offline để tránh spam request liên tục khi ngân hàng/VietQR bảo trì
+// Negative cache per-URL (chống spam request liên tục vào cùng một URL lỗi)
 const failedVietQRUrls = new Map(); // qrUrl -> { failedAt: number, reason: string }
-const VIETQR_FAILURE_TTL = 30 * 1000; // 30 giây cooldown nếu VietQR offline
+const VIETQR_FAILURE_TTL = 30 * 1000; // 30 giây cooldown nếu URL hỏng
 const VIETQR_FAILED_MAX_SIZE = 100; // Tối đa 100 URL lỗi trong RAM chống tràn bộ nhớ
 
+// =========================================================================
+// VIETQR GATEWAY CIRCUIT BREAKER (BẢO VỆ CỔNG THANH TOÁN KHI BẢO TRÌ/OFFLINE)
+// =========================================================================
+const vietQRCircuitBreaker = {
+  state: 'CLOSED', // 'CLOSED' (hoạt động bình thường), 'OPEN' (ngắt mạch / bảo trì), 'HALF_OPEN' (thử nghiệm canary)
+  consecutiveFailures: 0,
+  failureThreshold: 3, // 3 lỗi liên tiếp từ gateway sẽ kích hoạt ngắt mạch fail-fast
+  cooldownMs: 30000, // 30s thử lại (cooldown window)
+  lastFailureTime: 0,
+  lastStateChange: Date.now(),
+  lastErrorReason: '',
+
+  canRequest() {
+    if (this.state === 'CLOSED') return true;
+    const now = Date.now();
+    if (this.state === 'OPEN') {
+      if (now - this.lastFailureTime >= this.cooldownMs) {
+        this.state = 'HALF_OPEN';
+        this.lastStateChange = now;
+        console.log('🔄 [VietQR Circuit Breaker] Hết thời gian cooldown. Chuyển sang HALF_OPEN để gửi canary probe kiểm tra gateway.');
+        return true; // Cho phép 1 request thử nghiệm đi qua
+      }
+      return false; // Fail-fast ngay lập tức, không gửi request HTTP tốn 5s timeout khi gateway đang bảo trì
+    }
+    // HALF_OPEN: cho phép canary probe
+    return true;
+  },
+
+  recordSuccess() {
+    if (this.state !== 'CLOSED' || this.consecutiveFailures > 0) {
+      console.log(`✅ [VietQR Circuit Breaker] Cổng VietQR đã phục hồi bình thường! (State: ${this.state} -> CLOSED)`);
+    }
+    this.consecutiveFailures = 0;
+    this.state = 'CLOSED';
+    this.lastErrorReason = '';
+    this.lastStateChange = Date.now();
+  },
+
+  recordFailure(reason) {
+    this.consecutiveFailures++;
+    this.lastFailureTime = Date.now();
+    this.lastErrorReason = String(reason || 'Unknown gateway error');
+
+    if (this.state === 'HALF_OPEN') {
+      // Canary probe thất bại -> Quay lại OPEN và tính lại cooldown
+      this.state = 'OPEN';
+      this.lastStateChange = Date.now();
+      console.warn(`⚠️ [VietQR Circuit Breaker] Canary probe thất bại (${this.lastErrorReason}). Tiếp tục OPEN trong ${this.cooldownMs / 1000}s.`);
+    } else if (this.consecutiveFailures >= this.failureThreshold && this.state === 'CLOSED') {
+      this.state = 'OPEN';
+      this.lastStateChange = Date.now();
+      console.warn(`⚠️ [VietQR Circuit Breaker] Phát hiện ${this.consecutiveFailures} lỗi gateway liên tiếp (${this.lastErrorReason}). Kích hoạt OPEN (fail-fast) trong ${this.cooldownMs / 1000}s.`);
+    }
+  },
+
+  reset() {
+    this.state = 'CLOSED';
+    this.consecutiveFailures = 0;
+    this.lastFailureTime = 0;
+    this.lastErrorReason = '';
+    this.lastStateChange = Date.now();
+  }
+};
+
 function getVietQRCacheStats() {
+  let totalBytes = 0;
+  for (const item of vietQRBufferCache.values()) {
+    totalBytes += (item.size || item.buffer?.length || 0);
+  }
   return {
     size: vietQRBufferCache.size,
     maxSize: VIETQR_CACHE_MAX_SIZE,
+    totalBytes,
+    maxBytes: VIETQR_CACHE_MAX_BYTES,
     ttlMs: VIETQR_CACHE_TTL,
     pendingRequests: pendingVietQRRequests.size,
-    failedUrlsCount: failedVietQRUrls.size
+    failedUrlsCount: failedVietQRUrls.size,
+    circuitBreaker: {
+      state: vietQRCircuitBreaker.state,
+      consecutiveFailures: vietQRCircuitBreaker.consecutiveFailures,
+      cooldownMs: vietQRCircuitBreaker.cooldownMs,
+      lastFailureTime: vietQRCircuitBreaker.lastFailureTime,
+      lastErrorReason: vietQRCircuitBreaker.lastErrorReason
+    }
   };
 }
 
@@ -572,6 +781,7 @@ function clearVietQRCache() {
   vietQRBufferCache.clear();
   pendingVietQRRequests.clear();
   failedVietQRUrls.clear();
+  vietQRCircuitBreaker.reset();
 }
 
 // Aliases cho tên chuẩn
@@ -588,20 +798,41 @@ function recordFailedVietQRUrl(url, reason) {
   failedVietQRUrls.set(url, { failedAt: Date.now(), reason: String(reason || 'Unknown error') });
 }
 
-// Xây dựng URL VietQR chuẩn RFC 3986 với URLSearchParams và sanitize an toàn
+// Xây dựng URL VietQR chuẩn RFC 3986 với URLSearchParams, %20 encoding thay vì +, sanitize an toàn
 function generateVietQRUrl({ bankId, accountNo, template = 'compact2', amount = null, addInfo = null, accountName = null } = {}) {
-  const cleanBank = encodeURIComponent((bankId || BANK_CONFIG.BANK_ID || 'MB').trim().replace(/[^a-zA-Z0-9]/g, ''));
-  const cleanAcc = encodeURIComponent((accountNo || BANK_CONFIG.ACCOUNT_NO || '').trim().replace(/[^a-zA-Z0-9]/g, ''));
-  const cleanTemplate = encodeURIComponent((template || 'compact2').trim().replace(/[^a-zA-Z0-9]/g, '').toLowerCase());
+  const bankRaw = (bankId || BANK_CONFIG.BANK_ID || 'MB').trim().replace(/[^a-zA-Z0-9]/g, '');
+  const cleanBank = encodeURIComponent(bankRaw || 'MB');
+
+  const accRaw = (accountNo || BANK_CONFIG.ACCOUNT_NO || '').trim().replace(/[^a-zA-Z0-9]/g, '');
+  const cleanAcc = encodeURIComponent(accRaw || (BANK_CONFIG.ACCOUNT_NO || '').trim().replace(/[^a-zA-Z0-9]/g, ''));
+
+  const templateRaw = (template || 'compact2').trim().replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  const cleanTemplate = encodeURIComponent(templateRaw || 'compact2');
 
   const baseUrl = `https://img.vietqr.io/image/${cleanBank}-${cleanAcc}-${cleanTemplate}.png`;
   const params = new URLSearchParams();
 
   // Chỉ thêm tham số amount nếu số tiền > 0 và hợp lệ (tự động bỏ qua đối với 0 VND / báo giá thỏa thuận / non-numeric)
   if (amount !== null && amount !== undefined && !isNegotiatedPrice(amount)) {
-    const parsedAmount = typeof amount === 'number' ? amount : Number(amount);
-    if (Number.isFinite(parsedAmount) && parsedAmount > 0) {
-      params.append('amount', Math.round(parsedAmount).toString());
+    let parsedAmount = null;
+    if (typeof amount === 'number' && Number.isFinite(amount) && amount > 0) {
+      parsedAmount = Math.round(amount);
+    } else if (typeof amount === 'bigint' && amount > 0n) {
+      parsedAmount = amount.toString();
+    } else if (typeof amount === 'string') {
+      let cleaned = amount.trim().replace(/[₫đĐ\$\s_]|vnd|vnđ|usd/gi, '');
+      if (/^\d{1,3}(\.\d{3})+$/.test(cleaned)) {
+        cleaned = cleaned.replace(/\./g, '');
+      } else {
+        cleaned = cleaned.replace(/,/g, '');
+      }
+      const n = Number(cleaned);
+      if (Number.isFinite(n) && n > 0) {
+        parsedAmount = Math.round(n);
+      }
+    }
+    if (parsedAmount !== null && Number(parsedAmount) > 0 && Number(parsedAmount) <= 9999999999999) {
+      params.append('amount', String(parsedAmount));
     }
   }
 
@@ -611,12 +842,14 @@ function generateVietQRUrl({ bankId, accountNo, template = 'compact2', amount = 
       params.append('addInfo', sanitizedMemo);
     }
   }
+
   const name = sanitizeVietQRText(String(accountName || BANK_CONFIG.ACCOUNT_NAME || ''), 50);
   if (name) {
     params.append('accountName', name);
   }
 
-  const queryStr = params.toString();
+  // Chuyển dấu '+' thành '%20' theo chuẩn RFC 3986 / VietQR spec để tương thích 100% với VietQR Image Gateway
+  const queryStr = params.toString().replace(/\+/g, '%20');
   return queryStr ? `${baseUrl}?${queryStr}` : baseUrl;
 }
 
@@ -629,7 +862,7 @@ async function fetchVietQRBuffer(qrUrl) {
   // 1. Kiểm tra Cache RAM trước (kèm LRU position refresh)
   const cached = vietQRBufferCache.get(qrUrl);
   if (cached) {
-    if (Date.now() - cached.cachedAt < VIETQR_CACHE_TTL && Buffer.isBuffer(cached.buffer)) {
+    if (Date.now() - (cached.cachedAt || 0) < VIETQR_CACHE_TTL && Buffer.isBuffer(cached.buffer)) {
       // LRU refresh: Xóa và gán lại để đưa lên vị trí mới nhất (MRU)
       vietQRBufferCache.delete(qrUrl);
       vietQRBufferCache.set(qrUrl, cached);
@@ -638,16 +871,22 @@ async function fetchVietQRBuffer(qrUrl) {
     vietQRBufferCache.delete(qrUrl);
   }
 
-  // 2. Kiểm tra Cooldown bảo trì / lỗi gần đây (Circuit Breaker / Negative Cache)
+  // 2. Kiểm tra Circuit Breaker toàn cục của Gateway
+  if (!vietQRCircuitBreaker.canRequest()) {
+    // Fail-fast ngay lập tức, không gửi request HTTP tốn 5s timeout khi gateway đang bảo trì/offline
+    return null;
+  }
+
+  // 3. Kiểm tra Negative Cache theo từng URL cụ thể
   const failed = failedVietQRUrls.get(qrUrl);
   if (failed) {
-    if (Date.now() - failed.failedAt < VIETQR_FAILURE_TTL) {
+    if (Date.now() - (failed.failedAt || 0) < VIETQR_FAILURE_TTL) {
       return null;
     }
     failedVietQRUrls.delete(qrUrl);
   }
 
-  // 3. In-flight Request Deduplication: Chia sẻ cùng Promise nếu request cho qrUrl này đang bay
+  // 4. In-flight Request Deduplication: Chia sẻ cùng Promise nếu request cho qrUrl này đang bay
   if (pendingVietQRRequests.has(qrUrl)) {
     return pendingVietQRRequests.get(qrUrl);
   }
@@ -661,22 +900,24 @@ async function fetchVietQRBuffer(qrUrl) {
 
       const contentType = String(res.headers['content-type'] || res.headers['Content-Type'] || '').toLowerCase();
       
-      // 1. Kiểm tra content-type bắt buộc phải là image (tránh nhận nhầm HTML/JSON error từ CDN)
+      // Kiểm tra content-type bắt buộc phải là image (tránh nhận nhầm HTML/JSON error từ CDN)
       if (contentType && !contentType.startsWith('image/')) {
         console.warn(`⚠️ [VietQR Warning] Phản hồi từ ${qrUrl} không phải ảnh (${contentType}). Chuyển sang fallback URL.`);
         recordFailedVietQRUrl(qrUrl, `Invalid contentType: ${contentType}`);
+        vietQRCircuitBreaker.recordFailure(`Invalid contentType: ${contentType}`);
         return null;
       }
 
       if (!res.data || res.data.length < 500) {
         console.warn(`⚠️ [VietQR Warning] Dữ liệu ảnh quá nhỏ (${res.data?.length || 0} bytes).`);
         recordFailedVietQRUrl(qrUrl, 'Payload too small');
+        vietQRCircuitBreaker.recordFailure('Payload too small');
         return null;
       }
 
       const buffer = Buffer.from(res.data);
 
-      // 2. Kiểm tra Magic Bytes tiêu chuẩn của ảnh (PNG: 89 50 4E 47, JPEG: FF D8 FF, GIF: 47 49 46, WebP: RIFF...WEBP)
+      // Kiểm tra Magic Bytes tiêu chuẩn của ảnh (PNG, JPEG, GIF, WebP)
       const isPng = buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47;
       const isJpeg = buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF;
       const isGif = buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46;
@@ -685,17 +926,38 @@ async function fetchVietQRBuffer(qrUrl) {
       if (!isPng && !isJpeg && !isGif && !isWebp) {
         console.warn(`⚠️ [VietQR Warning] Định dạng Magic Bytes không phải ảnh từ ${qrUrl}. Có thể là HTML error page trả về status 200.`);
         recordFailedVietQRUrl(qrUrl, 'Invalid magic bytes');
+        vietQRCircuitBreaker.recordFailure('Invalid magic bytes');
         return null;
       }
 
-      // Xóa khỏi cache lỗi nếu tải thành công
+      // Giao dịch HTTP thành công -> Báo thành công cho Circuit Breaker
+      vietQRCircuitBreaker.recordSuccess();
       failedVietQRUrls.delete(qrUrl);
 
-      // Lưu vào Cache RAM với LRU Eviction
-      if (vietQRBufferCache.size >= VIETQR_CACHE_MAX_SIZE) {
-        const oldestKey = vietQRBufferCache.keys().next().value;
-        if (oldestKey) vietQRBufferCache.delete(oldestKey);
+      // Lưu vào Cache RAM với LRU Eviction & Memory Byte Guard
+      if (vietQRBufferCache.has(qrUrl)) {
+        vietQRBufferCache.delete(qrUrl);
       }
+
+      while (vietQRBufferCache.size >= VIETQR_CACHE_MAX_SIZE) {
+        const oldestKey = vietQRBufferCache.keys().next().value;
+        if (oldestKey !== undefined) vietQRBufferCache.delete(oldestKey);
+        else break;
+      }
+
+      let currentTotalBytes = buffer.length;
+      for (const item of vietQRBufferCache.values()) {
+        currentTotalBytes += (item.size || 0);
+      }
+      while (currentTotalBytes > VIETQR_CACHE_MAX_BYTES && vietQRBufferCache.size > 0) {
+        const oldestKey = vietQRBufferCache.keys().next().value;
+        if (oldestKey !== undefined) {
+          const item = vietQRBufferCache.get(oldestKey);
+          currentTotalBytes -= (item?.size || 0);
+          vietQRBufferCache.delete(oldestKey);
+        } else break;
+      }
+
       vietQRBufferCache.set(qrUrl, {
         buffer,
         cachedAt: Date.now(),
@@ -706,6 +968,7 @@ async function fetchVietQRBuffer(qrUrl) {
     } catch (err) {
       console.warn(`⚠️ [VietQR Network Warning] Không thể tải buffer từ ${qrUrl} (${err.message}). Tự động fallback sang Direct URL.`);
       recordFailedVietQRUrl(qrUrl, err.message);
+      vietQRCircuitBreaker.recordFailure(err.message);
       return null;
     } finally {
       pendingVietQRRequests.delete(qrUrl);
@@ -2536,9 +2799,13 @@ async function executeTicketClosure({ channel, guild, closerUser, closeReason = 
 // Helper: Sinh Menu chọn gói theo ngôn ngữ
 function buildPackageSelectMenu(userId, lang = 'vi') {
   const isEn = lang === 'en';
+  const placeholderText = isEn 
+    ? '👉 Click here to select a Plugin or AI Service...' 
+    : '👉 Bấm vào đây để chọn Plugin hoặc Dịch Vụ AI bạn muốn mua...';
+
   const menu = new StringSelectMenuBuilder()
-    .setCustomId(`select_package_${lang}_${userId}`)
-    .setPlaceholder(isEn ? '👉 Click here to select a Plugin or AI Service...' : '👉 Bấm vào đây để chọn Plugin hoặc Dịch Vụ AI bạn muốn mua...');
+    .setCustomId(`select_package_${lang}_${userId}`.slice(0, 100))
+    .setPlaceholder(placeholderText.slice(0, 150));
 
   menu.addOptions(
     // Plugin Minecraft
@@ -2999,6 +3266,16 @@ const IGNORABLE_INTERACTION_ERROR_CODES = new Set([
 ]);
 
 /**
+ * Kiểm tra xem một interaction đã hết hạn token 15 phút của Discord API hay chưa
+ * Discord interaction tokens chỉ có hiệu lực tối đa 15 phút (900,000 ms).
+ */
+function isInteractionExpired(interaction) {
+  if (!interaction || !interaction.createdTimestamp) return false;
+  // Giới hạn 15 phút (900,000 ms). Trừ hao độ trễ mạng còn 14.8 phút (888,000 ms).
+  return (Date.now() - interaction.createdTimestamp) >= 14.8 * 60 * 1000;
+}
+
+/**
  * Kiểm tra xem một lỗi Discord API có phải là lỗi tương tác hết hạn / kênh đã bị xóa hay không
  */
 function isIgnorableInteractionError(err) {
@@ -3026,6 +3303,7 @@ function isIgnorableInteractionError(err) {
 
 /**
  * Phản hồi interaction an toàn tuyệt đối chống race condition và không bao giờ throw error
+ * Xử lý hoàn hảo: Expired token (15m), 10062 (Unknown interaction), 10015 (Unknown webhook), 40060 (Already acknowledged)
  */
 async function safeReply(interaction, options) {
   if (!interaction || interaction.isAutocomplete?.()) return null;
@@ -3039,6 +3317,18 @@ async function safeReply(interaction, options) {
       }
     }
 
+    // 0. Kiểm tra interaction token đã hết hạn 15 phút chưa
+    if (isInteractionExpired(interaction)) {
+      if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
+        try {
+          return await interaction.channel.send(payload);
+        } catch (_) {
+          return null;
+        }
+      }
+      return null;
+    }
+
     const isDeferred = Boolean(interaction.deferred || interaction._state?.deferred);
     const isReplied = Boolean(interaction.replied || interaction._state?.replied);
 
@@ -3047,6 +3337,21 @@ async function safeReply(interaction, options) {
       try {
         return await interaction.editReply(payload);
       } catch (editErr) {
+        if (editErr?.code === 40060) {
+          try {
+            return await interaction.followUp(payload);
+          } catch (_) {
+            return null;
+          }
+        }
+        if (editErr?.code === 10062 || editErr?.code === 10015) {
+          if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
+            try {
+              return await interaction.channel.send(payload);
+            } catch (_) {}
+          }
+          return null;
+        }
         if (isIgnorableInteractionError(editErr)) return null;
         try {
           return await interaction.followUp(payload);
@@ -3064,6 +3369,14 @@ async function safeReply(interaction, options) {
       try {
         return await interaction.followUp(payload);
       } catch (followErr) {
+        if (followErr?.code === 10062 || followErr?.code === 10015) {
+          if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
+            try {
+              return await interaction.channel.send(payload);
+            } catch (_) {}
+          }
+          return null;
+        }
         if (isIgnorableInteractionError(followErr)) return null;
         try {
           return await interaction.editReply(payload);
@@ -3077,23 +3390,26 @@ async function safeReply(interaction, options) {
     try {
       return await interaction.reply(payload);
     } catch (replyErr) {
-      if (replyErr?.code === 40060 || replyErr?.code === 10062) {
-        if (interaction.deferred || interaction.replied) {
+      // 40060: Đã được acknowledge bởi tác vụ khác / race condition -> fallback editReply hoặc followUp
+      if (replyErr?.code === 40060) {
+        try {
+          return await interaction.editReply(payload);
+        } catch (_) {
           try {
-            return await interaction.editReply(payload);
+            return await interaction.followUp(payload);
           } catch (_) {
-            try {
-              return await interaction.followUp(payload);
-            } catch (_) {
-              return null;
-            }
+            return null;
           }
         }
-        try {
-          return await interaction.followUp(payload);
-        } catch (_) {
-          return null;
+      }
+      // 10062 / 10015: Unknown interaction / webhook (timeout 3s hoặc token không tồn tại)
+      if (replyErr?.code === 10062 || replyErr?.code === 10015) {
+        if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
+          try {
+            return await interaction.channel.send(payload);
+          } catch (_) {}
         }
+        return null;
       }
       if (isIgnorableInteractionError(replyErr)) return null;
       console.warn(`⚠️ [safeReply Warning] ${replyErr.message}`);
@@ -3113,6 +3429,7 @@ async function safeReply(interaction, options) {
 async function safeDeferReply(interaction, options = {}) {
   if (!interaction || interaction.isAutocomplete?.()) return false;
   if (interaction.deferred || interaction.replied) return true;
+  if (isInteractionExpired(interaction)) return false;
   try {
     await interaction.deferReply(options);
     return true;
@@ -3129,6 +3446,7 @@ async function safeDeferReply(interaction, options = {}) {
 async function safeDeferUpdate(interaction) {
   if (!interaction || interaction.isAutocomplete?.()) return false;
   if (interaction.deferred || interaction.replied) return true;
+  if (isInteractionExpired(interaction)) return false;
   try {
     if (typeof interaction.deferUpdate === 'function') {
       await interaction.deferUpdate();
@@ -3147,10 +3465,26 @@ async function safeDeferUpdate(interaction) {
  */
 async function safeEditReply(interaction, options) {
   if (!interaction || interaction.isAutocomplete?.()) return null;
+  const payload = typeof options === 'string' ? { content: options } : { ...options };
+  if (isInteractionExpired(interaction)) {
+    if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
+      try {
+        return await interaction.channel.send(payload);
+      } catch (_) {}
+    }
+    return null;
+  }
   try {
-    const payload = typeof options === 'string' ? { content: options } : { ...options };
     return await interaction.editReply(payload);
   } catch (err) {
+    if (err?.code === 10062 || err?.code === 10015) {
+      if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
+        try {
+          return await interaction.channel.send(payload);
+        } catch (_) {}
+      }
+      return null;
+    }
     if (isIgnorableInteractionError(err)) return null;
     console.warn(`⚠️ [safeEditReply Warning] ${err.message}`);
     return null;
@@ -3162,10 +3496,26 @@ async function safeEditReply(interaction, options) {
  */
 async function safeFollowUp(interaction, options) {
   if (!interaction || interaction.isAutocomplete?.()) return null;
+  const payload = typeof options === 'string' ? { content: options } : { ...options };
+  if (isInteractionExpired(interaction)) {
+    if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
+      try {
+        return await interaction.channel.send(payload);
+      } catch (_) {}
+    }
+    return null;
+  }
   try {
-    const payload = typeof options === 'string' ? { content: options } : { ...options };
     return await interaction.followUp(payload);
   } catch (err) {
+    if (err?.code === 10062 || err?.code === 10015) {
+      if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
+        try {
+          return await interaction.channel.send(payload);
+        } catch (_) {}
+      }
+      return null;
+    }
     if (isIgnorableInteractionError(err)) return null;
     console.warn(`⚠️ [safeFollowUp Warning] ${err.message}`);
     return null;
@@ -3174,15 +3524,23 @@ async function safeFollowUp(interaction, options) {
 
 /**
  * Cập nhật component interaction an toàn (update) chống crash
+ * Tự động chuyển sang editReply nếu interaction đã deferred hoặc replied (chống lỗi 40060)
  */
 async function safeUpdate(interaction, options) {
   if (!interaction || interaction.isAutocomplete?.()) return null;
+  if (isInteractionExpired(interaction)) return null;
   try {
+    if (interaction.deferred || interaction.replied) {
+      return await safeEditReply(interaction, options);
+    }
     if (typeof interaction.update === 'function') {
       return await interaction.update(options);
     }
     return await safeReply(interaction, options);
   } catch (err) {
+    if (err?.code === 40060) {
+      return await safeEditReply(interaction, options);
+    }
     if (isIgnorableInteractionError(err)) return null;
     return await safeReply(interaction, options);
   }
@@ -3190,9 +3548,14 @@ async function safeUpdate(interaction, options) {
 
 /**
  * Mở modal an toàn (showModal) chống lỗi interaction already replied
+ * Discord API yêu cầu showModal phải là phản hồi ban đầu (chưa deferReply/reply) và còn hạn
  */
 async function safeShowModal(interaction, modal) {
   if (!interaction || !modal) return false;
+  if (isInteractionExpired(interaction)) {
+    console.warn("⚠️ [safeShowModal] Không thể showModal trên interaction đã hết hạn (15m).");
+    return false;
+  }
   if (interaction.replied || interaction.deferred) {
     console.warn("⚠️ [safeShowModal] Không thể showModal trên interaction đã replied/deferred.");
     return false;
@@ -3480,7 +3843,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const primaryFiles = [attachmentResult.summaryAttachment, attachmentResult.attachments[0]].filter(Boolean);
           await safeReply(interaction, { embeds: [exportEmbed], files: primaryFiles, ephemeral: true });
           for (let i = 1; i < attachmentResult.attachments.length; i++) {
-            await interaction.followUp({ files: [attachmentResult.attachments[i]], ephemeral: true }).catch(() => {});
+            await safeFollowUp(interaction, { files: [attachmentResult.attachments[i]], ephemeral: true });
           }
           return;
         }
@@ -4702,6 +5065,7 @@ module.exports = {
   vietQRBufferCache,
   failedVietQRUrls,
   pendingVietQRRequests,
+  vietQRCircuitBreaker,
   clearVietQRCache,
   getVietQRCacheStats,
   flushMemoryCaches,
@@ -4714,6 +5078,7 @@ module.exports = {
   handleAutoMod,
   IGNORABLE_INTERACTION_ERROR_CODES,
   isIgnorableInteractionError,
+  isInteractionExpired,
   safeReply,
   safeDeferReply,
   safeDeferUpdate,

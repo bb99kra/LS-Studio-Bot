@@ -143,8 +143,9 @@ async function safeApiCall(fn, retries = 5, delayMs = 1000) {
  */
 function areRolePropsEqual(role, rDef) {
   if (!role || !rDef) return false;
+  if (rDef.name && role.name !== rDef.name) return false;
   if (rDef.color) {
-    const roleHex = (role.hexColor || '').toLowerCase();
+    const roleHex = (role.hexColor || '#000000').toLowerCase();
     const targetHex = rDef.color.toLowerCase();
     if (roleHex !== targetHex) return false;
   }
@@ -182,9 +183,10 @@ function normalizeOverwrites(overwrites) {
  * Helper: So sánh quyền hạn (permissionOverwrites) giữa kênh hiện có và cấu hình mong muốn
  */
 function areOverwritesEqual(currentOverwritesManager, desiredOverwrites) {
-  if (!currentOverwritesManager || !currentOverwritesManager.cache) return false;
+  if (!currentOverwritesManager) return false;
+  const cache = currentOverwritesManager.cache || (currentOverwritesManager instanceof Map ? currentOverwritesManager : null);
+  if (!cache) return false;
   const desiredMap = normalizeOverwrites(desiredOverwrites);
-  const cache = currentOverwritesManager.cache;
 
   if (cache.size !== desiredMap.size) return false;
 
@@ -220,13 +222,20 @@ function areEmbedsAndComponentsEqual(existingMsg, newPayload) {
   for (let i = 0; i < newEmbeds.length; i++) {
     const eExist = typeof existingEmbeds[i]?.toJSON === 'function' ? existingEmbeds[i].toJSON() : existingEmbeds[i];
     const eNew = newEmbeds[i];
-    if ((eExist?.title || '') !== (eNew?.title || '')) return false;
-    if ((eExist?.description || '') !== (eNew?.description || '')) return false;
+    if ((eExist?.title || '').trim() !== (eNew?.title || '').trim()) return false;
+    if ((eExist?.description || '').trim() !== (eNew?.description || '').trim()) return false;
+    if (eNew?.color !== undefined && eExist?.color !== undefined && eExist.color !== eNew.color) return false;
+    if ((eExist?.footer?.text || '').trim() !== (eNew?.footer?.text || '').trim()) return false;
+
     const existFields = eExist?.fields || [];
     const newFields = eNew?.fields || [];
     if (existFields.length !== newFields.length) return false;
     for (let f = 0; f < newFields.length; f++) {
-      if (existFields[f]?.name !== newFields[f]?.name || existFields[f]?.value !== newFields[f]?.value) {
+      if (
+        (existFields[f]?.name || '').trim() !== (newFields[f]?.name || '').trim() ||
+        (existFields[f]?.value || '').trim() !== (newFields[f]?.value || '').trim() ||
+        Boolean(existFields[f]?.inline) !== Boolean(newFields[f]?.inline)
+      ) {
         return false;
       }
     }
@@ -243,11 +252,17 @@ function areEmbedsAndComponentsEqual(existingMsg, newPayload) {
     const compNew = cNew?.components || [];
     if (compExist.length !== compNew.length) return false;
     for (let b = 0; b < compNew.length; b++) {
-      const bExistId = compExist[b]?.custom_id || compExist[b]?.customId;
-      const bNewId = compNew[b]?.custom_id || compNew[b]?.customId;
+      const bExistId = compExist[b]?.custom_id || compExist[b]?.customId || '';
+      const bNewId = compNew[b]?.custom_id || compNew[b]?.customId || '';
       if (bExistId !== bNewId) return false;
-      if (compExist[b]?.label !== compNew[b]?.label) return false;
+
+      const bExistUrl = compExist[b]?.url || '';
+      const bNewUrl = compNew[b]?.url || '';
+      if (bExistUrl !== bNewUrl) return false;
+
+      if ((compExist[b]?.label || '').trim() !== (compNew[b]?.label || '').trim()) return false;
       if (compExist[b]?.style !== compNew[b]?.style) return false;
+      if (Boolean(compExist[b]?.disabled) !== Boolean(compNew[b]?.disabled)) return false;
     }
   }
 
@@ -305,17 +320,25 @@ async function syncChannelAndCategoryPositions(guild, botMember, categoryOrderLi
     } catch (err) {
       console.warn(`   ! guild.channels.setPositions gặp lỗi: ${err.message}. Đang thử cập nhật từng kênh...`);
       for (const up of updates) {
-        const targetCh = guild.channels.cache?.get(up.channel);
-        if (targetCh && typeof targetCh.setPosition === 'function') {
-          await safeApiCall(() => targetCh.setPosition(up.position)).catch(() => {});
+        const targetCh = guild.channels.cache?.get(up.channel) || (guild.channels.resolve && guild.channels.resolve(up.channel));
+        if (targetCh && typeof targetCh.edit === 'function') {
+          const editPayload = { position: up.position };
+          if (up.parent) editPayload.parent = up.parent;
+          await safeApiCall(() => targetCh.edit(editPayload)).catch(e => {
+            console.warn(`   ! Lỗi cập nhật vị trí cho kênh ${up.channel}: ${e.message}`);
+          });
         }
       }
     }
   } else {
     for (const up of updates) {
-      const targetCh = guild.channels.cache?.get(up.channel);
-      if (targetCh && typeof targetCh.setPosition === 'function') {
-        await safeApiCall(() => targetCh.setPosition(up.position)).catch(() => {});
+      const targetCh = guild.channels.cache?.get(up.channel) || (guild.channels.resolve && guild.channels.resolve(up.channel));
+      if (targetCh && typeof targetCh.edit === 'function') {
+        const editPayload = { position: up.position };
+        if (up.parent) editPayload.parent = up.parent;
+        await safeApiCall(() => targetCh.edit(editPayload)).catch(e => {
+          console.warn(`   ! Lỗi cập nhật vị trí cho kênh ${up.channel}: ${e.message}`);
+        });
       }
     }
     console.log("   ✅ Đã cập nhật vị trí các kênh theo thứ tự chuẩn!");
@@ -465,15 +488,8 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
         if (role.managed) {
           console.log(`   ℹ️ Role đã tồn tại nhưng là Managed Role (tích hợp/bot): ${rDef.name} (Bỏ qua chỉnh sửa)`);
         } else if (botMember.permissions.has(PermissionsBitField.Flags.ManageRoles) && role.position < botMember.roles.highest.position) {
-          // 2. Chống gọi API edit thừa thãi nếu thuộc tính role đã khớp chuẩn
-          const colorMatch = !rDef.color || (role.hexColor && role.hexColor.toLowerCase() === rDef.color.toLowerCase());
-          const hoistMatch = role.hoist === rDef.hoist;
-          const mentionableMatch = role.mentionable === rDef.mentionable;
-          const permissionsMatch = Array.isArray(rDef.permissions)
-            ? (rDef.permissions.length === 0 ? role.permissions.bitfield === 0n : role.permissions.has(rDef.permissions))
-            : true;
-
-          const needsUpdate = !colorMatch || !hoistMatch || !mentionableMatch || !permissionsMatch;
+          // 2. Chống gọi API edit thừa thãi nếu thuộc tính role đã khớp chuẩn bằng deep comparison
+          const needsUpdate = !areRolePropsEqual(role, rDef);
 
           if (!needsUpdate) {
             console.log(`   ✓ Role đã tồn tại (thuộc tính đã chuẩn, không cần gọi API edit): ${rDef.name}`);
@@ -529,12 +545,24 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
           // roleDefs được định nghĩa từ cao nhất (index 0) xuống thấp nhất
           // Vị trí cao nhất bot có thể gán an toàn là botMember.roles.highest.position - 1
           const maxPosition = Math.max(1, botMember.roles.highest.position - 1);
-          const positionUpdates = manageableRoles.map((role, idx) => ({
-            role: role.id,
-            position: Math.max(1, maxPosition - idx)
-          }));
-          await safeApiCall(() => guild.roles.setPositions(positionUpdates));
-          console.log("   ✅ Đã sắp xếp và đồng bộ vị trí thứ bậc Roles (Role Hierarchy) chuẩn xác!");
+          const positionUpdates = [];
+
+          manageableRoles.forEach((role, idx) => {
+            const targetPos = Math.max(1, maxPosition - idx);
+            if (role.position !== targetPos) {
+              positionUpdates.push({
+                role: role.id,
+                position: targetPos
+              });
+            }
+          });
+
+          if (positionUpdates.length > 0) {
+            await safeApiCall(() => guild.roles.setPositions(positionUpdates));
+            console.log(`   ✅ Đã sắp xếp và đồng bộ vị trí thứ bậc cho ${positionUpdates.length} Roles (Role Hierarchy)!`);
+          } else {
+            console.log("   ✅ Vị trí thứ bậc Roles (Role Hierarchy) đã chuẩn xác (không cần thay đổi)!");
+          }
         }
       } catch (posErr) {
         console.warn(`   ⚠️ Không thể đồng bộ vị trí Role Hierarchy: ${posErr.message}`);
@@ -589,12 +617,22 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
 
     // Helper: Tạo hoặc Lấy Text Channel (Idempotent - kiểm tra Topic, Parent và Overwrites)
     async function getOrCreateTextChannel(name, parentCategory, topic = "", customOverwrites = null) {
+      // 1. Tìm kênh chính xác theo tên và đúng danh mục cha
       let ch = currentChannels.find(c => 
         c && 
         c.type === ChannelType.GuildText && 
         c.name === name && 
         (parentCategory ? c.parentId === parentCategory.id : true)
       );
+
+      // 2. Nếu chưa thấy, tìm kênh cùng tên trong server để tái sử dụng và đưa về đúng danh mục (tránh tạo trùng lặp)
+      if (!ch) {
+        ch = currentChannels.find(c => 
+          c && 
+          c.type === ChannelType.GuildText && 
+          c.name === name
+        );
+      }
 
       if (ch) {
         console.log(`   📄 Text Channel đã tồn tại: #${name}`);
@@ -611,6 +649,9 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
               await safeApiCall(() => ch.permissionOverwrites.set(customOverwrites));
               console.log(`   🔄 Đã cập nhật quyền hạn Text Channel: #${name}`);
             }
+          } else if (parentCategory && !customOverwrites && ch.permissionsLocked === false && botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+            await safeApiCall(() => ch.lockPermissions()).catch(() => {});
+            console.log(`   🔄 Đã đồng bộ quyền Text Channel theo danh mục: #${name}`);
           }
         } catch (e) {
           console.warn(`   ! Không thể update channel #${name}: ${e.message}`);
@@ -669,6 +710,7 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
       const bitrate = options.bitrate !== undefined ? options.bitrate : undefined;
       const rtcRegion = options.rtcRegion !== undefined ? options.rtcRegion : undefined;
 
+      // 1. Tìm voice channel chính xác theo tên và đúng danh mục cha
       let ch = currentChannels.find(c => 
         c && 
         c.type === ChannelType.GuildVoice && 
@@ -676,18 +718,27 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
         (parentCategory ? c.parentId === parentCategory.id : true)
       );
 
+      // 2. Nếu chưa thấy, tìm voice channel cùng tên để tái sử dụng và đưa về đúng danh mục (tránh tạo trùng lặp)
+      if (!ch) {
+        ch = currentChannels.find(c => 
+          c && 
+          c.type === ChannelType.GuildVoice && 
+          c.name === name
+        );
+      }
+
       if (ch) {
         console.log(`   🔊 Voice Channel đã tồn tại: ${name}`);
         try {
           const updateData = {};
           if (parentCategory && ch.parentId !== parentCategory.id) updateData.parent = parentCategory.id;
-          if (userLimit !== undefined && ch.userLimit !== userLimit) updateData.userLimit = userLimit;
+          if (userLimit !== undefined && Number(ch.userLimit || 0) !== Number(userLimit || 0)) updateData.userLimit = userLimit;
           if (bitrate !== undefined && ch.bitrate !== bitrate) updateData.bitrate = bitrate;
           if (rtcRegion !== undefined && ch.rtcRegion !== rtcRegion) updateData.rtcRegion = rtcRegion;
 
           if (Object.keys(updateData).length > 0 && botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
             await safeApiCall(() => ch.edit(updateData));
-            console.log(`   🔄 Đã cập nhật thuộc tính Voice Channel: ${name}`);
+            console.log(`   🔄 Đã cập nhật thuộc tính Voice Channel: ${name} (UserLimit: ${ch.userLimit} -> ${userLimit ?? 'unchanged'})`);
           }
 
           if (customOverwrites && customOverwrites.length > 0 && botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
@@ -695,6 +746,9 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
               await safeApiCall(() => ch.permissionOverwrites.set(customOverwrites));
               console.log(`   🔄 Đã cập nhật quyền hạn Voice Channel: ${name}`);
             }
+          } else if (parentCategory && !customOverwrites && ch.permissionsLocked === false && botMember.permissions.has(PermissionsBitField.Flags.ManageChannels)) {
+            await safeApiCall(() => ch.lockPermissions()).catch(() => {});
+            console.log(`   🔄 Đã đồng bộ quyền Voice Channel theo danh mục: ${name}`);
           }
         } catch (e) {
           console.warn(`   ! Không thể update voice channel ${name}: ${e.message}`);
@@ -743,7 +797,7 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
         }
       }
 
-      console.log(`   + Đã tạo Voice Channel mới: ${name}`);
+      console.log(`   + Đã tạo Voice Channel mới: ${name} (UserLimit: ${userLimit ?? 'unlimited'})`);
       currentChannels.set(ch.id, ch);
       return ch;
     }
@@ -755,16 +809,35 @@ async function runServerSetup(clientInstance = client, targetGuildId = GUILD_ID)
         const messages = await safeApiCall(() => channel.messages.fetch({ limit: 10 }));
         const botMessages = messages.filter(m => m.author.id === botUser.id);
         
-        // Xóa tin nhắn cũ của bot để làm mới giao diện
-        for (const msg of botMessages.values()) {
-          await safeApiCall(() => msg.delete()).catch(() => {});
+        if (botMessages.size > 0) {
+          // Sắp xếp tin nhắn cũ nhất lên đầu để làm tin nhắn chính
+          const sortedBotMsgs = Array.from(botMessages.values()).sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+          const primaryMsg = sortedBotMsgs[0];
+          const extraMsgs = sortedBotMsgs.slice(1);
+
+          // Dọn dẹp sạch sẽ các tin nhắn dư thừa của bot (nếu có từ các lần chạy trước)
+          for (const extra of extraMsgs) {
+            await safeApiCall(() => extra.delete()).catch(() => {});
+          }
+
+          // Kiểm tra xem tin nhắn đã khớp nội dung hoàn toàn chưa bằng deep comparison
+          if (areEmbedsAndComponentsEqual(primaryMsg, messagePayload)) {
+            console.log(`   ✓ Embed đã tồn tại và chuẩn xác (không cần gọi API): #${channel.name}`);
+            return primaryMsg;
+          }
+
+          // Cập nhật (edit) tin nhắn tại chỗ thay vì xóa đi gửi lại (tránh flicker, giữ nguyên message ID)
+          const edited = await safeApiCall(() => primaryMsg.edit(messagePayload));
+          console.log(`   🔄 Đã cập nhật Embed thành công trong: #${channel.name}`);
+          return edited;
         }
 
+        // Chưa có tin nhắn nào của bot -> gửi mới
         const sent = await safeApiCall(() => channel.send(messagePayload));
-        console.log(`   ✅ Đã đăng Embed thành công vào: #${channel.name}`);
+        console.log(`   ✅ Đã đăng Embed mới thành công vào: #${channel.name}`);
         return sent;
       } catch (err) {
-        console.error(`   ❌ Lỗi khi đăng Embed vào #${channel.name}:`, err.message);
+        console.error(`   ❌ Lỗi khi đăng/cập nhật Embed vào #${channel.name}:`, err.message);
         return null;
       }
     }
@@ -1994,5 +2067,10 @@ module.exports = {
   GUILD_ID,
   runServerSetup,
   safeApiCall,
-  sleep
+  sleep,
+  areRolePropsEqual,
+  normalizeOverwrites,
+  areOverwritesEqual,
+  areEmbedsAndComponentsEqual,
+  syncChannelAndCategoryPositions
 };
