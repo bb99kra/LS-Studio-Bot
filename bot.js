@@ -1346,6 +1346,14 @@ const PACKAGES = {
     price_usd: 0.8,
     desc_vi: "Xem phim Ultra HD 4K trên TV, điện thoại, máy tính, bảo hành trọn 1 tuần",
     desc_en: "Ultra HD 4K streaming on TV, phone, PC with full 1-week warranty"
+  },
+  "acc_discord_ver_mail_sdt": {
+    name_vi: "Tài Khoản Discord Veri Mail + SĐT",
+    name_en: "Discord Account (Email + Phone Verified)",
+    price_vnd: 7000,
+    price_usd: 0.3,
+    desc_vi: "Acc Discord đã xác minh đầy đủ Email và Số điện thoại (SĐT), bao trâu, dùng ổn định",
+    desc_en: "Fully verified Discord account with Email & Phone number, clean & ready to use"
   }
 };
 
@@ -1382,6 +1390,11 @@ const DEPRECATED_PACKAGE_ALIASES = Object.freeze({
   "netflix": "acc_netflix_1w",
   "acc_netflix": "acc_netflix_1w",
   "netflix_1w": "acc_netflix_1w",
+  "acc_discord": "acc_discord_ver_mail_sdt",
+  "discord_veri": "acc_discord_ver_mail_sdt",
+  "discord_ver_mail": "acc_discord_ver_mail_sdt",
+  "discord_phone": "acc_discord_ver_mail_sdt",
+  "acc_discord_7k": "acc_discord_ver_mail_sdt",
   "giftcode": "ls_giftcode",
   "anticheat": "ls_anticheat",
   "antifreecam": "anti_freecam",
@@ -3658,7 +3671,12 @@ function buildPackageSelectMenu(userId, lang = 'vi') {
       .setLabel(isEn ? 'Netflix Premium (1 Week) • $0.80 (20.000 VNĐ)' : 'Tài Khoản Netflix Premium (1 Tuần) • 20.000 VNĐ')
       .setDescription(isEn ? 'Ultra HD 4K streaming with 1-week full warranty' : 'Xem phim Ultra HD 4K mọi thiết bị, bảo hành trọn 1 tuần')
       .setValue('acc_netflix_1w')
-      .setEmoji('🍿')
+      .setEmoji('🍿'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'Discord Verified Account • $0.30 (7.000 VNĐ)' : 'Tài Khoản Discord Veri Mail + SĐT • 7.000 VNĐ')
+      .setDescription(isEn ? 'Email + Phone number verified, clean & ready' : 'Đã xác minh đầy đủ Email và SĐT, bao trâu dùng ổn định')
+      .setValue('acc_discord_ver_mail_sdt')
+      .setEmoji('💬')
   );
 
   return menu;
