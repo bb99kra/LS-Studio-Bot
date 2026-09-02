@@ -38,6 +38,26 @@ client.on(Events.Error, (err) => {
   console.error('❌ Lỗi Discord Client:', err.message || err);
 });
 
+
+process.on('SIGINT', async () => {
+  console.log('🛑 [SIGINT] Đang dừng tiến trình...');
+  clearTimeout(watchdog);
+  try { await client.destroy(); } catch {}
+  process.exit(0);
+});
+process.on('SIGTERM', async () => {
+  console.log('🛑 [SIGTERM] Đang dừng tiến trình...');
+  clearTimeout(watchdog);
+  try { await client.destroy(); } catch {}
+  process.exit(0);
+});
+process.on('uncaughtException', async (err) => {
+  clearTimeout(watchdog);
+  console.error('❌ Lỗi ngoại lệ chưa bắt (Uncaught Exception):', err);
+  try { await client.destroy(); } catch {}
+  process.exit(1);
+});
+
 process.on('unhandledRejection', async (reason) => {
   clearTimeout(watchdog);
   console.error('❌ Lỗi không kiểm soát (Unhandled Rejection):', reason);

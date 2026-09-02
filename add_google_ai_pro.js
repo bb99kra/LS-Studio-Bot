@@ -74,7 +74,6 @@ process.on('uncaughtException', async (err) => {
   await cleanupAndExit(1);
 });
 
-
 client.once(Events.ClientReady, async () => {
   console.log(`🤖 Logged in as ${client.user.tag}! Đang thêm kênh Google AI Pro...`);
 
@@ -169,12 +168,12 @@ client.once(Events.ClientReady, async () => {
     const chPrice = channels.find(c => c && c.name.includes("bảng-giá"));
     if (chPrice) {
       const pMsgs = await chPrice.messages.fetch({ limit: 10 });
-      for (const [mId, msg] of msgs) {
-      if (msg.author.id === client.user.id) {
-        await msg.delete().catch(() => {});
-        await sleep(250);
+      for (const [mId, msg] of pMsgs) {
+        if (msg.author.id === client.user.id) {
+          await msg.delete().catch(() => {});
+          await sleep(250);
+        }
       }
-    }
 
       const priceEmbed = new EmbedBuilder()
         .setColor("#FEE75C")
@@ -227,12 +226,12 @@ client.once(Events.ClientReady, async () => {
     const chTb = channels.find(c => c && c.name.includes("thông-báo"));
     if (chTb) {
       const tbMsgs = await chTb.messages.fetch({ limit: 10 });
-      for (const [mId, msg] of msgs) {
-      if (msg.author.id === client.user.id) {
-        await msg.delete().catch(() => {});
-        await sleep(250);
+      for (const [mId, msg] of tbMsgs) {
+        if (msg.author.id === client.user.id) {
+          await msg.delete().catch(() => {});
+          await sleep(250);
+        }
       }
-    }
 
       const chAc = channels.find(c => c && c.name === "🛡️・ls-anticheat");
       const chFc = channels.find(c => c && c.name === "👁️・ls-antifreecam");
@@ -296,5 +295,5 @@ if (!TOKEN || TOKEN === 'YOUR_BOT_TOKEN_HERE' || TOKEN.trim() === '') {
 
 client.login(TOKEN).catch(async (err) => {
   console.error("❌ [ERROR] Lỗi thực thi:", err.message || err);
-    await cleanupAndExit(1);
+  await cleanupAndExit(1);
 });

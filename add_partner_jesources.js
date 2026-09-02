@@ -1,6 +1,9 @@
+const path = require('path');
 const fs = require('fs');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { 
   Client, 
+  Events,
   GatewayIntentBits, 
   ChannelType, 
   PermissionsBitField, 
@@ -10,16 +13,66 @@ const {
   ButtonStyle 
 } = require('discord.js');
 
-const TOKEN = process.env.DISCORD_TOKEN || (fs.existsSync('./token.local.js') ? require('./token.local.js').TOKEN : 'YOUR_BOT_TOKEN_HERE');
+const tokenLocalPath = path.join(__dirname, 'token.local.js');
+const localConfig = fs.existsSync(tokenLocalPath) ? require(tokenLocalPath) : {};
+const TOKEN = process.env.DISCORD_TOKEN || localConfig.TOKEN || localConfig.DISCORD_TOKEN || '';
 
-const LS_STUDIO_GUILD_ID = "1542476657825419334";
-const NGUYEN_SMP_GUILD_ID = "1462028925046620265";
+const LS_STUDIO_GUILD_ID = process.env.GUILD_ID || localConfig.GUILD_ID || "1542476657825419334";
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
 
-client.once('clientReady', async () => {
+// Watchdog timeout to prevent script hanging indefinitely
+const WATCHDOG_TIMEOUT_MS = 30000;
+const watchdog = setTimeout(async () => {
+  console.error(`⏱️ [WATCHDOG] Quá thời gian thực thi (${WATCHDOG_TIMEOUT_MS / 1000}s). Tự động hủy kết nối Discord và dừng tiến trình.`);
+  try {
+    await client.destroy();
+  } catch {}
+  process.exit(1);
+}, WATCHDOG_TIMEOUT_MS);
+if (watchdog.unref) watchdog.unref();
+
+client.on(Events.Error, (err) => {
+  console.error('❌ Lỗi Discord Client:', err.message || err);
+});
+
+let isExiting = false;
+async function cleanupAndExit(code = 0) {
+  if (isExiting) return;
+  isExiting = true;
+  clearTimeout(watchdog);
+  try {
+    await client.destroy();
+  } catch {}
+  process.exit(code);
+}
+
+process.on('SIGINT', async () => {
+  console.log('🛑 [SIGINT] Đang dừng tiến trình...');
+  await cleanupAndExit(0);
+});
+process.on('SIGTERM', async () => {
+  console.log('🛑 [SIGTERM] Đang dừng tiến trình...');
+  await cleanupAndExit(0);
+});
+process.on('SIGHUP', async () => {
+  console.log('🛑 [SIGHUP] Đang dừng tiến trình...');
+  await cleanupAndExit(0);
+});
+
+process.on('unhandledRejection', async (reason) => {
+  console.error('❌ Lỗi không kiểm soát (Unhandled Rejection):', reason);
+  await cleanupAndExit(1);
+});
+
+process.on('uncaughtException', async (err) => {
+  console.error('❌ Lỗi ngoại lệ chưa bắt (Uncaught Exception):', err);
+  await cleanupAndExit(1);
+});
+
+client.once(Events.ClientReady, async () => {
   console.log(`🤖 Logged in as ${client.user.tag}! Đang thêm đối tác JESOURCES...`);
 
   try {
@@ -92,13 +145,20 @@ client.once('clientReady', async () => {
     });
     console.log("✅ Đã đăng thông báo Partner JESOURCES lên LS STUDIO!");
 
-    // 2. CHỈ ĐĂNG TRÊN LS STUDIO
     console.log("🎉 ĐÃ HOÀN TẤT THÊM PARTNER JESOURCES TRÊN LS STUDIO 100%!");
-    process.exit(0);
+    await cleanupAndExit(0);
   } catch (err) {
-    console.error("❌ Lỗi:", err);
-    process.exit(1);
+    console.error("❌ Lỗi:", err.message || err);
+    await cleanupAndExit(1);
   }
 });
 
-client.login(TOKEN);
+if (!TOKEN || TOKEN === 'YOUR_BOT_TOKEN_HERE' || TOKEN.trim() === '') {
+  console.error('❌ Lỗi: DISCORD_TOKEN chưa được thiết lập trong .env hoặc token.local.js!');
+  process.exit(1);
+}
+
+client.login(TOKEN).catch(async (err) => {
+  console.error("❌ [ERROR] Lỗi đăng nhập Discord:", err.message || err);
+  await cleanupAndExit(1);
+});

@@ -1380,7 +1380,36 @@ const commands = [
     .setDMPermission(false),
   new SlashCommandBuilder()
     .setName('feedback')
-    .setDescription('Gửi nhận xét & đánh giá chất lượng dịch vụ / Send Feedback')
+    .setDescription('Gửi nhận xét & đánh giá chất lượng dịch vụ / Send Feedback'),
+  new SlashCommandBuilder()
+    .setName('help')
+    .setDescription('Xem hướng dẫn sử dụng và danh sách lệnh Bot LS Studio / Bot Help Guide'),
+  new SlashCommandBuilder()
+    .setName('clearmessages')
+    .setDescription('Xóa số lượng tin nhắn trong kênh (1-100) (Staff Only) / Clear Messages')
+    .addIntegerOption(opt =>
+      opt.setName('amount')
+        .setDescription('Số lượng tin nhắn cần xóa (1-100) / Amount of messages to delete')
+        .setRequired(true)
+        .setMinValue(1)
+        .setMaxValue(100)
+    )
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageMessages)
+    .setDMPermission(false),
+  new SlashCommandBuilder()
+    .setName('kiemtra')
+    .setDescription('Tra cứu mã đơn hàng hoặc kiểm tra quyền hạn thành viên / Check status')
+    .addStringOption(opt =>
+      opt.setName('code')
+        .setDescription('Mã đơn hàng cần kiểm tra (ví dụ: LS123456) / Order Code')
+        .setRequired(false)
+        .setAutocomplete(true)
+    )
+    .addUserOption(opt =>
+      opt.setName('user')
+        .setDescription('Thành viên cần kiểm tra role & quyền lợi / Member to check')
+        .setRequired(false)
+    )
 ].map(cmd => cmd.toJSON());
 
 async function registerCommands(clientId) {
@@ -3577,6 +3606,41 @@ client.on(Events.InteractionCreate, async (interaction) => {
   try {
     // 0. AUTOCOMPLETE INTERACTIONS (Xử lý gợi ý tự động an toàn)
     if (interaction.isAutocomplete?.()) {
+      try {
+        const focusedOption = typeof interaction.options?.getFocused === 'function' 
+          ? interaction.options.getFocused(true) 
+          : null;
+        if (focusedOption && focusedOption.name === 'code') {
+          const input = (focusedOption.value || '').trim().toUpperCase();
+          const suggestions = [];
+
+          // 1. Tìm trong activeOrderCodes
+          for (const [code, info] of activeOrderCodes.entries()) {
+            if (!input || code.includes(input)) {
+              const pkgName = info?.pkgKey ? (getPackage(info.pkgKey)?.name || info.pkgKey) : 'Đơn hàng';
+              suggestions.push({
+                name: `[Chờ TT] ${code} - ${pkgName}`.slice(0, 100),
+                value: code
+              });
+              if (suggestions.length >= 10) break;
+            }
+          }
+
+          // 2. Tìm trong approvedOrderCodes
+          for (const code of approvedOrderCodes.values()) {
+            if (suggestions.length >= 25) break;
+            if (!input || code.includes(input)) {
+              suggestions.push({
+                name: `[Đã Duyệt] ${code}`.slice(0, 100),
+                value: code
+              });
+            }
+          }
+
+          await interaction.respond(suggestions.slice(0, 25)).catch(() => {});
+          return;
+        }
+      } catch {}
       await interaction.respond([]).catch(() => {});
       return;
     }
@@ -3855,6 +3919,198 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (commandName === 'feedback') {
         const feedbackModal = createFeedbackModal();
         return safeShowModal(interaction, feedbackModal);
+      }
+
+      // /help (Xem hướng dẫn sử dụng và danh sách lệnh Bot)
+      if (commandName === 'help') {
+        const cooldownRemaining = getRateLimitRemaining(interaction.guildId, interaction.user.id, 3000);
+        if (cooldownRemaining > 0) {
+          return safeReply(interaction, {
+            content: `⏳ Bạn thao tác quá nhanh! Vui lòng đợi **${cooldownRemaining} giây** trước khi dùng lệnh tiếp theo.`,
+            ephemeral: true
+          });
+        }
+
+        const helpEmbed = new EmbedBuilder()
+          .setColor('#00E676')
+          .setTitle('📖 HƯỚNG DẪN SỬ DỤNG BOT & LỆNH / LS STUDIO HELP GUIDE')
+          .setDescription(
+            `Chào mừng bạn đến với **LS STUDIO**! Dưới đây là danh sách các lệnh Slash Command khả dụng:\n\n` +
+            `**🌐 LỆNH DÀNH CHO THÀNH VIÊN (PUBLIC COMMANDS):**\n` +
+            `• \`/help\` — Xem menu hướng dẫn và danh sách lệnh bot này.\n` +
+            `• \`/ping\` — Kiểm tra độ trễ WebSocket và API latency của bot.\n` +
+            `• \`/stk\` — Nhận thông tin tài khoản ngân hàng MBBank & mã VietQR 24/7.\n` +
+            `• \`/feedback\` — Mở biểu mẫu gửi đánh giá, xếp hạng sao & góp ý dịch vụ.\n` +
+            `• \`/kiemtra\` — Tra cứu tình trạng mã đơn hàng hoặc kiểm tra role thành viên.\n\n` +
+            `**👑 LỆNH DÀNH CHO BAN QUẢN TRỊ (STAFF / ADMIN ONLY):**\n` +
+            `• \`/khachhang\` \`@user\` — Cấp role Khách Hàng (Buyer) cho người mua.\n` +
+            `• \`/transcript\` — Xuất tệp nhật ký tin nhắn kênh ticket hiện tại.\n` +
+            `• \`/clearmessages\` \`amount\` — Xóa nhanh số lượng tin nhắn trong kênh (1-100).\n\n` +
+            `*Quý khách cần hỗ trợ hoặc mua plugin vui lòng mở ticket tại các kênh bán hàng!*`
+          )
+          .setFooter({ text: 'LS STUDIO • Minecraft & AI Solutions 24/7' })
+          .setTimestamp();
+
+        return safeReply(interaction, { embeds: [helpEmbed], ephemeral: true });
+      }
+
+      // /clearmessages (Staff Only - Xóa hàng loạt tin nhắn)
+      if (commandName === 'clearmessages') {
+        if (!interaction.inGuild?.() || !interaction.guild) {
+          return safeReply(interaction, { 
+            content: "❌ Lệnh này chỉ có thể sử dụng bên trong máy chủ Discord!", 
+            ephemeral: true 
+          });
+        }
+
+        const isStaff = isStaffMember(interaction.member);
+        if (!isStaff) {
+          return safeReply(interaction, { 
+            content: "❌ Bạn không có quyền sử dụng lệnh này! (Dành riêng cho Staff/Admin) / Staff Only!", 
+            ephemeral: true 
+          });
+        }
+
+        const amount = interaction.options.getInteger('amount', true);
+        if (!amount || amount < 1 || amount > 100) {
+          return safeReply(interaction, { 
+            content: "❌ Số lượng tin nhắn cần xóa phải từ 1 đến 100!", 
+            ephemeral: true 
+          });
+        }
+
+        const botMember = interaction.guild.members.me || await interaction.guild.members.fetchMe().catch(() => null);
+        if (!botMember || !botMember.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
+          return safeReply(interaction, { 
+            content: "❌ Bot thiếu quyền `Manage Messages` (Quản Lý Tin Nhắn) để thực hiện lệnh này!", 
+            ephemeral: true 
+          });
+        }
+
+        const channel = interaction.channel;
+        if (!channel || typeof channel.bulkDelete !== 'function') {
+          return safeReply(interaction, { 
+            content: "❌ Kênh này không hỗ trợ xóa hàng loạt tin nhắn!", 
+            ephemeral: true 
+          });
+        }
+
+        await safeDeferReply(interaction, { ephemeral: true });
+
+        try {
+          const deletedMessages = await channel.bulkDelete(amount, true);
+          const deletedCount = deletedMessages?.size ?? amount;
+          return safeReply(interaction, {
+            content: `🧹 Đã xóa thành công **${deletedCount}** tin nhắn trong kênh! *(Tin nhắn quá 14 ngày không thể xóa hàng loạt theo quy định của Discord)*`,
+            ephemeral: true
+          });
+        } catch (bulkErr) {
+          console.error("❌ Lỗi khi bulkDelete:", bulkErr);
+          return safeReply(interaction, {
+            content: `❌ Không thể xóa tin nhắn: \`${bulkErr.message}\``,
+            ephemeral: true
+          });
+        }
+      }
+
+      // /kiemtra (Tra cứu mã đơn hàng hoặc kiểm tra role thành viên)
+      if (commandName === 'kiemtra') {
+        const cooldownRemaining = getRateLimitRemaining(interaction.guildId, interaction.user.id, 3000);
+        if (cooldownRemaining > 0) {
+          return safeReply(interaction, {
+            content: `⏳ Bạn thao tác quá nhanh! Vui lòng đợi **${cooldownRemaining} giây** trước khi dùng lệnh tiếp theo.`,
+            ephemeral: true
+          });
+        }
+
+        const rawCode = interaction.options.getString('code');
+        const targetUser = interaction.options.getUser('user');
+
+        // Case 1: Tra cứu theo mã đơn hàng
+        if (rawCode) {
+          const cleanCode = sanitizeOrderCode(rawCode);
+          if (!cleanCode) {
+            return safeReply(interaction, {
+              content: `❌ Mã đơn hàng \`${rawCode}\` không đúng định dạng! (Định dạng chuẩn: \`LS\` + 6 ký tự, ví dụ: \`LS123456\`)`,
+              ephemeral: true
+            });
+          }
+
+          const isActive = activeOrderCodes.has(cleanCode);
+          const isApproved = approvedOrderCodes.has(cleanCode);
+          const isProcessing = processingApprovals.has(cleanCode);
+          const orderInfo = activeOrderCodes.get(cleanCode);
+
+          let statusText = '❓ Không tìm thấy trong phiên hiện tại / Not Found';
+          let statusColor = '#9E9E9E';
+
+          if (isApproved) {
+            statusText = '✅ **ĐÃ DUYỆT THÀNH CÔNG** (Giao dịch hoàn tất)';
+            statusColor = '#00E676';
+          } else if (isProcessing) {
+            statusText = '🔄 **ĐANG DUYỆT THANH TOÁN** (Staff đang xử lý)';
+            statusColor = '#FFB300';
+          } else if (isActive) {
+            statusText = '⏳ **CHỜ THANH TOÁN** (Đơn hàng đang mở)';
+            statusColor = '#00E5FF';
+          }
+
+          const pkgData = orderInfo?.pkgKey ? getPackage(orderInfo.pkgKey) : null;
+          const embedOrder = new EmbedBuilder()
+            .setColor(statusColor)
+            .setTitle(`📦 TRA CỨU ĐƠN HÀNG: \`${cleanCode}\``)
+            .setDescription(
+              `• **Mã đơn hàng:** \`${cleanCode}\`\n` +
+              `• **Trạng thái:** ${statusText}\n` +
+              (pkgData ? `• **Sản phẩm:** **${pkgData.name}**\n• **Giá tiền:** \`${formatVND(pkgData.priceVND)}\` / \`${formatUSD(pkgData.priceUSD)}\`\n` : '') +
+              (orderInfo?.createdAt ? `• **Thời gian tạo:** <t:${Math.floor(orderInfo.createdAt / 1000)}:R>\n` : '') +
+              (orderInfo?.buyerId ? `• **Người mua:** <@${orderInfo.buyerId}>\n` : '')
+            )
+            .setFooter({ text: 'LS STUDIO Order Verification' })
+            .setTimestamp();
+
+          return safeReply(interaction, { embeds: [embedOrder], ephemeral: true });
+        }
+
+        // Case 2: Kiểm tra theo User hoặc chính người gọi lệnh
+        const userToCheck = targetUser || interaction.user;
+
+        if (interaction.guild) {
+          const member = await interaction.guild.members.fetch(userToCheck.id).catch(() => null);
+          if (!member) {
+            return safeReply(interaction, {
+              content: `❌ Không tìm thấy thành viên <@${userToCheck.id}> trong máy chủ!`,
+              ephemeral: true
+            });
+          }
+
+          const isCustomer = member.roles.cache.some(r => r.name.includes("Khách Hàng"));
+          const isVIP = member.roles.cache.some(r => r.name.includes("VIP"));
+          const isStaff = isStaffMember(member);
+          const highestRole = member.roles.highest;
+
+          const embedUser = new EmbedBuilder()
+            .setColor(isVIP ? '#E040FB' : (isCustomer ? '#00E676' : '#00E5FF'))
+            .setTitle(`👤 THÔNG TIN THÀNH VIÊN: ${member.user.tag}`)
+            .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
+            .setDescription(
+              `• **Thành viên:** <@${member.id}> (\`${member.id}\`)\n` +
+              `• **Vai trò cao nhất:** <@&${highestRole.id}>\n` +
+              `• **Khách hàng (Buyer):** ${isCustomer ? '✅ Đã kích hoạt' : '❌ Chưa có'}\n` +
+              `• **VIP Customer:** ${isVIP ? '💎 Đã kích hoạt' : '❌ Chưa có'}\n` +
+              `• **Ban Quản Trị (Staff):** ${isStaff ? '🛡️ Có' : '❌ Không'}\n` +
+              `• **Ngày tham gia server:** <t:${Math.floor((member.joinedTimestamp || Date.now()) / 1000)}:F> (<t:${Math.floor((member.joinedTimestamp || Date.now()) / 1000)}:R>)`
+            )
+            .setFooter({ text: 'LS STUDIO Member Verification' })
+            .setTimestamp();
+
+          return safeReply(interaction, { embeds: [embedUser], ephemeral: true });
+        }
+
+        return safeReply(interaction, {
+          content: `👤 Bạn là <@${userToCheck.id}> (\`${userToCheck.tag}\`). Dùng lệnh này trong server để xem chi tiết vai trò!`,
+          ephemeral: true
+        });
       }
 
       // Fallback cho Slash Command chưa hỗ trợ
@@ -5086,6 +5342,8 @@ module.exports = {
   safeFollowUp,
   safeUpdate,
   safeShowModal,
+  commands,
+  registerCommands,
   handleGracefulShutdown
 };
 

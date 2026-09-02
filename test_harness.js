@@ -72,6 +72,8 @@ const {
   safeFollowUp,
   safeUpdate,
   safeShowModal,
+  commands,
+  registerCommands,
   handleGracefulShutdown
 } = require('./bot.js');
 
@@ -289,6 +291,13 @@ function createMockChannel({ id = null, name = 'general', type = ChannelType.Gui
       channel.topic = newTopic;
       return channel;
     },
+    bulkDelete: async (amount, filterOld) => {
+      const msgs = Array.from(messageMap.values()).slice(0, typeof amount === 'number' ? amount : 10);
+      msgs.forEach(m => messageMap.delete(m.id));
+      const col = new Collection();
+      msgs.forEach(m => col.set(m.id, m));
+      return col;
+    },
     deletable: true
   };
 
@@ -421,7 +430,8 @@ function createMockInteraction({
       getUser: (name) => options[name] || null,
       getString: (name) => options[name] || null,
       getInteger: (name) => options[name] || null,
-      getMember: (name) => options[name] ? g?.members.cache.get(options[name].id) || options[name] : null
+      getMember: (name) => options[name] ? g?.members.cache.get(options[name].id) || options[name] : null,
+      getFocused: (full) => options._focused || (options.code !== undefined ? { name: 'code', value: options.code } : { name: 'code', value: '' })
     },
     fields: {
       getTextInputValue: (id) => fields[id] || ''
@@ -986,6 +996,198 @@ async function runAllTests() {
     botClient.emit(Events.InteractionCreate, interaction);
     await new Promise(r => setTimeout(r, 50));
     assertEqual(Array.isArray(interaction._state.respondedAutocomplete), true, "Autocomplete must respond with array");
+  });
+
+  await runTest("Suite 4", "Discord Slash Commands Specifications Audit (Names, Descriptions, Types)", async () => {
+    assert(Array.isArray(commands), "commands must be an array");
+    assert(commands.length >= 8, `commands must contain at least 8 commands (got ${commands.length})`);
+
+    const DISCORD_NAME_REGEX = /^[-_\p{L}\p{N}]{1,32}$/u;
+
+    for (const cmd of commands) {
+      // 1. Name verification
+      assert(cmd.name && typeof cmd.name === 'string', `Command must have a name: ${JSON.stringify(cmd)}`);
+      assert(cmd.name === cmd.name.toLowerCase(), `Command name must be lowercase: ${cmd.name}`);
+      assert(cmd.name.length >= 1 && cmd.name.length <= 32, `Command name length must be 1-32: ${cmd.name}`);
+      assert(DISCORD_NAME_REGEX.test(cmd.name), `Command name must match regex: ${cmd.name}`);
+
+      // 2. Description verification
+      assert(cmd.description && typeof cmd.description === 'string', `Command ${cmd.name} must have a description`);
+      assert(cmd.description.length >= 1 && cmd.description.length <= 100, `Command ${cmd.name} description length must be 1-100 (got ${cmd.description.length})`);
+
+      // 3. Options verification
+      if (cmd.options && Array.isArray(cmd.options)) {
+        for (const opt of cmd.options) {
+          assert(opt.name && typeof opt.name === 'string', `Option in ${cmd.name} must have name`);
+          assert(opt.name === opt.name.toLowerCase(), `Option name in ${cmd.name} must be lowercase: ${opt.name}`);
+          assert(opt.name.length >= 1 && opt.name.length <= 32, `Option name in ${cmd.name} length 1-32: ${opt.name}`);
+          assert(DISCORD_NAME_REGEX.test(opt.name), `Option name in ${cmd.name} must match regex: ${opt.name}`);
+
+          assert(opt.description && typeof opt.description === 'string', `Option ${opt.name} in ${cmd.name} must have description`);
+          assert(opt.description.length >= 1 && opt.description.length <= 100, `Option ${opt.name} description length 1-100 (got ${opt.description.length})`);
+          assert(typeof opt.type === 'number' && opt.type >= 1 && opt.type <= 11, `Option ${opt.name} in ${cmd.name} must have valid option type (1-11)`);
+        }
+      }
+    }
+  });
+
+  await runTest("Suite 4", "/help command response", async () => {
+    const interaction = createMockInteraction({ type: 'command', commandName: 'help' });
+    botClient.emit(Events.InteractionCreate, interaction);
+    await waitForInteraction(interaction);
+
+    assert(interaction._state.replied, "Must reply to /help");
+    assert(interaction._state.ephemeral, "/help must be ephemeral");
+    assert(interaction._state.replyPayload.embeds.length > 0, "Must contain embed");
+    const embed = interaction._state.replyPayload.embeds[0];
+    assert(embed.data.title.includes("HƯỚNG DẪN"), "Title contains help guide");
+    assert(embed.data.description.includes("/ping") && embed.data.description.includes("/stk") && embed.data.description.includes("/khachhang"), "Description lists all slash commands");
+  });
+
+  await runTest("Suite 4", "/clearmessages: Non-staff permission rejection", async () => {
+    const guild = createMockGuild();
+    const normalUser = createMockUser();
+    const normalMember = createMockGuildMember({ user: normalUser, guild });
+    const interaction = createMockInteraction({
+      type: 'command',
+      commandName: 'clearmessages',
+      user: normalUser,
+      member: normalMember,
+      guild,
+      options: { amount: 10 }
+    });
+
+    botClient.emit(Events.InteractionCreate, interaction);
+    await waitForInteraction(interaction);
+
+    assert(interaction._state.replied, "Must reply");
+    assert(interaction._state.replyPayload.content.includes("không có quyền"), "Must reject non-staff for /clearmessages");
+  });
+
+  await runTest("Suite 4", "/clearmessages: Staff bulkDelete execution", async () => {
+    const guild = createMockGuild();
+    const staffRole = createMockRole({ name: "👑・Founder / Lead Dev", position: 100, permissions: new PermissionsBitField([PermissionsBitField.Flags.Administrator]) });
+    guild.roles.cache.set(staffRole.id, staffRole);
+
+    const staffUser = createMockUser();
+    const staffMember = createMockMemberWithRole(staffUser, [staffRole], guild);
+    const channel = createMockChannel({ guild });
+
+    // Populate channel with mock messages
+    await channel.send({ content: "Msg 1" });
+    await channel.send({ content: "Msg 2" });
+    await channel.send({ content: "Msg 3" });
+
+    const interaction = createMockInteraction({
+      type: 'command',
+      commandName: 'clearmessages',
+      user: staffUser,
+      member: staffMember,
+      guild,
+      channel,
+      options: { amount: 3 }
+    });
+
+    botClient.emit(Events.InteractionCreate, interaction);
+    await waitForInteraction(interaction);
+
+    assert(interaction._state.deferred, "Must deferReply for /clearmessages");
+    const clearContent = interaction._state.editReplyPayload?.content || interaction._state.replyPayload?.content || '';
+    assert(clearContent.includes("Đã xóa thành công"), "Success message returned for /clearmessages");
+  });
+
+  await runTest("Suite 4", "/kiemtra: Tra cứu mã đơn hàng hợp lệ & không hợp lệ", async () => {
+    const guild = createMockGuild();
+    const userInvalid = createMockUser();
+    const userValid = createMockUser();
+
+    // 1. Invalid code format
+    const intInvalid = createMockInteraction({
+      type: 'command',
+      commandName: 'kiemtra',
+      user: userInvalid,
+      guild,
+      options: { code: 'INVALID_CODE_123' }
+    });
+    botClient.emit(Events.InteractionCreate, intInvalid);
+    await waitForInteraction(intInvalid);
+    assert(intInvalid._state.replyPayload.content.includes("không đúng định dạng"), "Rejects invalid order code format");
+
+    // 2. Valid active order code
+    const orderCode = 'LS888999';
+    activeOrderCodes.set(orderCode, { createdAt: Date.now(), pkgKey: 'ls_anticheat', buyerId: userValid.id });
+
+    const intValid = createMockInteraction({
+      type: 'command',
+      commandName: 'kiemtra',
+      user: userValid,
+      guild,
+      options: { code: orderCode }
+    });
+    botClient.emit(Events.InteractionCreate, intValid);
+    await waitForInteraction(intValid);
+
+    const validPayload = intValid._state.replyPayload || intValid._state.editReplyPayload;
+    assert(validPayload && validPayload.embeds && validPayload.embeds.length > 0, "Returns order info embed");
+    const embed = validPayload.embeds[0];
+    assert(embed.data.title.includes(orderCode), "Title includes order code");
+    assert(embed.data.description.includes("CHỜ THANH TOÁN"), "Status shows pending payment");
+  });
+
+  await runTest("Suite 4", "/kiemtra: Tra cứu thông tin thành viên (Self & Target Member)", async () => {
+    const guild = createMockGuild();
+    const customerRole = createMockRole({ name: "🛒・Khách Hàng (Buyer)", position: 10 });
+    guild.roles.cache.set(customerRole.id, customerRole);
+
+    const buyerUser = createMockUser({ username: 'vip_buyer' });
+    const buyerMember = createMockMemberWithRole(buyerUser, [customerRole], guild);
+    guild.members.cache.set(buyerUser.id, buyerMember);
+
+    // 1. Check self
+    const intSelf = createMockInteraction({
+      type: 'command',
+      commandName: 'kiemtra',
+      user: buyerUser,
+      member: buyerMember,
+      guild
+    });
+    botClient.emit(Events.InteractionCreate, intSelf);
+    await waitForInteraction(intSelf);
+
+    assert(intSelf._state.replyPayload.embeds.length > 0, "Returns user embed");
+    assert(intSelf._state.replyPayload.embeds[0].data.description.includes("Đã kích hoạt"), "Shows Buyer role active");
+
+    // 2. Check target member
+    const staffUser = createMockUser();
+    const intTarget = createMockInteraction({
+      type: 'command',
+      commandName: 'kiemtra',
+      user: staffUser,
+      guild,
+      options: { user: buyerUser }
+    });
+    botClient.emit(Events.InteractionCreate, intTarget);
+    await waitForInteraction(intTarget);
+
+    assert(intTarget._state.replyPayload.embeds.length > 0, "Returns target member embed");
+    assert(intTarget._state.replyPayload.embeds[0].data.title.includes(buyerUser.tag), "Title contains target user tag");
+  });
+
+  await runTest("Suite 4", "/kiemtra: Autocomplete order code filtering", async () => {
+    const order1 = 'LS111222';
+    const order2 = 'LS999888';
+    activeOrderCodes.set(order1, { createdAt: Date.now(), pkgKey: 'ls_anticheat' });
+    approvedOrderCodes.add(order2);
+
+    const intAuto = createMockInteraction({
+      type: 'autocomplete',
+      options: { _focused: { name: 'code', value: '111' } }
+    });
+    botClient.emit(Events.InteractionCreate, intAuto);
+    await new Promise(r => setTimeout(r, 50));
+
+    assert(Array.isArray(intAuto._state.respondedAutocomplete), "Responds with choices array");
+    assert(intAuto._state.respondedAutocomplete.some(c => c.value === order1), "Includes matching active order code");
   });
 
   // ============================================================================

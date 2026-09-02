@@ -147,7 +147,7 @@ client.once(Events.ClientReady, async () => {
     const chPrice = channels.find(c => c && c.name.includes("bảng-giá"));
     if (chPrice) {
       const pMsgs = await chPrice.messages.fetch({ limit: 10 });
-      for (const [mId, msg] of msgs) {
+      for (const [mId, msg] of pMsgs) {
       if (msg.author.id === client.user.id) {
         await msg.delete().catch(() => {});
         await sleep(250);

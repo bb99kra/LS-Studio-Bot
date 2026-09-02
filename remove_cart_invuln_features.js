@@ -91,7 +91,7 @@ client.once(Events.ClientReady, async () => {
       if (!ch) return;
       try {
         const messages = await ch.messages.fetch({ limit: 15 });
-        for (const [mId, msg] of msgs) {
+        for (const [mId, msg] of messages) {
       if (msg.author.id === client.user.id) {
         await msg.delete().catch(() => {});
         await sleep(250);
