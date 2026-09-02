@@ -10,10 +10,11 @@ const { spawnSync } = require('child_process');
 const path = require('path');
 
 const suites = [
+  { name: 'Components V2 UI & Layout Engine', script: 'test_components_v2.js' },
   { name: 'Memory & Lifecycle Audit', script: 'test_memory_audit.js' },
   { name: 'Financial & Payment Audit', script: 'test_financial_audit.js' },
   { name: 'Transcript & Security Audit', script: 'test_transcript_audit.js' },
-  { name: 'Full Mock Test Harness (169 Tests / 23 Suites)', script: 'test_harness.js' }
+  { name: 'Full Mock Test Harness (175 Tests / 24 Suites)', script: 'test_harness.js' }
 ];
 
 console.log('================================================================================');

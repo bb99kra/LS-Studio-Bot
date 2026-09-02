@@ -168,14 +168,16 @@ client.once(Events.ClientReady, async () => {
       }
     }
 
-    console.log("🎨 Đang đăng các Embeds thiết kế tối giản, sang xịn chuẩn Studio lớn...");
+    const { createComponentsV2Message, isComponentsV2Available } = require('./bot');
+
+    console.log("🎨 Đang đăng các Components V2 / Embeds thiết kế tối giản, sang xịn chuẩn Studio lớn...");
 
     // 1. KÊNH THÔNG BÁO (📢ᵎᴛʜôɴɢ-ʙáᴏ)
     await refreshChannel(channels.get("1542479120036794418"), async (ch) => {
-      const embed = new EmbedBuilder()
-        .setColor("#5865F2")
-        .setTitle("✦ LS STUDIO • MINECRAFT DEVELOPMENT ✦")
-        .setDescription(
+      const v2Notice = createComponentsV2Message({
+        accentColor: 0x5865F2,
+        title: "✦ LS STUDIO • MINECRAFT DEVELOPMENT ✦",
+        description:
           "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
           "👋 Chào mừng bạn đến với **LS STUDIO**!\n\n" +
           "Bên mình chuyên phát triển và tối ưu các **Plugin Minecraft & Hệ thống Anti-Cheat (Packet Level)** dành cho Spigot, Paper, Purpur và Folia.\n\n" +
@@ -183,29 +185,28 @@ client.once(Events.ClientReady, async () => {
           "• Plugin Anti-Cheat tự code (Chống Freecam, Chặn Hack Client, Chống Crash)\n" +
           "• Nhận lập trình Plugin độc quyền theo yêu cầu (Custom Dev)\n" +
           "• Tối ưu hiệu năng, fix lỗi lag TPS, port đa luồng Folia\n" +
-          "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        .addFields(
+          "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        fields: [
           { name: "💎 Sản Phẩm", value: `<#1542479128534716438>`, inline: true },
           { name: "💰 Bảng Giá", value: `<#1542479130900172910>`, inline: true },
           { name: "🛒 Mua Hàng", value: `<#1542479138839986227>`, inline: true }
-        )
-        .setFooter({ text: "LS STUDIO • Lead Developer: Nguyendzvn" });
+        ],
+        footer: "LS STUDIO • Lead Developer: Nguyendzvn"
+      });
 
-      await ch.send({ embeds: [embed] });
+      await ch.send(isComponentsV2Available() ? v2Notice.toV2() : v2Notice.toClassic());
     });
 
     // 2. KÊNH SẢN PHẨM (💎ᵎsảɴ-ᴘʜẩᴍ)
     await refreshChannel(channels.get("1542479128534716438"), async (ch) => {
-      const embed = new EmbedBuilder()
-        .setColor("#5865F2")
-        .setTitle("✦ DANH SÁCH SẢN PHẨM PLUGIN ✦")
-        .setDescription(
+      const v2Products = createComponentsV2Message({
+        accentColor: 0x5865F2,
+        title: "✦ DANH SÁCH SẢN PHẨM PLUGIN ✦",
+        description:
           "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
           "Toàn bộ Plugin được viết bất đồng bộ (Async) trên nền tảng Packet, đảm bảo máy chủ luôn giữ **20.0 TPS**.\n" +
-          "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        .addFields(
+          "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        fields: [
           {
             name: "👁️ LS-AntiFreeCam & Obfuscator",
             value: "▸ **Tính năng:** Ẩn quặng và rương khi ngoài góc nhìn, trị triệt để Freecam, Chest ESP, Baritone.\n▸ **Hỗ trợ:** 1.18 - 1.21+ (Paper / Folia)\n▸ **Giá:** `150.000 VNĐ`"
@@ -226,18 +227,19 @@ client.once(Events.ClientReady, async () => {
             name: "👑 LS-TotalSecurity (Trọn Bộ 4 Module)",
             value: "▸ **Bao gồm:** Cả 4 plugin trên tích hợp trong 1 bản build tối ưu.\n▸ **Giá Trọn Gói:** `390.000 VNĐ` *(Tiết kiệm 30%)*"
           }
-        )
-        .setFooter({ text: "Mở Ticket tại #🛒ᵎmua-plugin để được hỗ trợ giao dịch!" });
+        ],
+        footer: "Mở Ticket tại #🛒ᵎmua-plugin để được hỗ trợ giao dịch!"
+      });
 
-      await ch.send({ embeds: [embed] });
+      await ch.send(isComponentsV2Available() ? v2Products.toV2() : v2Products.toClassic());
     });
 
     // 3. KÊNH BẢNG GIÁ (💰ᵎʙảɴɢ-ɢɪá)
     await refreshChannel(channels.get("1542479130900172910"), async (ch) => {
-      const embed = new EmbedBuilder()
-        .setColor("#FEE75C")
-        .setTitle("✦ BẢNG GIÁ & PHƯƠNG THỨC THANH TOÁN ✦")
-        .setDescription(
+      const v2Pricing = createComponentsV2Message({
+        accentColor: 0xFEE75C,
+        title: "✦ BẢNG GIÁ & PHƯƠNG THỨC THANH TOÁN ✦",
+        description:
           "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
           "▸ **1. Plugin Đóng Gói Sẵn:**\n" +
           "• LS-AntiFreeCam: `150.000đ`\n" +
@@ -254,27 +256,15 @@ client.once(Events.ClientReady, async () => {
           "• Hỗ trợ cấu hình trực tiếp vào server.\n\n" +
           "▸ **4. Cổng Thanh Toán:**\n" +
           "• MBBank: `844515133333` (VAN HUU PHAM NGUYEN) - Quét mã VietQR tự động 24/7\n" +
-          "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        .setFooter({ text: "Giao dịch an toàn qua Ticket tại LS STUDIO" });
+          "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        footer: "Giao dịch an toàn qua Ticket tại LS STUDIO"
+      });
 
-      await ch.send({ embeds: [embed] });
+      await ch.send(isComponentsV2Available() ? v2Pricing.toV2() : v2Pricing.toClassic());
     });
 
     // 4. KÊNH MUA PLUGIN (🛒ᵎᴍᴜᴀ-ᴘʟᴜɢɪɴ)
     await refreshChannel(channels.get("1542479138839986227"), async (ch) => {
-      const embed = new EmbedBuilder()
-        .setColor("#57F287")
-        .setTitle("✦ MUA PLUGIN & MỞ TICKET ✦")
-        .setDescription(
-          "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
-          "Bạn muốn mua Plugin Anti-Cheat hoặc cần đặt làm Plugin riêng?\n\n" +
-          "👉 Nhấn nút **[🛒 Mua Plugin / Mở Ticket]** bên dưới để tạo kênh giao dịch riêng tư.\n" +
-          "Hệ thống sẽ tạo mã **VietQR MBBank** kèm số tiền chính xác để bạn thanh toán nhanh trong 3 giây!\n" +
-          "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        .setFooter({ text: "LS STUDIO • Hệ thống thanh toán VietQR tự động" });
-
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId('ticket_buy')
@@ -286,28 +276,24 @@ client.once(Events.ClientReady, async () => {
           .setStyle(ButtonStyle.Secondary)
       );
 
-      await ch.send({ embeds: [embed], components: [row] });
+      const v2Buy = createComponentsV2Message({
+        accentColor: 0x57F287,
+        title: "✦ MUA PLUGIN & MỞ TICKET ✦",
+        description:
+          "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+          "Bạn muốn mua Plugin Anti-Cheat hoặc cần đặt làm Plugin riêng?\n\n" +
+          "👉 Nhấn nút **[🛒 Mua Plugin / Mở Ticket]** bên dưới để tạo kênh giao dịch riêng tư.\n" +
+          "Hệ thống sẽ tạo mã **VietQR MBBank** kèm số tiền chính xác để bạn thanh toán nhanh trong 3 giây!\n" +
+          "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        footer: "LS STUDIO • Hệ thống thanh toán VietQR tự động",
+        actionRows: [row]
+      });
+
+      await ch.send(isComponentsV2Available() ? v2Buy.toV2() : v2Buy.toClassic());
     });
 
     // 5. KÊNH SERVER TEST DEMO (🌐ᵎsᴇʀᴠᴇʀ-ᴛᴇsᴛ)
     await refreshChannel(channels.get("1542479132758384650"), async (ch) => {
-      const embed = new EmbedBuilder()
-        .setColor("#EB459E")
-        .setTitle("✦ MÁY CHỦ THỰC CHIẾN: NGUYEN SMP ✦")
-        .setDescription(
-          "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
-          "Trải nghiệm thực tế độ mượt mà của các Plugin Anti do LS Studio phát triển:\n\n" +
-          "🎮 **Thông Tin Máy Chủ:**\n" +
-          "• **IP:** `fusion.pikamc.vn:26111`\n" +
-          "• **Phiên bản:** `1.21+` (Java Edition)\n" +
-          "• Đang vận hành chính thức 24/7 với hệ thống Anti của LS Studio.\n" +
-          "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        .addFields(
-          { name: "🔗 Discord Nguyen SMP", value: "https://discord.gg/vjFkC6cRdj" }
-        )
-        .setFooter({ text: "LS STUDIO x Nguyen SMP" });
-
       const btn = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setLabel('👉 Vào Discord Nguyen SMP')
@@ -315,15 +301,33 @@ client.once(Events.ClientReady, async () => {
           .setURL('https://discord.gg/vjFkC6cRdj')
       );
 
-      await ch.send({ embeds: [embed], components: [btn] });
+      const v2Demo = createComponentsV2Message({
+        accentColor: 0xEB459E,
+        title: "✦ MÁY CHỦ THỰC CHIẾN: NGUYEN SMP ✦",
+        description:
+          "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
+          "Trải nghiệm thực tế độ mượt mà của các Plugin Anti do LS Studio phát triển:\n\n" +
+          "🎮 **Thông Tin Máy Chủ:**\n" +
+          "• **IP:** `fusion.pikamc.vn:26111`\n" +
+          "• **Phiên bản:** `1.21+` (Java Edition)\n" +
+          "• Đang vận hành chính thức 24/7 với hệ thống Anti của LS Studio.\n" +
+          "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        fields: [
+          { name: "🔗 Discord Nguyen SMP", value: "https://discord.gg/vjFkC6cRdj" }
+        ],
+        footer: "LS STUDIO x Nguyen SMP",
+        actionRows: [btn]
+      });
+
+      await ch.send(isComponentsV2Available() ? v2Demo.toV2() : v2Demo.toClassic());
     });
 
     // 6. KÊNH LUẬT (📜ᵎʟᴜậᴛ-ʟệ)
     await refreshChannel(channels.get("1542479117880922183"), async (ch) => {
-      const embed = new EmbedBuilder()
-        .setColor("#ED4245")
-        .setTitle("✦ ĐIỀU KHOẢN & BẢN QUYỀN PLUGIN ✦")
-        .setDescription(
+      const v2Rules = createComponentsV2Message({
+        accentColor: 0xED4245,
+        title: "✦ ĐIỀU KHOẢN & BẢN QUYỀN PLUGIN ✦",
+        description:
           "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n" +
           "▸ **1. Giấy Phép Sử Dụng:**\n" +
           "• Plugin mua về dùng cho server của bạn. Không share công khai, leak file hoặc bán lại.\n\n" +
@@ -332,11 +336,11 @@ client.once(Events.ClientReady, async () => {
           "• Cập nhật bản vá lỗi miễn phí khi có hack bypass mới.\n\n" +
           "▸ **3. Đặt Code Plugin Riêng:**\n" +
           "• Trao đổi ý tưởng ➔ Báo giá & hẹn ngày bàn giao ➔ Cọc 50% ➔ Test trên server demo ➔ Thanh toán 50% còn lại và nhận full file jar.\n" +
-          "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        .setFooter({ text: "LS STUDIO" });
+          "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        footer: "LS STUDIO"
+      });
 
-      await ch.send({ embeds: [embed] });
+      await ch.send(isComponentsV2Available() ? v2Rules.toV2() : v2Rules.toClassic());
     });
 
     console.log("🎉 DECOR HOÀN TẤT THEO PHONG CÁCH STUDIO LỚN 100%!");

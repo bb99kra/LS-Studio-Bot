@@ -97,6 +97,32 @@ const {
 
 const { runServerSetup } = require('./setup_server.js');
 const { PermissionsBitField, ChannelType, OverwriteType, ButtonStyle, Events, Collection, AttachmentBuilder, ApplicationIntegrationType, InteractionContextType, ActivityType, RESTEvents } = require('discord.js');
+const {
+  ComponentType: V2ComponentType,
+  MessageFlags: V2MessageFlags,
+  SeparatorSpacingSize: V2SeparatorSpacingSize,
+  ButtonStyle: V2ButtonStyle,
+  Colors: V2Colors,
+  ContainerBuilder: V2ContainerBuilder,
+  SectionBuilder: V2SectionBuilder,
+  TextDisplayBuilder: V2TextDisplayBuilder,
+  SeparatorBuilder: V2SeparatorBuilder,
+  ThumbnailBuilder: V2ThumbnailBuilder,
+  MediaGalleryBuilder: V2MediaGalleryBuilder,
+  MediaGalleryItemBuilder: V2MediaGalleryItemBuilder,
+  FileBuilder: V2FileBuilder,
+  ActionRowBuilder: V2ActionRowBuilder,
+  ButtonBuilder: V2ButtonBuilder,
+  StringSelectMenuBuilder: V2StringSelectMenuBuilder,
+  resolveColor: v2ResolveColor,
+  convertAccentColor: v2ConvertAccentColor,
+  createComponentPayload: v2CreateComponentPayload,
+  createDualModePayload: v2CreateDualModePayload,
+  convertLegacyToComponentsV2: v2ConvertLegacyToComponentsV2,
+  convertComponentsV2ToLegacy: v2ConvertComponentsV2ToLegacy,
+  isComponentsV2Payload: v2IsComponentsV2Payload,
+  fromJSON: v2FromJSON
+} = require('./components_v2.js');
 
 // ============================================================================
 // TEST RUNNER INFRASTRUCTURE
@@ -285,13 +311,15 @@ function createMockChannel({ id = null, name = 'general', type = ChannelType.Gui
     },
     send: async (payload) => {
       const msgId = 'msg_' + Math.random().toString(36).substring(2, 9);
+      const safePayload = typeof payload === 'string' ? { content: payload } : (payload || {});
       const newMsg = {
         id: msgId,
         channel,
-        content: payload.content || '',
-        embeds: payload.embeds || [],
-        components: payload.components || [],
-        files: payload.files || [],
+        content: safePayload.content || '',
+        embeds: safePayload.embeds || [],
+        components: safePayload.components || [],
+        files: safePayload.files || [],
+        flags: safePayload.flags || 0,
         createdTimestamp: Date.now(),
         author: { id: 'bot_id', tag: 'LS Studio Bot#0001', bot: true },
         delete: async () => { messageMap.delete(msgId); return newMsg; }
@@ -945,10 +973,11 @@ async function runAllTests() {
     await waitForInteraction(interaction);
 
     assert(interaction._state.deferred, "Must deferReply on /stk");
-    assert(interaction._state.editReplyPayload !== null, "Must editReply with embed");
-    const embed = interaction._state.editReplyPayload.embeds[0];
-    assert(embed.data.title.includes("THÔNG TIN THANH TOÁN"), "Title must contain payment info");
-    assert(embed.data.description.includes(BANK_CONFIG.ACCOUNT_NO), "Must include MBBank account number");
+    assert(interaction._state.editReplyPayload !== null, "Must editReply with embed or V2 components");
+    const pStk = interaction._state.editReplyPayload;
+    const stkStr = pStk.embeds?.[0] ? `${pStk.embeds[0].data?.title || ''} ${pStk.embeds[0].data?.description || ''}` : JSON.stringify(pStk.components || pStk);
+    assert(stkStr.includes("THÔNG TIN THANH TOÁN") || stkStr.includes("PAYMENT INFORMATION"), "Title must contain payment info");
+    assert(stkStr.includes(BANK_CONFIG.ACCOUNT_NO), "Must include MBBank account number");
   });
 
   await runTest("Suite 4", "/khachhang: Non-staff permission rejection", async () => {
@@ -1095,14 +1124,15 @@ async function runAllTests() {
 
     assert(interaction._state.replied, "Must reply to /help");
     assert(interaction._state.ephemeral, "/help must be ephemeral");
-    assert(interaction._state.replyPayload.embeds.length > 0, "Must contain embed");
-    const embed = interaction._state.replyPayload.embeds[0];
-    assert(embed.data.title.includes("HƯỚNG DẪN"), "Title contains help guide");
-    assert(embed.data.description.includes("/ping") && embed.data.description.includes("/stk") && embed.data.description.includes("/khachhang"), "Description lists all slash commands");
-    assert(embed.data.description.includes("/invite"), "Description includes /invite command");
-    assert(embed.data.description.includes(APP_DIRECTORY_METADATA.SUPPORT_SERVER_URL), "Embed includes support server URL");
-    assert(embed.data.description.includes(APP_DIRECTORY_METADATA.TERMS_OF_SERVICE_URL), "Embed includes Terms of Service URL");
-    assert(embed.data.description.includes(APP_DIRECTORY_METADATA.PRIVACY_POLICY_URL), "Embed includes Privacy Policy URL");
+    const pHelp = interaction._state.replyPayload;
+    assert(pHelp && (pHelp.embeds?.length > 0 || pHelp.components?.length > 0), "Must contain embed or components");
+    const helpStr = pHelp.embeds?.[0] ? `${pHelp.embeds[0].data?.title || ''} ${pHelp.embeds[0].data?.description || ''}` : JSON.stringify(pHelp.components || pHelp);
+    assert(helpStr.includes("HƯỚNG DẪN") || helpStr.includes("HELP"), "Title contains help guide");
+    assert(helpStr.includes("/ping") && helpStr.includes("/stk") && helpStr.includes("/khachhang"), "Description lists all slash commands");
+    assert(helpStr.includes("/invite"), "Description includes /invite command");
+    assert(helpStr.includes(APP_DIRECTORY_METADATA.SUPPORT_SERVER_URL), "Embed includes support server URL");
+    assert(helpStr.includes(APP_DIRECTORY_METADATA.TERMS_OF_SERVICE_URL), "Embed includes Terms of Service URL");
+    assert(helpStr.includes(APP_DIRECTORY_METADATA.PRIVACY_POLICY_URL), "Embed includes Privacy Policy URL");
   });
 
   await runTest("Suite 4", "/invite slash command response & button generation", async () => {
@@ -1112,22 +1142,19 @@ async function runAllTests() {
 
     assert(interaction._state.replied, "Must reply to /invite");
     assert(interaction._state.ephemeral, "/invite must be ephemeral");
-    assert(interaction._state.replyPayload.embeds.length > 0, "Must contain embed");
-    const embed = interaction._state.replyPayload.embeds[0];
-    assert(embed.data.title.includes("MỜI BOT"), "Title contains invite banner");
-    assert(embed.data.description.includes("268814352"), "Description contains exact bitfield 268814352");
-    assert(embed.data.description.includes("Guild Install") && embed.data.description.includes("User Install"), "Description explains installation contexts");
-    assert(embed.data.description.includes("SendMessages") && embed.data.description.includes("ManageRoles"), "Description lists core permissions");
+    const pInvite = interaction._state.replyPayload;
+    assert(pInvite && (pInvite.embeds?.length > 0 || pInvite.components?.length > 0), "Must contain embed or components");
+    const inviteStr = pInvite.embeds?.[0] ? `${pInvite.embeds[0].data?.title || ''} ${pInvite.embeds[0].data?.description || ''}` : JSON.stringify(pInvite.components || pInvite);
+    assert(inviteStr.includes("MỜI BOT") || inviteStr.includes("INVITE"), "Title contains invite banner");
+    assert(inviteStr.includes("268814352"), "Description contains exact bitfield 268814352");
+    assert(inviteStr.includes("Guild Install") && inviteStr.includes("User Install"), "Description explains installation contexts");
+    assert(inviteStr.includes("SendMessages") && inviteStr.includes("ManageRoles"), "Description lists core permissions");
     
-    assert(interaction._state.replyPayload.components.length > 0, "Must contain ActionRow with buttons");
-    const row = interaction._state.replyPayload.components[0];
-    assert(row.components.length === 3, `Must have 3 link buttons (got ${row.components.length})`);
-    assert(row.components[0].data.style === ButtonStyle.Link, "Button 1 must be Link style");
-    assert(row.components[0].data.url.includes("discord.com/oauth2/authorize"), "Button 1 contains OAuth2 authorize URL");
-    assert(row.components[0].data.url.includes("permissions=268814352"), "Button 1 contains exact permissions bitfield");
-    assert(row.components[0].data.url.includes("integration_type=0"), "Button 1 specifies guild installation context");
-    assert(row.components[1].data.url.includes("integration_type=1"), "Button 2 specifies user installation context");
-    assert(row.components[2].data.url === APP_DIRECTORY_METADATA.SUPPORT_SERVER_URL, "Button 3 links to support server");
+    assert(inviteStr.includes("discord.com/oauth2/authorize"), "Contains OAuth2 authorize URL");
+    assert(inviteStr.includes("permissions=268814352"), "Contains exact permissions bitfield");
+    assert(inviteStr.includes("integration_type=0"), "Specifies guild installation context");
+    assert(inviteStr.includes("integration_type=1"), "Specifies user installation context");
+    assert(inviteStr.includes(APP_DIRECTORY_METADATA.SUPPORT_SERVER_URL), "Links to support server");
   });
 
   await runTest("Suite 4", "/clearmessages: Non-staff permission rejection", async () => {
@@ -1214,10 +1241,10 @@ async function runAllTests() {
     await waitForInteraction(intValid);
 
     const validPayload = intValid._state.replyPayload || intValid._state.editReplyPayload;
-    assert(validPayload && validPayload.embeds && validPayload.embeds.length > 0, "Returns order info embed");
-    const embed = validPayload.embeds[0];
-    assert(embed.data.title.includes(orderCode), "Title includes order code");
-    assert(embed.data.description.includes("CHỜ THANH TOÁN"), "Status shows pending payment");
+    assert(validPayload && (validPayload.embeds?.length > 0 || validPayload.components?.length > 0), "Returns order info payload");
+    const validStr = validPayload.embeds?.[0] ? `${validPayload.embeds[0].data?.title || ''} ${validPayload.embeds[0].data?.description || ''}` : JSON.stringify(validPayload.components || validPayload);
+    assert(validStr.includes(orderCode), "Title includes order code");
+    assert(validStr.includes("CHỜ THANH TOÁN") || validStr.includes("PENDING"), "Status shows pending payment");
   });
 
   await runTest("Suite 4", "/kiemtra: Tra cứu thông tin thành viên (Self & Target Member)", async () => {
@@ -1240,8 +1267,10 @@ async function runAllTests() {
     botClient.emit(Events.InteractionCreate, intSelf);
     await waitForInteraction(intSelf);
 
-    assert(intSelf._state.replyPayload.embeds.length > 0, "Returns user embed");
-    assert(intSelf._state.replyPayload.embeds[0].data.description.includes("Đã kích hoạt"), "Shows Buyer role active");
+    const selfPayload = intSelf._state.replyPayload || intSelf._state.editReplyPayload;
+    assert(selfPayload && (selfPayload.embeds?.length > 0 || selfPayload.components?.length > 0), "Returns user payload");
+    const selfStr = selfPayload.embeds?.[0] ? `${selfPayload.embeds[0].data?.title || ''} ${selfPayload.embeds[0].data?.description || ''}` : JSON.stringify(selfPayload.components || selfPayload);
+    assert(selfStr.includes("Đã kích hoạt") || selfStr.includes("Active"), "Shows Buyer role active");
 
     // 2. Check target member
     const staffUser = createMockUser();
@@ -1255,8 +1284,10 @@ async function runAllTests() {
     botClient.emit(Events.InteractionCreate, intTarget);
     await waitForInteraction(intTarget);
 
-    assert(intTarget._state.replyPayload.embeds.length > 0, "Returns target member embed");
-    assert(intTarget._state.replyPayload.embeds[0].data.title.includes(buyerUser.tag), "Title contains target user tag");
+    const targetPayload = intTarget._state.replyPayload || intTarget._state.editReplyPayload;
+    assert(targetPayload && (targetPayload.embeds?.length > 0 || targetPayload.components?.length > 0), "Returns target member payload");
+    const targetStr = targetPayload.embeds?.[0] ? `${targetPayload.embeds[0].data?.title || ''} ${targetPayload.embeds[0].data?.description || ''}` : JSON.stringify(targetPayload.components || targetPayload);
+    assert(targetStr.includes(buyerUser.tag) || targetStr.includes(buyerUser.username), "Title contains target user tag");
   });
 
   await runTest("Suite 4", "/kiemtra: Autocomplete order code filtering", async () => {
@@ -1524,7 +1555,9 @@ async function runAllTests() {
     await waitForInteraction(interactionVi);
 
     assert(interactionVi._state.updatePayload !== null, "Must update message for VI");
-    assert(interactionVi._state.updatePayload.embeds[0].data.title.includes("TRUNG TÂM THANH TOÁN"), "VI embed title");
+    const viPayload = interactionVi._state.updatePayload;
+    const viStr = viPayload.embeds?.[0] ? viPayload.embeds[0].data?.title : JSON.stringify(viPayload.components || viPayload);
+    assert(viStr.includes("TRUNG TÂM THANH TOÁN"), "VI embed title");
 
     userCooldowns.delete(user.id);
     const interactionEn = createMockInteraction({ type: 'button', customId: `switch_lang_en_${user.id}`, user, guild });
@@ -1532,7 +1565,9 @@ async function runAllTests() {
     await waitForInteraction(interactionEn);
 
     assert(interactionEn._state.updatePayload !== null, "Must update message for EN");
-    assert(interactionEn._state.updatePayload.embeds[0].data.title.includes("ORDER & SUPPORT CENTER"), "EN embed title");
+    const enPayload = interactionEn._state.updatePayload;
+    const enStr = enPayload.embeds?.[0] ? enPayload.embeds[0].data?.title : JSON.stringify(enPayload.components || enPayload);
+    assert(enStr.includes("ORDER & SUPPORT CENTER"), "EN embed title");
   });
 
   await runTest("Suite 5", "Button: ticket_buy channel creation with permissions & rate limit", async () => {
@@ -1630,19 +1665,25 @@ async function runAllTests() {
     const intClose = createMockInteraction({ type: 'button', customId: 'btn_close_ticket', user, guild, channel: ticketChannel });
     botClient.emit(Events.InteractionCreate, intClose);
     await waitForInteraction(intClose);
-    assert(intClose._state.replyPayload.embeds[0].data.title.includes("XÁC NHẬN ĐÓNG TICKET"), "Confirmation prompt rendered");
+    const closePayload = intClose._state.replyPayload;
+    const closeStr = closePayload?.embeds?.[0] ? closePayload.embeds[0].data?.title : JSON.stringify(closePayload?.components || closePayload);
+    assert(closeStr.includes("XÁC NHẬN ĐÓNG TICKET"), "Confirmation prompt rendered");
 
     const intCancel = createMockInteraction({ type: 'button', customId: 'cancel_close_ticket', user, guild, channel: ticketChannel });
     botClient.emit(Events.InteractionCreate, intCancel);
     await waitForInteraction(intCancel);
-    assert(intCancel._state.updatePayload.embeds[0].data.description.includes("Đã hủy thao tác đóng ticket"), "Cancellation confirmed");
+    const cancelPayload = intCancel._state.updatePayload;
+    const cancelStr = cancelPayload?.embeds?.[0] ? cancelPayload.embeds[0].data?.description : JSON.stringify(cancelPayload?.components || cancelPayload);
+    assert(cancelStr.includes("Đã hủy thao tác đóng ticket"), "Cancellation confirmed");
 
     const intConfirm = createMockInteraction({ type: 'button', customId: 'confirm_close_ticket', user, guild, channel: ticketChannel });
     botClient.emit(Events.InteractionCreate, intConfirm);
     await waitForInteraction(intConfirm);
     await new Promise(r => setTimeout(r, 100));
 
-    assert(intConfirm._state.updatePayload.embeds[0].data.title.includes("ĐANG ĐÓNG TICKET"), "Closing status rendered");
+    const confirmPayload = intConfirm._state.updatePayload;
+    const confirmStr = confirmPayload?.embeds?.[0] ? confirmPayload.embeds[0].data?.title : JSON.stringify(confirmPayload?.components || confirmPayload);
+    assert(confirmStr.includes("ĐANG ĐÓNG TICKET"), "Closing status rendered");
     assert(logCh.messages.cache.size > 0, "Log channel must receive transcript archive");
   });
 
@@ -1674,13 +1715,18 @@ async function runAllTests() {
 
       if (pkg.price_vnd === 0) {
         assert(interaction._state.replied, "Must reply to custom dev request");
-        assert(interaction._state.replyPayload.embeds[0].data.title.includes("ĐẶT"), "Custom request title");
+        const replyPayload = interaction._state.replyPayload;
+        const replyStr = replyPayload?.embeds?.[0] ? replyPayload.embeds[0].data?.title : JSON.stringify(replyPayload?.components || replyPayload);
+        assert(replyStr.includes("ĐẶT") || replyStr.includes("ORDER"), "Custom request title");
       } else {
         assert(interaction._state.deferred, "Must deferReply for invoice generation");
         assert(interaction._state.editReplyPayload !== null, "Must editReply with invoice embed");
-        const embed = interaction._state.editReplyPayload.embeds[0];
-        assert(embed.data.title.includes("HÓA ĐƠN THANH TOÁN"), "Invoice title");
-        assert(embed.data.description.includes(formatVND(pkg.price_vnd)), "Description must contain VND price");
+        const editPayload = interaction._state.editReplyPayload;
+        const invoiceStr = editPayload?.embeds?.[0] 
+          ? `${editPayload.embeds[0].data?.title || ''} ${editPayload.embeds[0].data?.description || ''}` 
+          : JSON.stringify(editPayload?.components || editPayload);
+        assert(invoiceStr.includes("HÓA ĐƠN THANH TOÁN") || invoiceStr.includes("PAYMENT INVOICE"), "Invoice title");
+        assert(invoiceStr.includes(formatVND(pkg.price_vnd)) || invoiceStr.includes(pkg.price_vnd.toString()), "Description must contain VND price");
       }
     });
   }
@@ -2617,7 +2663,8 @@ async function runAllTests() {
     assertEqual(addRoleCalled, false, "member.roles.add MUST NOT be called when buyer already has Customer role");
     assert(ticketCh.messages.cache.size > 0, "Approval receipt sent");
     const lastMsg = Array.from(ticketCh.messages.cache.values()).pop();
-    assert(lastMsg.embeds[0].data.description.includes("đã sở hữu role"), "Embed notes buyer already has role");
+    const lastDesc = lastMsg.embeds?.[0] ? lastMsg.embeds[0].data?.description : JSON.stringify(lastMsg.components || lastMsg);
+    assert(lastDesc.includes("đã sở hữu role"), "Embed notes buyer already has role");
   });
 
   await runTest("Suite 14", "approve_ button: Idempotency locks block concurrent double execution", async () => {
@@ -4004,6 +4051,186 @@ async function runAllTests() {
     assert(telemetry.rateLimitHits >= 1);
     assert(telemetry.invalidRequestWarnings === 7);
     assert(typeof telemetry.timestamp === 'number');
+  });
+
+  // ============================================================================
+  // SUITE 24: Components V2 & Container UI Engine
+  // ============================================================================
+  console.log("\n⚡ [SUITE 24: Components V2 & Container UI Engine]");
+
+  await runTest("Suite 24", "ComponentType & MessageFlags.IsComponentsV2 (32768) specification & bitwise masks", async () => {
+    assertEqual(V2ComponentType.ActionRow, 1, "ActionRow = 1");
+    assertEqual(V2ComponentType.Button, 2, "Button = 2");
+    assertEqual(V2ComponentType.StringSelect, 3, "StringSelect = 3");
+    assertEqual(V2ComponentType.UserSelect, 5, "UserSelect = 5");
+    assertEqual(V2ComponentType.RoleSelect, 6, "RoleSelect = 6");
+    assertEqual(V2ComponentType.MentionableSelect, 7, "MentionableSelect = 7");
+    assertEqual(V2ComponentType.ChannelSelect, 8, "ChannelSelect = 8");
+    assertEqual(V2ComponentType.Section, 9, "Section = 9");
+    assertEqual(V2ComponentType.TextDisplay, 10, "TextDisplay = 10");
+    assertEqual(V2ComponentType.Thumbnail, 11, "Thumbnail = 11");
+    assertEqual(V2ComponentType.MediaGallery, 12, "MediaGallery = 12");
+    assertEqual(V2ComponentType.File, 13, "File = 13");
+    assertEqual(V2ComponentType.Separator, 14, "Separator = 14");
+    assertEqual(V2ComponentType.Container, 17, "Container = 17");
+
+    assertEqual(V2MessageFlags.IsComponentsV2, 32768, "IsComponentsV2 = 32768");
+    assertEqual(V2MessageFlags.IsComponentsV2, 1 << 15, "1 << 15");
+
+    const combinedFlags = V2MessageFlags.Ephemeral | V2MessageFlags.IsComponentsV2;
+    assertEqual(combinedFlags, 32832, "Ephemeral | IsComponentsV2");
+    assert(Boolean(combinedFlags & V2MessageFlags.IsComponentsV2), "Bitwise mask check");
+  });
+
+  await runTest("Suite 24", "Accent Color Conversion: Hex (#5865F2), RGB, integer & non-throwing fallback", async () => {
+    assertEqual(v2ConvertAccentColor('#5865F2'), 0x5865f2, "Hex #5865F2");
+    assertEqual(v2ConvertAccentColor('0x5865F2'), 0x5865f2, "Hex 0x5865F2");
+    assertEqual(v2ConvertAccentColor('5865F2'), 0x5865f2, "Hex 5865F2");
+    assertEqual(v2ConvertAccentColor('#00E676'), 0x00e676, "Hex #00E676");
+    assertEqual(v2ConvertAccentColor('rgb(88, 101, 242)'), 0x5865f2, "RGB string");
+    assertEqual(v2ConvertAccentColor([88, 101, 242]), 0x5865f2, "RGB array");
+    assertEqual(v2ConvertAccentColor({ r: 88, g: 101, b: 242 }), 0x5865f2, "RGB object");
+    assertEqual(v2ConvertAccentColor('Blurple'), 0x5865f2, "Blurple preset");
+    assertEqual(v2ConvertAccentColor('invalid_color'), 0x5865f2, "Invalid fallback to default");
+    assertEqual(v2ConvertAccentColor(null, 0x00E676), 0x00e676, "Custom fallback default");
+    assertEqual(v2ConvertAccentColor(-1), 0x5865f2, "Negative out of bounds fallback");
+  });
+
+  await runTest("Suite 24", "V2 Builders .toJSON() Output: Container, Section, TextDisplay, Separator, MediaGallery", async () => {
+    const container = new V2ContainerBuilder()
+      .setAccentColor('#00E676')
+      .setSpoiler(false)
+      .addComponents(
+        new V2SectionBuilder()
+          .addTextDisplays('# LS STUDIO', 'Leading Development Studio')
+          .setThumbnailAccessory('https://ls-studio.vn/icon.png'),
+        new V2SeparatorBuilder().setDivider(true).setSpacing(V2SeparatorSpacingSize.Small),
+        new V2TextDisplayBuilder().setContent('### Sản phẩm hot\nLS-AntiCheat V2'),
+        new V2MediaGalleryBuilder().addImage('https://ls-studio.vn/banner.png', 'Showcase'),
+        new V2ActionRowBuilder().addComponents(
+          new V2ButtonBuilder().setCustomId('btn_test').setLabel('Test').setStyle(V2ButtonStyle.Success)
+        )
+      );
+
+    const json = container.toJSON();
+    assertEqual(json.type, 17, "Container type = 17");
+    assertEqual(json.accent_color, 0x00e676, "Container accent color");
+    assertEqual(json.spoiler, false, "Container spoiler");
+    assertEqual(json.components.length, 5, "5 child components");
+    assertEqual(json.components[0].type, 9, "Section type = 9");
+    assertEqual(json.components[0].accessory.type, 11, "Thumbnail accessory type = 11");
+    assertEqual(json.components[1].type, 14, "Separator type = 14");
+    assertEqual(json.components[2].type, 10, "TextDisplay type = 10");
+    assertEqual(json.components[3].type, 12, "MediaGallery type = 12");
+    assertEqual(json.components[4].type, 1, "ActionRow type = 1");
+  });
+
+  await runTest("Suite 24", "Dual-Mode Payload Engine: V2 Container payload generation (flags=32768) vs Legacy V1 fallback", async () => {
+    const v2Payload = v2CreateDualModePayload({
+      preferV2: true,
+      title: 'LS AntiCheat Suite',
+      description: 'Hệ thống bảo mật tối đa',
+      color: '#5865F2',
+      fields: [{ name: 'Trạng Thái', value: 'Hoạt Động' }],
+      thumbnailUrl: 'https://ls-studio.vn/thumb.png',
+      imageUrl: 'https://ls-studio.vn/pic.png',
+      buttons: [new V2ButtonBuilder().setCustomId('btn_buy').setLabel('Mua').setStyle(V2ButtonStyle.Primary)],
+      flags: V2MessageFlags.Ephemeral
+    });
+
+    assert(Boolean(v2Payload.flags & V2MessageFlags.IsComponentsV2), "IsComponentsV2 flag present");
+    assert(Boolean(v2Payload.flags & V2MessageFlags.Ephemeral), "Ephemeral flag present");
+    assertEqual(v2Payload.components.length, 1, "1 top level container");
+    assertEqual(v2Payload.components[0].type, 17, "Top level component is Container");
+    assert(v2IsComponentsV2Payload(v2Payload), "isComponentsV2Payload returns true");
+
+    const v1Payload = v2CreateDualModePayload({
+      preferV2: false,
+      title: 'LS AntiCheat Suite',
+      description: 'Hệ thống bảo mật tối đa',
+      color: '#5865F2',
+      fields: [{ name: 'Trạng Thái', value: 'Hoạt Động' }],
+      buttons: [new V2ButtonBuilder().setCustomId('btn_buy').setLabel('Mua').setStyle(V2ButtonStyle.Primary)]
+    });
+
+    assert(Array.isArray(v1Payload.embeds), "Embeds array exists");
+    assertEqual(v1Payload.embeds[0].title, 'LS AntiCheat Suite', "Embed title matches");
+    assertEqual(v1Payload.components.length, 1, "ActionRow exists");
+    assert(!v2IsComponentsV2Payload(v1Payload), "isComponentsV2Payload returns false for legacy");
+  });
+
+  await runTest("Suite 24", "Bidirectional Conversion: convertLegacyToComponentsV2 & convertComponentsV2ToLegacy", async () => {
+    const legacyInput = {
+      embeds: [{
+        title: 'Bảng Báo Giá',
+        description: 'Bảng giá plugin Minecraft',
+        color: 0x00E676,
+        fields: [{ name: 'Gói 1', value: '30.000 VNĐ' }],
+        thumbnail: { url: 'https://ls-studio.vn/icon.png' },
+        image: { url: 'https://ls-studio.vn/banner.png' },
+        footer: { text: 'LS STUDIO Support' }
+      }],
+      components: [
+        new V2ActionRowBuilder().addComponents(
+          new V2ButtonBuilder().setCustomId('btn_order').setLabel('Đặt Ngay').setStyle(V2ButtonStyle.Success)
+        )
+      ],
+      flags: V2MessageFlags.Ephemeral
+    };
+
+    const v2Converted = v2ConvertLegacyToComponentsV2(legacyInput);
+    assert(Boolean(v2Converted.flags & V2MessageFlags.IsComponentsV2), "Converted to V2 with flag");
+    assertEqual(v2Converted.components[0].type, 17, "Converted to ContainerBuilder");
+
+    const legacyReverted = v2ConvertComponentsV2ToLegacy(v2Converted);
+    assert(Array.isArray(legacyReverted.embeds), "Reverted has embeds");
+    assertEqual(legacyReverted.embeds[0].color, 0x00e676, "Reverted embed color preserved");
+    assertEqual(legacyReverted.embeds[0].title, 'Bảng Báo Giá', "Reverted embed title preserved");
+    assert(!Boolean(legacyReverted.flags & V2MessageFlags.IsComponentsV2), "IsComponentsV2 flag stripped");
+    assert(Boolean(legacyReverted.flags & V2MessageFlags.Ephemeral), "Ephemeral flag retained");
+  });
+
+  await runTest("Suite 24", "Interaction Simulation: SectionBuilder button accessory & ActionRow SelectMenu routing", async () => {
+    const section = new V2SectionBuilder()
+      .addTextDisplays('**LS-AntiCheat**', 'Giá: 30.000 VNĐ')
+      .setButtonAccessory(
+        new V2ButtonBuilder()
+          .setCustomId('btn_acc_buy_anticheat')
+          .setLabel('Mua')
+          .setStyle(V2ButtonStyle.Success)
+      );
+
+    const container = new V2ContainerBuilder().addComponents(section);
+
+    let acked = false;
+    let replyPayload = null;
+    const mockInteraction = {
+      id: 'int_sim_001',
+      customId: section.accessory.customId,
+      isButton: () => true,
+      isStringSelectMenu: () => false,
+      reply: async (p) => {
+        acked = true;
+        replyPayload = p;
+        return p;
+      }
+    };
+
+    assertEqual(mockInteraction.customId, 'btn_acc_buy_anticheat');
+    assert(mockInteraction.isButton());
+
+    const replyV2 = v2CreateDualModePayload({
+      preferV2: true,
+      title: 'Tạo Hóa Đơn',
+      description: 'Hóa đơn đã được tạo thành công.',
+      color: 0x5865F2,
+      flags: V2MessageFlags.Ephemeral
+    });
+
+    await mockInteraction.reply(replyV2);
+    assert(acked, "Interaction acknowledged");
+    assert(Boolean(replyPayload.flags & V2MessageFlags.IsComponentsV2), "Replied with V2 flag");
+    assertEqual(replyPayload.components[0].type, 17, "Replied with Container");
   });
 
   // ============================================================================

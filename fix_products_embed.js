@@ -70,6 +70,8 @@ process.on('uncaughtException', async (err) => {
 });
 
 
+const { createComponentsV2Message, isComponentsV2Available } = require('./bot');
+
 client.once(Events.ClientReady, async () => {
   try {
     const guild = await client.guilds.fetch(LS_STUDIO_GUILD_ID).catch(err => {
@@ -91,13 +93,11 @@ client.once(Events.ClientReady, async () => {
         }
       }
 
-      const embed = new EmbedBuilder()
-        .setColor("#5865F2")
-        .setTitle("💎 CÁC SẢN PHẨM & DỊCH VỤ - LS STUDIO")
-        .setDescription(
-          "Toàn bộ Plugin & Mod do LS Studio tự phát triển, tối ưu async nhẹ mượt và hỗ trợ lâu dài:"
-        )
-        .addFields(
+      const v2Message = createComponentsV2Message({
+        accentColor: 0x5865F2,
+        title: "💎 CÁC SẢN PHẨM & DỊCH VỤ - LS STUDIO",
+        description: "Toàn bộ Plugin & Mod do LS Studio tự phát triển, tối ưu async nhẹ mượt và hỗ trợ lâu dài:",
+        fields: [
           {
             name: "🛡️ 1. LS-AntiCheat (Full Module)",
             value: 
@@ -150,10 +150,11 @@ client.once(Events.ClientReady, async () => {
               "• ⚠️ **Lưu ý:** *Chỉ nhận làm cho Minecraft Java Edition (PC), không nhận Bedrock/PE.*\n" +
               "• **Giá:** `Thỏa thuận theo ý tưởng`"
           }
-        )
-        .setFooter({ text: "Mở Ticket tại #🛒・mua-plugin để đặt mua và nhận file ngay!" });
+        ],
+        footer: "Mở Ticket tại #🛒・mua-plugin để đặt mua và nhận file ngay!"
+      });
 
-      await ch.send({ embeds: [embed] });
+      await ch.send(isComponentsV2Available() ? v2Message.toV2() : v2Message.toClassic());
       console.log("✅ Kênh 💎・sản-phẩm-plugin đã cập nhật hoàn hảo!");
     }
     await cleanupAndExit(0);

@@ -122,10 +122,23 @@ client.once(Events.ClientReady, async () => {
       }
     }
 
-    const embed = new EmbedBuilder()
-      .setColor("#4285F4")
-      .setTitle("🚀 TÀI KHOẢN GOOGLE AI PRO • GEMINI ADVANCED 2TB (1 THÁNG)")
-      .setDescription(
+    const { createComponentsV2Message, isComponentsV2Available } = require('./bot');
+
+    const buyBtn = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("ticket_buy")
+        .setLabel("🛒 Mở Ticket Đặt Mua / Buy Ticket")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId("ticket_pricing")
+        .setLabel("💰 Bảng Giá / Price List")
+        .setStyle(ButtonStyle.Secondary)
+    );
+
+    const v2Google = createComponentsV2Message({
+      accentColor: 0x4285F4,
+      title: "🚀 TÀI KHOẢN GOOGLE AI PRO • GEMINI ADVANCED 2TB (1 THÁNG)",
+      description:
         "🇻🇳 **TIẾNG VIỆT:**\n" +
         "Gói tài khoản Google AI Pro (Google One AI Premium) bản quyền chính hãng với sức mạnh từ mô hình Gemini Advanced mới nhất của Google:\n\n" +
         "• **Giá bán:** `79.000 VNĐ` • `~$3.00 USD`\n" +
@@ -146,22 +159,12 @@ client.once(Events.ClientReady, async () => {
         "• **2TB Google One Storage:** Secure cloud backup for Google Drive, Photos, and Gmail.\n" +
         "• **Deep Workspace Integration:** AI writing assistant in Docs, Gmail, Sheets, and Slides.\n" +
         "• **Imagen 3 Generator:** Ultra-high definition photorealistic AI image generation.\n" +
-        "• 30-Day Full Replacement Warranty."
-      )
-      .setFooter({ text: "LS STUDIO • Bảo hành 1 đổi 1 trọn 30 ngày / 30-Day Warranty" });
+        "• 30-Day Full Replacement Warranty.",
+      footer: "LS STUDIO • Bảo hành 1 đổi 1 trọn 30 ngày / 30-Day Warranty",
+      actionRows: [buyBtn]
+    });
 
-    const buyBtn = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId("ticket_buy")
-        .setLabel("🛒 Mở Ticket Đặt Mua / Buy Ticket")
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId("ticket_pricing")
-        .setLabel("💰 Bảng Giá / Price List")
-        .setStyle(ButtonStyle.Secondary)
-    );
-
-    await chGoogle.send({ embeds: [embed], components: [buyBtn] });
+    await chGoogle.send(isComponentsV2Available() ? v2Google.toV2() : v2Google.toClassic());
     console.log("✅ Đã đăng bài vào: #🚀・acc-google-ai-pro");
 
     // 2. CẬP NHẬT KÊNH #💰・bảng-giá
@@ -175,14 +178,13 @@ client.once(Events.ClientReady, async () => {
         }
       }
 
-      const priceEmbed = new EmbedBuilder()
-        .setColor("#FEE75C")
-        .setTitle("💰 BẢNG GIÁ DỊCH VỤ / PRICE LIST - LS STUDIO")
-        .setDescription(
+      const v2Price = createComponentsV2Message({
+        accentColor: 0xFEE75C,
+        title: "💰 BẢNG GIÁ DỊCH VỤ / PRICE LIST - LS STUDIO",
+        description:
           "Bảng giá công khai minh bạch cho toàn bộ Plugin Minecraft, Mod Java & Dịch vụ AI:\n" +
-          "*Transparent pricing for Minecraft Plugins, Mods & AI Premium Services:*"
-        )
-        .addFields(
+          "*Transparent pricing for Minecraft Plugins, Mods & AI Premium Services:*",
+        fields: [
           {
             name: "📦 1. Plugin Minecraft (Paper / Purpur / Folia 1.16 - 1.21+)",
             value: 
@@ -215,10 +217,12 @@ client.once(Events.ClientReady, async () => {
               "• 🇻🇳 **Việt Nam:** MBBank Quân Đội • STK `844515133333` • Tên **VAN HUU PHAM NGUYEN**\n" +
               "• 🌐 **Global:** PayPal / Crypto / Card (Mở Ticket để lấy link thanh toán)"
           }
-        )
-        .setFooter({ text: "Giao dịch an toàn 24/7 qua Ticket tại LS STUDIO" });
+        ],
+        footer: "Giao dịch an toàn 24/7 qua Ticket tại LS STUDIO",
+        actionRows: [buyBtn]
+      });
 
-      await chPrice.send({ embeds: [priceEmbed], components: [buyBtn] });
+      await chPrice.send(isComponentsV2Available() ? v2Price.toV2() : v2Price.toClassic());
       console.log("✅ Đã cập nhật lại kênh #bảng-giá!");
     }
 
@@ -250,10 +254,10 @@ client.once(Events.ClientReady, async () => {
 
       const chBuy = channels.find(c => c && c.name.includes("mua-plugin"));
 
-      const tbEmbed = new EmbedBuilder()
-        .setColor("#5865F2")
-        .setTitle("🚀 CHÀO MỪNG ĐẾN VỚI LS STUDIO / WELCOME TO LS STUDIO")
-        .setDescription(
+      const v2Tb = createComponentsV2Message({
+        accentColor: 0x5865F2,
+        title: "🚀 CHÀO MỪNG ĐẾN VỚI LS STUDIO / WELCOME TO LS STUDIO",
+        description:
           "🇻🇳 **TIẾNG VIỆT:**\n" +
           "Chào anh em! **LS STUDIO** chuyên cung cấp các giải pháp **Plugin Minecraft, Anti-Cheat, Mod Custom Java** và **Dịch Vụ AI / API Key Premium** chính hãng với giá tốt nhất!\n\n" +
           "📦 **DANH MỤC PLUGIN MINECRAFT:**\n" +
@@ -272,11 +276,11 @@ client.once(Events.ClientReady, async () => {
           `• ✨ Acc Monica AI Pro: <#${chMonica?.id}>\n` +
           `• 🎁 Acc Gmail Nhận Offer: <#${chGptOffer?.id}>\n\n` +
           `💰 Bảng Giá Tổng Hợp: <#${chPrice?.id}>\n` +
-          `🛒 Mở Ticket Đặt Hàng: <#${chBuy?.id}>`
-        )
-        .setFooter({ text: "LS STUDIO • Lead Developer: Nguyendzvn" });
+          `🛒 Mở Ticket Đặt Hàng: <#${chBuy?.id}>`,
+        footer: "LS STUDIO • Lead Developer: Nguyendzvn"
+      });
 
-      await chTb.send({ embeds: [tbEmbed] });
+      await chTb.send(isComponentsV2Available() ? v2Tb.toV2() : v2Tb.toClassic());
       console.log("✅ Đã cập nhật lại kênh #thông-báo!");
     }
 

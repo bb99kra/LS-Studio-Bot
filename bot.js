@@ -32,6 +32,27 @@ const {
   Options
 } = require('discord.js');
 
+const {
+  ComponentType,
+  MessageFlags,
+  SeparatorSpacingSize,
+  ContainerBuilder,
+  SectionBuilder,
+  TextDisplayBuilder,
+  SeparatorBuilder,
+  ThumbnailBuilder,
+  MediaGalleryBuilder,
+  MediaGalleryItemBuilder,
+  FileBuilder,
+  resolveColor,
+  convertAccentColor,
+  createComponentPayload,
+  createDualModePayload,
+  convertLegacyToComponentsV2,
+  convertComponentsV2ToLegacy,
+  isComponentsV2Payload,
+} = require('./components_v2.js');
+
 // =========================================================================
 // 0. CẤU HÌNH HỆ THỐNG & BIẾN MÔI TRƯỜNG
 // =========================================================================
@@ -3934,6 +3955,248 @@ function createFeedbackModal() {
 }
 
 // =========================================================================
+// 6.1 DISCORD COMPONENTS V2 BUILDERS & HELPER ENGINE (DUAL-MODE & FALLBACK)
+// =========================================================================
+
+/**
+ * Kiểm tra xem môi trường hiện tại có hỗ trợ Discord Components V2 hay không
+ */
+function isComponentsV2Available() {
+  return typeof ContainerBuilder === 'function' && 
+         typeof SectionBuilder === 'function' && 
+         typeof TextDisplayBuilder === 'function' && 
+         typeof SeparatorBuilder === 'function';
+}
+
+/**
+ * Helper tạo Message Payload theo chuẩn Discord Components V2 với ContainerBuilder,
+ * Sections, TextDisplay, Separators, ActionRows và hỗ trợ Dual-Mode / Graceful Fallback sang Classic Embeds.
+ * 
+ * @param {Object} options - Cấu hình nội dung tin nhắn
+ * @param {number|string} [options.accentColor=0x00E676] - Màu viền accent của Container (Hex hoặc Số)
+ * @param {string} [options.title] - Tiêu đề chính của Container
+ * @param {string} [options.description] - Nội dung mô tả chính
+ * @param {string} [options.thumbnailUrl] - URL ảnh thu nhỏ (Accessory Thumbnail)
+ * @param {Array<Object|SectionBuilder>} [options.sections=[]] - Danh sách Sections (nội dung + nút accessory / thumbnail)
+ * @param {Array<Object>} [options.fields=[]] - Danh sách các trường thông tin { name, value, inline, accessory }
+ * @param {Array<ActionRowBuilder>} [options.actionRows=[]] - Danh sách ActionRows (Buttons, Select Menus)
+ * @param {Array<any>} [options.customComponents=[]] - Các component tùy biến bổ sung (Separators, TextDisplays, ...)
+ * @param {string|Object} [options.footer] - Nội dung footer (Text / Icon)
+ * @param {boolean|Date|number} [options.timestamp=false] - Hiển thị timestamp
+ * @param {boolean} [options.ephemeral=false] - Cờ tin nhắn riêng tư (Ephemeral)
+ * @param {Array<AttachmentBuilder|Object>} [options.files=[]] - Danh sách tệp đính kèm
+ * @param {boolean} [options.enableComponentsV2=true] - Bật/tắt chế độ Components V2
+ * @param {boolean} [options.divider=true] - Có hiển thị separator gạch ngang phân cách sau header hay không
+ * @returns {Object} Discord Message Payload Object (Hỗ trợ .toClassic() và .toV2())
+ */
+function createComponentsV2Message(options = {}) {
+  const {
+    accentColor = 0x00E676,
+    title,
+    description,
+    sections = [],
+    fields = [],
+    actionRows = [],
+    customComponents = [],
+    thumbnailUrl,
+    footer,
+    timestamp = false,
+    ephemeral = false,
+    files = [],
+    enableComponentsV2 = true,
+    divider = true
+  } = options;
+
+  const colorNum = typeof accentColor === 'string'
+    ? parseInt(accentColor.replace('#', ''), 16)
+    : (accentColor || 0x5865F2);
+
+  // 1. TẠO CLASSIC FALLBACK EMBED + ACTION ROWS
+  const fallbackEmbed = new EmbedBuilder().setColor(colorNum);
+
+  if (title) fallbackEmbed.setTitle(title);
+  if (description) fallbackEmbed.setDescription(description);
+  if (thumbnailUrl) fallbackEmbed.setThumbnail(thumbnailUrl);
+  if (Array.isArray(fields) && fields.length > 0) {
+    fallbackEmbed.addFields(
+      fields.map(f => ({
+        name: f.name || 'Thông tin',
+        value: f.value || 'N/A',
+        inline: Boolean(f.inline)
+      }))
+    );
+  }
+  if (footer) {
+    fallbackEmbed.setFooter(typeof footer === 'string' ? { text: footer } : footer);
+  }
+  if (timestamp) {
+    if (typeof timestamp === 'number' || timestamp instanceof Date) {
+      fallbackEmbed.setTimestamp(timestamp);
+    } else {
+      fallbackEmbed.setTimestamp();
+    }
+  }
+
+  const classicPayload = {
+    embeds: [fallbackEmbed],
+    components: Array.isArray(actionRows) ? actionRows : [],
+    files: Array.isArray(files) ? files : [],
+    ephemeral: Boolean(ephemeral)
+  };
+
+  // Nếu Components V2 không khả dụng hoặc bị tắt, trả về Classic Payload ngay lập tức
+  if (!enableComponentsV2 || !isComponentsV2Available()) {
+    return {
+      ...classicPayload,
+      isComponentsV2: false,
+      toClassic: () => classicPayload,
+      toV2: () => null
+    };
+  }
+
+  try {
+    // 2. KHỞI TẠO CONTAINER BUILDER (DISCORD COMPONENTS V2)
+    const container = new ContainerBuilder();
+    container.setAccentColor(colorNum);
+
+    // 2.1 Tiêu đề & Thumbnail Accessory / TextDisplay Header
+    if (title && thumbnailUrl) {
+      const headerSection = new SectionBuilder()
+        .addTextDisplayComponents(
+          new TextDisplayBuilder().setContent(`## ${title}${description ? '\n\n' + description : ''}`)
+        )
+        .setThumbnailAccessory(new ThumbnailBuilder().setURL(thumbnailUrl));
+      container.addSectionComponents(headerSection);
+    } else {
+      if (title) {
+        container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`## ${title}`));
+      }
+      if (description) {
+        container.addTextDisplayComponents(new TextDisplayBuilder().setContent(description));
+      }
+    }
+
+    // 2.2 Separator phân cách sau Header nếu có nội dung tiếp theo
+    if ((title || description) && (sections.length > 0 || fields.length > 0 || actionRows.length > 0 || customComponents.length > 0)) {
+      if (divider) {
+        container.addSeparatorComponents(
+          new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize?.Small || 1)
+        );
+      }
+    }
+
+    // 2.3 Xử lý các Sections
+    for (const sec of sections) {
+      if (sec instanceof SectionBuilder) {
+        container.addSectionComponents(sec);
+      } else if (typeof sec === 'object' && sec !== null) {
+        const secBuilder = new SectionBuilder();
+        const content = sec.content || sec.text || sec.description || '';
+        if (content) {
+          secBuilder.addTextDisplayComponents(new TextDisplayBuilder().setContent(content));
+        }
+        if (sec.button instanceof ButtonBuilder) {
+          secBuilder.setButtonAccessory(sec.button);
+        } else if (sec.thumbnail) {
+          secBuilder.setThumbnailAccessory(
+            typeof sec.thumbnail === 'string' ? new ThumbnailBuilder().setURL(sec.thumbnail) : sec.thumbnail
+          );
+        }
+        container.addSectionComponents(secBuilder);
+      }
+    }
+
+    // 2.4 Xử lý các Fields (chuyển thành Section hoặc TextDisplay)
+    for (const f of fields) {
+      if (!f) continue;
+      if (f.accessory) {
+        const sec = new SectionBuilder()
+          .addTextDisplayComponents(
+            new TextDisplayBuilder().setContent(`**${f.name}**\n${f.value}`)
+          );
+        if (f.accessory instanceof ButtonBuilder) {
+          sec.setButtonAccessory(f.accessory);
+        } else if (f.accessory instanceof ThumbnailBuilder) {
+          sec.setThumbnailAccessory(f.accessory);
+        }
+        container.addSectionComponents(sec);
+      } else {
+        container.addTextDisplayComponents(
+          new TextDisplayBuilder().setContent(`**${f.name}**\n${f.value}`)
+        );
+      }
+    }
+
+    // 2.5 Xử lý Custom Components (Separators, TextDisplays, MediaGalleries, etc.)
+    for (const comp of customComponents) {
+      if (!comp) continue;
+      if (comp instanceof SeparatorBuilder) {
+        container.addSeparatorComponents(comp);
+      } else if (comp instanceof TextDisplayBuilder) {
+        container.addTextDisplayComponents(comp);
+      } else if (comp instanceof SectionBuilder) {
+        container.addSectionComponents(comp);
+      } else if (comp instanceof ActionRowBuilder) {
+        container.addActionRowComponents(comp);
+      }
+    }
+
+    // 2.6 Xử lý Action Rows (Buttons & SelectMenus bên trong Container)
+    for (const row of actionRows) {
+      if (row instanceof ActionRowBuilder) {
+        container.addActionRowComponents(row);
+      }
+    }
+
+    // 2.7 Footer & Timestamp
+    if (footer || timestamp) {
+      container.addSeparatorComponents(
+        new SeparatorBuilder().setDivider(false).setSpacing(SeparatorSpacingSize?.Small || 1)
+      );
+      let footerText = footer?.text || (typeof footer === 'string' ? footer : '');
+      if (timestamp) {
+        const tsSec = typeof timestamp === 'number' 
+          ? Math.floor(timestamp / 1000) 
+          : (timestamp instanceof Date ? Math.floor(timestamp.getTime() / 1000) : Math.floor(Date.now() / 1000));
+        const timeStr = `<t:${tsSec}:R>`;
+        footerText = footerText ? `${footerText} • ${timeStr}` : timeStr;
+      }
+      if (footerText) {
+        container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`*${footerText}*`));
+      }
+    }
+
+    let flags = MessageFlags.IsComponentsV2;
+    if (ephemeral) {
+      flags |= MessageFlags.Ephemeral;
+    }
+
+    const v2Payload = {
+      flags,
+      ephemeral: Boolean(ephemeral),
+      components: [container],
+      files: Array.isArray(files) ? files : []
+    };
+
+    return {
+      ...v2Payload,
+      isComponentsV2: true,
+      toClassic: () => classicPayload,
+      toV2: () => v2Payload
+    };
+
+  } catch (buildErr) {
+    console.warn(`⚠️ [createComponentsV2Message Fallback] Lỗi dựng Components V2, tự động fallback sang Embed:`, buildErr.message);
+    return {
+      ...classicPayload,
+      isComponentsV2: false,
+      toClassic: () => classicPayload,
+      toV2: () => null
+    };
+  }
+}
+
+// =========================================================================
 // 6.2 SAFE INTERACTION HELPERS (ZERO-CRASH RESPONSE FALLBACKS & ERROR CODES)
 // =========================================================================
 
@@ -3991,15 +4254,28 @@ function isIgnorableInteractionError(err) {
 
 /**
  * Phản hồi interaction an toàn tuyệt đối chống race condition và không bao giờ throw error
- * Xử lý hoàn hảo: Expired token (15m), 10062 (Unknown interaction), 10015 (Unknown webhook), 40060 (Already acknowledged)
+ * Tích hợp Components V2, cờ Ephemeral tự động và Seamless Graceful Fallback sang Classic Embed.
  */
 async function safeReply(interaction, options) {
   if (!interaction || interaction.isAutocomplete?.()) return null;
   try {
     let payload = typeof options === 'string' ? { content: options } : { ...options };
 
-    // Đảm bảo payload không rỗng khi gửi qua REST API
-    if (!payload.content && (!payload.embeds || payload.embeds.length === 0) && (!payload.files || payload.files.length === 0)) {
+    // Tự động kết hợp cờ Ephemeral và Components V2
+    if (payload.ephemeral) {
+      if (typeof payload.flags === 'number') {
+        payload.flags |= MessageFlags.Ephemeral;
+      }
+    }
+
+    const isV2 = Boolean(
+      (typeof payload.flags === 'number' && (payload.flags & MessageFlags.IsComponentsV2) !== 0) ||
+      payload.isComponentsV2 ||
+      (Array.isArray(payload.components) && payload.components[0] instanceof ContainerBuilder)
+    );
+
+    // Đảm bảo payload không rỗng khi gửi qua REST API (trừ Components V2 không cần content rác)
+    if (!isV2 && !payload.content && (!payload.embeds || payload.embeds.length === 0) && (!payload.files || payload.files.length === 0)) {
       if (payload.components && payload.components.length > 0) {
         payload.content = ' ';
       }
@@ -4032,6 +4308,11 @@ async function safeReply(interaction, options) {
             return null;
           }
         }
+        // Fallback tự động sang Classic Embed nếu Discord API từ chối Components V2
+        if (isV2 && typeof payload.toClassic === 'function' && (editErr?.code === 50035 || editErr?.status === 400)) {
+          console.warn(`⚠️ [safeReply Fallback] Discord từ chối V2 payload (${editErr.message}), tự động fallback sang Classic Embed.`);
+          return await safeReply(interaction, payload.toClassic());
+        }
         if (editErr?.code === 10062 || editErr?.code === 10015) {
           if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
             try {
@@ -4057,6 +4338,10 @@ async function safeReply(interaction, options) {
       try {
         return await interaction.followUp(payload);
       } catch (followErr) {
+        if (isV2 && typeof payload.toClassic === 'function' && (followErr?.code === 50035 || followErr?.status === 400)) {
+          console.warn(`⚠️ [safeFollowUp Fallback] Discord từ chối V2 payload (${followErr.message}), tự động fallback sang Classic Embed.`);
+          return await safeReply(interaction, payload.toClassic());
+        }
         if (followErr?.code === 10062 || followErr?.code === 10015) {
           if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
             try {
@@ -4078,6 +4363,11 @@ async function safeReply(interaction, options) {
     try {
       return await interaction.reply(payload);
     } catch (replyErr) {
+      // Fallback tự động sang Classic Embed nếu Discord API từ chối Components V2
+      if (isV2 && typeof payload.toClassic === 'function' && (replyErr?.code === 50035 || replyErr?.status === 400)) {
+        console.warn(`⚠️ [safeReply Fallback] Discord từ chối V2 payload (${replyErr.message}), tự động fallback sang Classic Embed.`);
+        return await safeReply(interaction, payload.toClassic());
+      }
       // 40060: Đã được acknowledge bởi tác vụ khác / race condition -> fallback editReply hoặc followUp
       if (replyErr?.code === 40060) {
         try {
@@ -4153,7 +4443,16 @@ async function safeDeferUpdate(interaction) {
  */
 async function safeEditReply(interaction, options) {
   if (!interaction || interaction.isAutocomplete?.()) return null;
-  const payload = typeof options === 'string' ? { content: options } : { ...options };
+  let payload = typeof options === 'string' ? { content: options } : { ...options };
+  if (payload.ephemeral && typeof payload.flags === 'number') {
+    payload.flags |= MessageFlags.Ephemeral;
+  }
+  const isV2 = Boolean(
+    (typeof payload.flags === 'number' && (payload.flags & MessageFlags.IsComponentsV2) !== 0) ||
+    payload.isComponentsV2 ||
+    (Array.isArray(payload.components) && payload.components[0] instanceof ContainerBuilder)
+  );
+
   if (isInteractionExpired(interaction)) {
     if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
       try {
@@ -4165,6 +4464,10 @@ async function safeEditReply(interaction, options) {
   try {
     return await interaction.editReply(payload);
   } catch (err) {
+    if (isV2 && typeof payload.toClassic === 'function' && (err?.code === 50035 || err?.status === 400)) {
+      console.warn(`⚠️ [safeEditReply Fallback] Discord từ chối V2 payload (${err.message}), fallback sang Classic Embed.`);
+      return await safeEditReply(interaction, payload.toClassic());
+    }
     if (err?.code === 10062 || err?.code === 10015) {
       if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
         try {
@@ -4184,7 +4487,16 @@ async function safeEditReply(interaction, options) {
  */
 async function safeFollowUp(interaction, options) {
   if (!interaction || interaction.isAutocomplete?.()) return null;
-  const payload = typeof options === 'string' ? { content: options } : { ...options };
+  let payload = typeof options === 'string' ? { content: options } : { ...options };
+  if (payload.ephemeral && typeof payload.flags === 'number') {
+    payload.flags |= MessageFlags.Ephemeral;
+  }
+  const isV2 = Boolean(
+    (typeof payload.flags === 'number' && (payload.flags & MessageFlags.IsComponentsV2) !== 0) ||
+    payload.isComponentsV2 ||
+    (Array.isArray(payload.components) && payload.components[0] instanceof ContainerBuilder)
+  );
+
   if (isInteractionExpired(interaction)) {
     if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
       try {
@@ -4196,6 +4508,10 @@ async function safeFollowUp(interaction, options) {
   try {
     return await interaction.followUp(payload);
   } catch (err) {
+    if (isV2 && typeof payload.toClassic === 'function' && (err?.code === 50035 || err?.status === 400)) {
+      console.warn(`⚠️ [safeFollowUp Fallback] Discord từ chối V2 payload (${err.message}), fallback sang Classic Embed.`);
+      return await safeFollowUp(interaction, payload.toClassic());
+    }
     if (err?.code === 10062 || err?.code === 10015) {
       if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
         try {
@@ -4217,20 +4533,34 @@ async function safeFollowUp(interaction, options) {
 async function safeUpdate(interaction, options) {
   if (!interaction || interaction.isAutocomplete?.()) return null;
   if (isInteractionExpired(interaction)) return null;
+  let payload = typeof options === 'string' ? { content: options } : { ...options };
+  if (payload.ephemeral && typeof payload.flags === 'number') {
+    payload.flags |= MessageFlags.Ephemeral;
+  }
+  const isV2 = Boolean(
+    (typeof payload.flags === 'number' && (payload.flags & MessageFlags.IsComponentsV2) !== 0) ||
+    payload.isComponentsV2 ||
+    (Array.isArray(payload.components) && payload.components[0] instanceof ContainerBuilder)
+  );
+
   try {
     if (interaction.deferred || interaction.replied) {
-      return await safeEditReply(interaction, options);
+      return await safeEditReply(interaction, payload);
     }
     if (typeof interaction.update === 'function') {
-      return await interaction.update(options);
+      return await interaction.update(payload);
     }
-    return await safeReply(interaction, options);
+    return await safeReply(interaction, payload);
   } catch (err) {
+    if (isV2 && typeof payload.toClassic === 'function' && (err?.code === 50035 || err?.status === 400)) {
+      console.warn(`⚠️ [safeUpdate Fallback] Discord từ chối V2 update (${err.message}), fallback sang Classic Embed.`);
+      return await safeUpdate(interaction, payload.toClassic());
+    }
     if (err?.code === 40060) {
-      return await safeEditReply(interaction, options);
+      return await safeEditReply(interaction, payload);
     }
     if (isIgnorableInteractionError(err)) return null;
-    return await safeReply(interaction, options);
+    return await safeReply(interaction, payload);
   }
 }
 
@@ -4509,35 +4839,55 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         if (qrBuffer) {
           const attachment = new AttachmentBuilder(qrBuffer, { name: 'vietqr_stk.png' });
-          embedStk.setImage('attachment://vietqr_stk.png');
-          return safeReply(interaction, { embeds: [embedStk], files: [attachment], components: [btnRow] });
+          const v2Msg = createComponentsV2Message({
+            accentColor: 0x00E676,
+            title: "💳 THÔNG TIN THANH TOÁN / PAYMENT INFORMATION",
+            description:
+              `🏦 **Ngân hàng / Bank:** MBBank (Ngân Hàng TMCP Quân Đội)\n` +
+              `🏷️ **Mã ngân hàng / BIN:** \`MB\` / \`970422\`\n` +
+              `🔢 **Số tài khoản / Account Number:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
+              `👤 **Chủ tài khoản / Account Holder:** **${BANK_CONFIG.ACCOUNT_NAME}**\n\n` +
+              `*Khách hàng Việt Nam có thể quét mã VietQR bên dưới để thanh toán siêu tốc 24/7.*\n` +
+              `*International customers: Please open a Ticket for PayPal / International payment methods.*`,
+            footer: "LS STUDIO • Payment System 24/7",
+            actionRows: [btnRow],
+            files: [attachment]
+          });
+          if (v2Msg.toClassic()?.embeds?.[0]) {
+            v2Msg.toClassic().embeds[0].setImage('attachment://vietqr_stk.png');
+          }
+          return safeReply(interaction, v2Msg);
         } else {
-          embedStk.setColor("#FFA500");
-          embedStk.setDescription(
-            `🏦 **Ngân hàng / Bank:** MBBank (Ngân Hàng TMCP Quân Đội)\n` +
-            `🏷️ **Mã ngân hàng / BIN:** \`MB\` / \`970422\`\n` +
-            `🔢 **Số tài khoản / Account Number:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
-            `👤 **Chủ tài khoản / Account Holder:** **${BANK_CONFIG.ACCOUNT_NAME}**\n\n` +
-            `⚠️ *Cổng tạo ảnh VietQR tự động tạm thời phản hồi chậm hoặc đang bảo trì. Quý khách vui lòng chuyển khoản thủ công theo thông tin bên dưới hoặc bấm nút **[🔗 Mở mã VietQR / Open QR]** bên dưới.*\n` +
-            `*International customers: Please open a Ticket for PayPal / International payment methods.*`
-          );
-          embedStk.addFields(
-            {
-              name: "⚠️ CỔNG TẠO MÃ QR TẠM THỜI BẢO TRÌ / VIETQR OFFLINE",
-              value: "Cổng kết nối tạo ảnh VietQR tự động tạm thời phản hồi chậm hoặc đang bảo trì đường truyền.\n**Hệ thống Ngân hàng 24/7 vẫn nhận tiền bình thường 100%!** Quý khách có thể chuyển khoản thủ công liên ngân hàng Napas 24/7 theo thông tin dưới đây:"
-            },
-            {
-              name: "📋 THÔNG TIN CHUYỂN KHOẢN THỦ CÔNG (MANUAL TRANSFER)",
-              value:
-                `🏦 **Ngân hàng / Bank:** \`MBBank (Ngân Hàng TMCP Quân Đội - MB)\`\n` +
-                `🏷️ **Mã ngân hàng / BIN:** \`MB\` (\`970422\`)\n` +
-                `🔢 **Số tài khoản / Account No:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
-                `👤 **Chủ tài khoản / Account Name:** \`${BANK_CONFIG.ACCOUNT_NAME}\`\n` +
-                `📝 **Nội dung / Memo:** \`LSSTUDIO\` hoặc \`Tên Discord của bạn\`\n` +
-                `💡 *Gợi ý: Quý khách chạm/click vào số tài khoản ở trên để copy nhanh.*`
-            }
-          );
-          return safeReply(interaction, { embeds: [embedStk], components: [btnRow] });
+          const v2Msg = createComponentsV2Message({
+            accentColor: 0xFFA500,
+            title: "💳 THÔNG TIN THANH TOÁN / PAYMENT INFORMATION",
+            description:
+              `🏦 **Ngân hàng / Bank:** MBBank (Ngân Hàng TMCP Quân Đội)\n` +
+              `🏷️ **Mã ngân hàng / BIN:** \`MB\` / \`970422\`\n` +
+              `🔢 **Số tài khoản / Account Number:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
+              `👤 **Chủ tài khoản / Account Holder:** **${BANK_CONFIG.ACCOUNT_NAME}**\n\n` +
+              `⚠️ *Cổng tạo ảnh VietQR tự động tạm thời phản hồi chậm hoặc đang bảo trì. Quý khách vui lòng chuyển khoản thủ công theo thông tin bên dưới hoặc bấm nút **[🔗 Mở mã VietQR / Open QR]** bên dưới.*\n` +
+              `*International customers: Please open a Ticket for PayPal / International payment methods.*`,
+            fields: [
+              {
+                name: "⚠️ CỔNG TẠO MÃ QR TẠM THỜI BẢO TRÌ / VIETQR OFFLINE",
+                value: "Cổng kết nối tạo ảnh VietQR tự động tạm thời phản hồi chậm hoặc đang bảo trì đường truyền.\n**Hệ thống Ngân hàng 24/7 vẫn nhận tiền bình thường 100%!** Quý khách có thể chuyển khoản thủ công liên ngân hàng Napas 24/7 theo thông tin dưới đây:"
+              },
+              {
+                name: "📋 THÔNG TIN CHUYỂN KHOẢN THỦ CÔNG (MANUAL TRANSFER)",
+                value:
+                  `🏦 **Ngân hàng / Bank:** \`MBBank (Ngân Hàng TMCP Quân Đội - MB)\`\n` +
+                  `🏷️ **Mã ngân hàng / BIN:** \`MB\` (\`970422\`)\n` +
+                  `🔢 **Số tài khoản / Account No:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
+                  `👤 **Chủ tài khoản / Account Name:** \`${BANK_CONFIG.ACCOUNT_NAME}\`\n` +
+                  `📝 **Nội dung / Memo:** \`LSSTUDIO\` hoặc \`Tên Discord của bạn\`\n` +
+                  `💡 *Gợi ý: Quý khách chạm/click vào số tài khoản ở trên để copy nhanh.*`
+              }
+            ],
+            footer: "LS STUDIO • Payment System 24/7",
+            actionRows: [btnRow]
+          });
+          return safeReply(interaction, v2Msg);
         }
       }
 
@@ -4740,10 +5090,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         const readiness = validateAppDirectoryReadiness();
-        const helpEmbed = new EmbedBuilder()
-          .setColor('#00E676')
-          .setTitle('📖 HƯỚNG DẪN SỬ DỤNG BOT & LỆNH / LS STUDIO HELP GUIDE')
-          .setDescription(
+        const v2Help = createComponentsV2Message({
+          accentColor: 0x00E676,
+          title: '📖 HƯỚNG DẪN SỬ DỤNG BOT & LỆNH / LS STUDIO HELP GUIDE',
+          description:
             `Chào mừng bạn đến với **LS STUDIO**! Dưới đây là danh sách các lệnh Slash Command khả dụng:\n\n` +
             `**🌐 LỆNH DÀNH CHO THÀNH VIÊN (PUBLIC COMMANDS):**\n` +
             `• \`/help\` — Xem menu hướng dẫn và danh sách lệnh bot này.\n` +
@@ -4764,12 +5114,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
             `• **Máy chủ hỗ trợ:** [Support Server](${APP_DIRECTORY_METADATA.SUPPORT_SERVER_URL})\n` +
             `• **Điều khoản & Bảo mật:** [Terms of Service](${APP_DIRECTORY_METADATA.TERMS_OF_SERVICE_URL}) • [Privacy Policy](${APP_DIRECTORY_METADATA.PRIVACY_POLICY_URL})\n` +
             `• **App Directory Readiness:** ${readiness.ready ? '✅ Đã sẵn sàng công khai' : '⚠️ Đang cập nhật'}\n\n` +
-            `*Quý khách cần hỗ trợ hoặc mua plugin vui lòng mở ticket tại các kênh bán hàng!*`
-          )
-          .setFooter({ text: 'LS STUDIO • Minecraft & AI Solutions 24/7' })
-          .setTimestamp();
+            `*Quý khách cần hỗ trợ hoặc mua plugin vui lòng mở ticket tại các kênh bán hàng!*`,
+          footer: 'LS STUDIO • Minecraft & AI Solutions 24/7',
+          timestamp: true,
+          ephemeral: true
+        });
 
-        return safeReply(interaction, { embeds: [helpEmbed], ephemeral: true });
+        return safeReply(interaction, v2Help);
       }
 
       // /invite (Tạo link mời Bot, Bitfield Calculator & App Directory Discovery)
@@ -4788,10 +5139,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const userInstallInviteUrl = generateOAuth2Invite({ clientId, integrationType: 1, scopes: ['applications.commands'] });
         const readiness = validateAppDirectoryReadiness();
 
-        const inviteEmbed = new EmbedBuilder()
-          .setColor('#00E676')
-          .setTitle('🤖 MỜI BOT LS STUDIO & THÔNG TIN OAUTH2 DISCOVERY')
-          .setDescription(
+        const btnRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setLabel('🏰 Mời vào Server (Guild Install)')
+            .setStyle(ButtonStyle.Link)
+            .setURL(guildInviteUrl),
+          new ButtonBuilder()
+            .setLabel('👤 Cài vào Tài Khoản (User Install)')
+            .setStyle(ButtonStyle.Link)
+            .setURL(userInstallInviteUrl),
+          new ButtonBuilder()
+            .setLabel('💬 Support Server')
+            .setStyle(ButtonStyle.Link)
+            .setURL(APP_DIRECTORY_METADATA.SUPPORT_SERVER_URL)
+        );
+
+        const v2Invite = createComponentsV2Message({
+          accentColor: 0x00E676,
+          title: '🤖 MỜI BOT LS STUDIO & THÔNG TIN OAUTH2 DISCOVERY',
+          description:
             `Cảm ơn bạn đã tin tưởng và sử dụng **LS STUDIO Bot**!\n` +
             `Dưới đây là liên kết mời Bot chính thức, thông số phân quyền Bitfield và kiểm tra tính sẵn sàng App Directory:\n\n` +
             `**📋 THÔNG SỐ OAUTH2 & PERMISSIONS BITFIELD:**\n` +
@@ -4812,27 +5178,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
             `**🔍 APP DIRECTORY & DISCOVERY STATUS:**\n` +
             `• **Trạng thái:** ${readiness.ready ? '✅ **Đạt chuẩn Discovery (100% Ready)**' : `⚠️ **Cần hoàn thiện (${readiness.score}/${readiness.maxScore})**`}\n` +
             `• **Support Server:** [Tham gia hỗ trợ](${APP_DIRECTORY_METADATA.SUPPORT_SERVER_URL})\n` +
-            `• **Chính sách & Điều khoản:** [Terms](${APP_DIRECTORY_METADATA.TERMS_OF_SERVICE_URL}) • [Privacy](${APP_DIRECTORY_METADATA.PRIVACY_POLICY_URL})`
-          )
-          .setFooter({ text: 'LS STUDIO • OAuth2 & Permissions Bitfield Engine' })
-          .setTimestamp();
+            `• **Chính sách & Điều khoản:** [Terms](${APP_DIRECTORY_METADATA.TERMS_OF_SERVICE_URL}) • [Privacy](${APP_DIRECTORY_METADATA.PRIVACY_POLICY_URL})`,
+          footer: 'LS STUDIO • OAuth2 & Permissions Bitfield Engine',
+          timestamp: true,
+          ephemeral: true,
+          actionRows: [btnRow]
+        });
 
-        const btnRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setLabel('🏰 Mời vào Server (Guild Install)')
-            .setStyle(ButtonStyle.Link)
-            .setURL(guildInviteUrl),
-          new ButtonBuilder()
-            .setLabel('👤 Cài vào Tài Khoản (User Install)')
-            .setStyle(ButtonStyle.Link)
-            .setURL(userInstallInviteUrl),
-          new ButtonBuilder()
-            .setLabel('💬 Support Server')
-            .setStyle(ButtonStyle.Link)
-            .setURL(APP_DIRECTORY_METADATA.SUPPORT_SERVER_URL)
-        );
-
-        return safeReply(interaction, { embeds: [inviteEmbed], components: [btnRow], ephemeral: true });
+        return safeReply(interaction, v2Invite);
       }
 
       // /clearmessages (Staff Only - Xóa hàng loạt tin nhắn)
@@ -4923,34 +5276,35 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const orderInfo = activeOrderCodes.get(cleanCode);
 
           let statusText = '❓ Không tìm thấy trong phiên hiện tại / Not Found';
-          let statusColor = '#9E9E9E';
+          let statusColor = 0x9E9E9E;
 
           if (isApproved) {
             statusText = '✅ **ĐÃ DUYỆT THÀNH CÔNG** (Giao dịch hoàn tất)';
-            statusColor = '#00E676';
+            statusColor = 0x00E676;
           } else if (isProcessing) {
             statusText = '🔄 **ĐANG DUYỆT THANH TOÁN** (Staff đang xử lý)';
-            statusColor = '#FFB300';
+            statusColor = 0xFFB300;
           } else if (isActive) {
             statusText = '⏳ **CHỜ THANH TOÁN** (Đơn hàng đang mở)';
-            statusColor = '#00E5FF';
+            statusColor = 0x00E5FF;
           }
 
           const pkgData = orderInfo?.pkgKey ? getPackage(orderInfo.pkgKey) : null;
-          const embedOrder = new EmbedBuilder()
-            .setColor(statusColor)
-            .setTitle(`📦 TRA CỨU ĐƠN HÀNG: \`${cleanCode}\``)
-            .setDescription(
+          const v2Order = createComponentsV2Message({
+            accentColor: statusColor,
+            title: `📦 TRA CỨU ĐƠN HÀNG: \`${cleanCode}\``,
+            description:
               `• **Mã đơn hàng:** \`${cleanCode}\`\n` +
               `• **Trạng thái:** ${statusText}\n` +
               (pkgData ? `• **Sản phẩm:** **${pkgData.name}**\n• **Giá tiền:** \`${formatVND(pkgData.priceVND)}\` / \`${formatUSD(pkgData.priceUSD)}\`\n` : '') +
               (orderInfo?.createdAt ? `• **Thời gian tạo:** <t:${Math.floor(orderInfo.createdAt / 1000)}:R>\n` : '') +
-              (orderInfo?.buyerId ? `• **Người mua:** <@${orderInfo.buyerId}>\n` : '')
-            )
-            .setFooter({ text: 'LS STUDIO Order Verification' })
-            .setTimestamp();
+              (orderInfo?.buyerId ? `• **Người mua:** <@${orderInfo.buyerId}>\n` : ''),
+            footer: 'LS STUDIO Order Verification',
+            timestamp: true,
+            ephemeral: true
+          });
 
-          return safeReply(interaction, { embeds: [embedOrder], ephemeral: true });
+          return safeReply(interaction, v2Order);
         }
 
         // Case 2: Kiểm tra theo User hoặc chính người gọi lệnh
@@ -4970,22 +5324,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const isStaff = isStaffMember(member);
           const highestRole = member.roles.highest;
 
-          const embedUser = new EmbedBuilder()
-            .setColor(isVIP ? '#E040FB' : (isCustomer ? '#00E676' : '#00E5FF'))
-            .setTitle(`👤 THÔNG TIN THÀNH VIÊN: ${member.user.tag}`)
-            .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
-            .setDescription(
+          const v2User = createComponentsV2Message({
+            accentColor: isVIP ? 0xE040FB : (isCustomer ? 0x00E676 : 0x00E5FF),
+            title: `👤 THÔNG TIN THÀNH VIÊN: ${member.user.tag}`,
+            thumbnailUrl: member.user.displayAvatarURL({ dynamic: true }),
+            description:
               `• **Thành viên:** <@${member.id}> (\`${member.id}\`)\n` +
               `• **Vai trò cao nhất:** <@&${highestRole.id}>\n` +
               `• **Khách hàng (Buyer):** ${isCustomer ? '✅ Đã kích hoạt' : '❌ Chưa có'}\n` +
               `• **VIP Customer:** ${isVIP ? '💎 Đã kích hoạt' : '❌ Chưa có'}\n` +
               `• **Ban Quản Trị (Staff):** ${isStaff ? '🛡️ Có' : '❌ Không'}\n` +
-              `• **Ngày tham gia server:** <t:${Math.floor((member.joinedTimestamp || Date.now()) / 1000)}:F> (<t:${Math.floor((member.joinedTimestamp || Date.now()) / 1000)}:R>)`
-            )
-            .setFooter({ text: 'LS STUDIO Member Verification' })
-            .setTimestamp();
+              `• **Ngày tham gia server:** <t:${Math.floor((member.joinedTimestamp || Date.now()) / 1000)}:F> (<t:${Math.floor((member.joinedTimestamp || Date.now()) / 1000)}:R>)`,
+            footer: 'LS STUDIO Member Verification',
+            timestamp: true,
+            ephemeral: true
+          });
 
-          return safeReply(interaction, { embeds: [embedUser], ephemeral: true });
+          return safeReply(interaction, v2User);
         }
 
         return safeReply(interaction, {
@@ -5043,10 +5398,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             .setStyle(ButtonStyle.Danger)
         );
 
-        const embed = new EmbedBuilder()
-          .setColor("#00E676")
-          .setTitle(isEn ? "🛒 ORDER & SUPPORT CENTER - LS STUDIO" : "🛒 TRUNG TÂM THANH TOÁN & ĐẶT HÀNG - LS STUDIO")
-          .setDescription(
+        const v2Lang = createComponentsV2Message({
+          accentColor: 0x00E676,
+          title: isEn ? "🛒 ORDER & SUPPORT CENTER - LS STUDIO" : "🛒 TRUNG TÂM THANH TOÁN & ĐẶT HÀNG - LS STUDIO",
+          description:
             isEn 
               ? `👋 Hello <@${ticketOwnerId}>! Welcome to **LS STUDIO**.\n\n` +
                 `👇 **Please select a Plugin or AI Service from the dropdown menu below**:\n` +
@@ -5056,12 +5411,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
               : `👋 Chào <@${ticketOwnerId}>! Cảm ơn bạn đã lựa chọn dịch vụ từ **LS STUDIO**.\n\n` +
                 `👇 **Vui lòng chọn Plugin hoặc Dịch Vụ AI bạn muốn đặt từ Menu bên dưới**:\n` +
                 `• Mua Plugin & Dịch vụ AI có sẵn ➔ Tự tạo mã **VietQR MBBank** để bạn quét thanh toán siêu tốc!\n` +
-                `• Đặt làm **Mod Custom Java 1.16+** hoặc **Plugin riêng 1.16+** ➔ Trao đổi trực tiếp ý tưởng với Developer để nhận báo giá chi tiết!`
-          )
-          .setFooter({ text: isEn ? "Staff will assist and deliver your files right here!" : "Sau khi chuyển khoản, Staff sẽ duyệt và giao file ngay tại đây!" })
-          .setTimestamp();
+                `• Đặt làm **Mod Custom Java 1.16+** hoặc **Plugin riêng 1.16+** ➔ Trao đổi trực tiếp ý tưởng với Developer để nhận báo giá chi tiết!`,
+          footer: isEn ? "Staff will assist and deliver your files right here!" : "Sau khi chuyển khoản, Staff sẽ duyệt và giao file ngay tại đây!",
+          timestamp: true,
+          actionRows: [menuRow, langSwitchRow]
+        });
 
-        return safeUpdate(interaction, { embeds: [embed], components: [menuRow, langSwitchRow] });
+        return safeUpdate(interaction, v2Lang);
       }
 
       // Nút Mở Modal Yêu Cầu Custom Dev (Plugin / Mod Java / AI Service)
@@ -5170,24 +5526,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
               .setStyle(ButtonStyle.Danger)
           );
 
-          const introEmbed = new EmbedBuilder()
-            .setColor("#00E676")
-            .setTitle("🛒 TRUNG TÂM THANH TOÁN & ĐẶT HÀNG / ORDER CENTER")
-            .setDescription(
+          const v2Intro = createComponentsV2Message({
+            accentColor: 0x00E676,
+            title: "🛒 TRUNG TÂM THANH TOÁN & ĐẶT HÀNG / ORDER CENTER",
+            description:
               `👋 Chào <@${user.id}>! Cảm ơn bạn đã lựa chọn dịch vụ từ **LS STUDIO**.\n` +
               `*Welcome <@${user.id}>! Thank you for choosing LS STUDIO.*\n\n` +
               `👇 **Vui lòng chọn Plugin hoặc Dịch Vụ AI từ Menu bên dưới**:\n` +
               `*Please select a package or AI service from the dropdown menu below:*\n\n` +
               `• 🇻🇳 **Tiếng Việt:** Quét mã VietQR MBBank tự động 24/7.\n` +
-              `• 🇺🇸 **English:** Switch to English for PayPal / Global payment options!`
-            )
-            .setFooter({ text: "Staff sẽ hỗ trợ và giao file trực tiếp tại đây! / Staff will assist you here!" })
-            .setTimestamp();
+              `• 🇺🇸 **English:** Switch to English for PayPal / Global payment options!`,
+            footer: "Staff sẽ hỗ trợ và giao file trực tiếp tại đây! / Staff will assist you here!",
+            timestamp: true,
+            actionRows: [menuRow, langSwitchRow]
+          });
 
           await ticketChannel.send({
             content: `<@${user.id}> ${staffMentionString}`,
-            embeds: [introEmbed],
-            components: [menuRow, langSwitchRow]
+            ...(isComponentsV2Available() ? v2Intro.toV2() : v2Intro.toClassic())
           }).catch(err => {
             console.error("❌ Lỗi gửi intro embed vào ticket channel:", err);
           });
@@ -5353,10 +5709,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             ? '`Thỏa thuận / Negotiated`'
             : `\`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})`;
 
-          const successEmbed = new EmbedBuilder()
-            .setColor("#00E676")
-            .setTitle("🎉 XÁC NHẬN THANH TOÁN THÀNH CÔNG / PAYMENT APPROVED!")
-            .setDescription(
+          const v2Success = createComponentsV2Message({
+            accentColor: 0x00E676,
+            title: "🎉 XÁC NHẬN THANH TOÁN THÀNH CÔNG / PAYMENT APPROVED!",
+            description:
               `✅ Đơn hàng **\`${orderCode}\`** đã được <@${interaction.user.id}> xác nhận tiền về tài khoản!\n\n` +
               `👤 **Khách hàng / Customer:** <@${buyerId}> (${sanitizedBuyerName}) ${buyerMember ? '' : '*(Đã rời server)*'}\n` +
               `📦 **Sản phẩm / Product:** **${pkg.name_vi}**\n` +
@@ -5364,12 +5720,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
               `👑 **Quyền lợi & Trạng thái / Status:**\n` +
               `${roleStatusText}\n` +
               `• Staff sẽ gửi File / Link / API Key / Tài khoản trực tiếp ngay tại Ticket này!\n\n` +
-              `💬 *Cảm ơn bạn đã tin tưởng và sử dụng dịch vụ của LS STUDIO!*`
-            )
-            .setFooter({ text: "LS STUDIO • Thank you for your purchase!", iconURL: client.user ? client.user.displayAvatarURL({ size: 256 }) : undefined })
-            .setTimestamp();
+              `💬 *Cảm ơn bạn đã tin tưởng và sử dụng dịch vụ của LS STUDIO!*`,
+            footer: { text: "LS STUDIO • Thank you for your purchase!", iconURL: client.user ? client.user.displayAvatarURL({ size: 256 }) : undefined },
+            timestamp: true
+          });
 
-          await interaction.channel.send({ embeds: [successEmbed] }).catch(err => {
+          const successPayload = isComponentsV2Available() && typeof v2Success?.toV2 === 'function' && v2Success.toV2() 
+            ? v2Success.toV2() 
+            : (typeof v2Success?.toClassic === 'function' ? v2Success.toClassic() : v2Success);
+          await interaction.channel.send(successPayload).catch(err => {
             console.error("⚠️ Không thể gửi tin nhắn xác nhận vào channel:", err.message);
           });
 
@@ -5427,17 +5786,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           });
         }
 
-        const confirmEmbed = new EmbedBuilder()
-          .setColor("#FFA000")
-          .setTitle("⚠️ XÁC NHẬN ĐÓNG TICKET / CLOSE CONFIRMATION")
-          .setDescription(
-            `Bạn có chắc chắn muốn đóng ticket **#${interaction.channel.name}** không?\n\n` +
-            `• Toàn bộ tin nhắn (Transcript) sẽ được tạo và lưu trữ tự động vào kênh quản trị.\n` +
-            `• Kênh chat này sẽ bị **xóa vĩnh viễn** sau khi xác nhận.\n\n` +
-            `*Are you sure you want to close this ticket? A transcript file will be generated and saved to admin logs.*`
-          )
-          .setFooter({ text: "LS STUDIO Ticket Security" });
-
         const confirmRow = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
             .setCustomId('confirm_close_ticket')
@@ -5453,7 +5801,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
             .setStyle(ButtonStyle.Secondary)
         );
 
-        return safeReply(interaction, { embeds: [confirmEmbed], components: [confirmRow] });
+        const v2Confirm = createComponentsV2Message({
+          accentColor: 0xFFA000,
+          title: "⚠️ XÁC NHẬN ĐÓNG TICKET / CLOSE CONFIRMATION",
+          description:
+            `Bạn có chắc chắn muốn đóng ticket **#${interaction.channel.name}** không?\n\n` +
+            `• Toàn bộ tin nhắn (Transcript) sẽ được tạo và lưu trữ tự động vào kênh quản trị.\n` +
+            `• Kênh chat này sẽ bị **xóa vĩnh viễn** sau khi xác nhận.\n\n` +
+            `*Are you sure you want to close this ticket? A transcript file will be generated and saved to admin logs.*`,
+          footer: "LS STUDIO Ticket Security",
+          actionRows: [confirmRow]
+        });
+
+        return safeReply(interaction, v2Confirm);
       }
 
       // Nút Hủy Đóng Ticket
@@ -5461,11 +5821,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!guild) {
           return safeReply(interaction, { content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
         }
-        const cancelEmbed = new EmbedBuilder()
-          .setColor("#4CAF50")
-          .setDescription("✅ **Đã hủy thao tác đóng ticket.** Bạn có thể tiếp tục trao đổi với Staff!\n*Ticket close cancelled. You can continue chatting.*");
+        const v2Cancel = createComponentsV2Message({
+          accentColor: 0x4CAF50,
+          description: "✅ **Đã hủy thao tác đóng ticket.** Bạn có thể tiếp tục trao đổi với Staff!\n*Ticket close cancelled. You can continue chatting.*",
+          actionRows: []
+        });
 
-        return safeUpdate(interaction, { embeds: [cancelEmbed], components: [] });
+        return safeUpdate(interaction, v2Cancel);
       }
 
       // Nút Xác Nhận Đóng Ticket (Tạo transcript, gửi log và xóa kênh qua executeTicketClosure)
@@ -5482,12 +5844,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return safeReply(interaction, { content: "⏳ Kênh ticket này đang trong tiến trình đóng & lưu transcript...", ephemeral: true });
         }
 
-        const closingEmbed = new EmbedBuilder()
-          .setColor("#ED4245")
-          .setTitle("🔒 ĐANG ĐÓNG TICKET & LƯU TRANSCRIPT...")
-          .setDescription("Đang tổng hợp toàn bộ tin nhắn và lưu trữ nhật ký hội thoại. Kênh sẽ tự động xóa sau 5 giây...\n*Generating full transcript and closing ticket. Channel will be deleted in 5 seconds...*");
+        const v2Closing = createComponentsV2Message({
+          accentColor: 0xED4245,
+          title: "🔒 ĐANG ĐÓNG TICKET & LƯU TRANSCRIPT...",
+          description: "Đang tổng hợp toàn bộ tin nhắn và lưu trữ nhật ký hội thoại. Kênh sẽ tự động xóa sau 5 giây...\n*Generating full transcript and closing ticket. Channel will be deleted in 5 seconds...*",
+          actionRows: []
+        });
 
-        await safeUpdate(interaction, { embeds: [closingEmbed], components: [] });
+        await safeUpdate(interaction, v2Closing);
         await executeTicketClosure({ channel, guild, closerUser: user, closeReason: null });
         return;
       }
@@ -5529,12 +5893,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // Xử lý gói Custom Mod hoặc Custom Plugin (Báo giá thỏa thuận)
         if (isNegotiatedPrice(pkg.price_vnd)) {
           const isMod = selectedKey === 'custom_mod';
-          const customEmbed = new EmbedBuilder()
-            .setColor(isMod ? "#9C27B0" : "#FF4500")
-            .setTitle(isEn 
+          const btnClose = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId('btn_open_custom_modal')
+              .setLabel(isEn ? '📝 Fill Requirements Form' : '📝 Điền Form Yêu Cầu Chi Tiết')
+              .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
+              .setCustomId('btn_close_ticket')
+              .setLabel(isEn ? '🔒 Close Ticket' : '🔒 Đóng Ticket')
+              .setStyle(ButtonStyle.Danger)
+          );
+
+          const v2Custom = createComponentsV2Message({
+            accentColor: isMod ? 0x9C27B0 : 0xFF4500,
+            title: isEn 
               ? (isMod ? "🧩 CUSTOM MINECRAFT JAVA MOD DEVELOPMENT" : "📝 CUSTOM PLUGIN DEVELOPMENT")
-              : (isMod ? "🧩 ĐẶT LÀM MOD CUSTOM CHO MINECRAFT JAVA" : "📝 ĐẶT LẬP TRÌNH PLUGIN THEO Ý TƯỞNG"))
-            .setDescription(
+              : (isMod ? "🧩 ĐẶT LÀM MOD CUSTOM CHO MINECRAFT JAVA" : "📝 ĐẶT LẬP TRÌNH PLUGIN THEO Ý TƯỞNG"),
+            description:
               isEn 
                 ? (isMod 
                     ? `You selected: **${pkg.name_en}**\n\n` +
@@ -5559,23 +5934,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
                       `👉 **Các bước tiếp theo:**\n` +
                       `1. Hãy nhắn chi tiết ý tưởng plugin của bạn tại đây.\n` +
                       `2. Developer của **LS STUDIO** sẽ đọc yêu cầu, báo giá và thời gian hoàn thành.\n` +
-                      `3. Khi thống nhất, Dev sẽ gửi mã QR MBBank để bạn đặt cọc 50% và bắt đầu tiến hành code!`)
-            )
-            .setFooter({ text: "LS STUDIO • Uy Tín - Đúng Hẹn - Tối Ưu" })
-            .setTimestamp();
+                      `3. Khi thống nhất, Dev sẽ gửi mã QR MBBank để bạn đặt cọc 50% và bắt đầu tiến hành code!`),
+            footer: "LS STUDIO • Uy Tín - Đúng Hẹn - Tối Ưu",
+            timestamp: true,
+            actionRows: [btnClose]
+          });
 
-          const btnClose = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setCustomId('btn_open_custom_modal')
-              .setLabel(isEn ? '📝 Fill Requirements Form' : '📝 Điền Form Yêu Cầu Chi Tiết')
-              .setStyle(ButtonStyle.Primary),
-            new ButtonBuilder()
-              .setCustomId('btn_close_ticket')
-              .setLabel(isEn ? '🔒 Close Ticket' : '🔒 Đóng Ticket')
-              .setStyle(ButtonStyle.Danger)
-          );
-
-          return safeReply(interaction, { embeds: [customEmbed], components: [btnClose] });
+          return safeReply(interaction, v2Custom);
         }
 
         await safeDeferReply(interaction);
@@ -5609,35 +5974,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const qrBuffer = await fetchVietQRBuffer(qrUrl);
 
-        const invoiceEmbed = new EmbedBuilder()
-          .setColor("#00E676")
-          .setTitle(isEn ? `💳 PAYMENT INVOICE: ${orderCode}` : `💳 HÓA ĐƠN THANH TOÁN: ${orderCode}`)
-          .setDescription(
-            isEn 
-              ? `You selected: **${pkg.name_en}**\n\n` +
-                `💰 **Amount Due:** \`${formatVND(pkg.price_vnd)}\` (~**${formatUSD(pkg.price_usd)}**)\n` +
-                `🏦 **Bank:** **MBBank Vietnam (BIN: 970422)**\n` +
-                `🔢 **Account No:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
-                `👤 **Account Name:** **${BANK_CONFIG.ACCOUNT_NAME}**\n` +
-                `📝 **Transfer Memo / Note:** **\`${orderCode}\`** *(Required)*\n\n` +
-                `📱 **Payment Options:**\n` +
-                `• **Vietnam Banking / MoMo:** Scan the VietQR code below for instant transfer.\n` +
-                `• **International Customers (PayPal / Crypto / Card):** Please message staff in this ticket to receive payment instructions!\n` +
-                `• Once transferred, staff will approve and deliver your files / API Key / Account immediately!`
-              : `Quý khách đã chọn: **${pkg.name_vi}**\n\n` +
-                `💰 **Số tiền cần thanh toán:** \`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})\n` +
-                `🏦 **Ngân hàng:** **MBBank (Ngân Hàng TMCP Quân Đội - BIN: 970422)**\n` +
-                `🔢 **Số tài khoản:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
-                `👤 **Chủ tài khoản:** **${BANK_CONFIG.ACCOUNT_NAME}**\n` +
-                `📝 **Nội dung chuyển khoản:** **\`${orderCode}\`** *(Bắt buộc ghi đúng)*\n\n` +
-                `📱 **Hướng dẫn quét mã nhanh:**\n` +
-                `• Mở App **MBBank** hoặc bất kỳ ứng dụng ngân hàng / MoMo nào trên điện thoại.\n` +
-                `• Quét mã QR bên dưới -> Số tiền và nội dung sẽ tự động điền chính xác 100%!\n` +
-                `• Chuyển khoản xong, vui lòng đợi Staff bấm duyệt để nhận File / Key / Tài khoản ngay tại đây!`
-          )
-          .setFooter({ text: `Order ID: ${orderCode} • LS STUDIO Payment System` })
-          .setTimestamp();
-
         const actionRow = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
             .setCustomId(`approve_${orderCode}_${ticketOwnerId}_${selectedKey}`)
@@ -5655,61 +5991,98 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         if (qrBuffer) {
           const attachment = new AttachmentBuilder(qrBuffer, { name: `vietqr_${orderCode}.png` });
-          invoiceEmbed.setImage(`attachment://vietqr_${orderCode}.png`);
-          return safeReply(interaction, { embeds: [invoiceEmbed], files: [attachment], components: [actionRow] });
-        } else {
-          invoiceEmbed.setColor("#FFA500");
-          invoiceEmbed.setDescription(
-            isEn 
-              ? `You selected: **${pkg.name_en}**\n\n` +
-                `💰 **Amount Due:** \`${formatVND(pkg.price_vnd)}\` (~**${formatUSD(pkg.price_usd)}**)\n` +
-                `🏦 **Bank:** **MBBank Vietnam (MB / BIN: 970422)**\n` +
-                `🔢 **Account No:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
-                `👤 **Account Name:** **${BANK_CONFIG.ACCOUNT_NAME}**\n` +
-                `📝 **Transfer Memo / Note:** **\`${orderCode}\`** *(Required)*\n\n` +
-                `📱 **Payment Options (VietQR Image Offline):**\n` +
-                `• **Vietnam Banking 24/7:** Automatic QR image server is temporarily offline, but **Bank Transfers are 100% operational**! Please transfer manually using the details below or click **[🔗 Open VietQR Link]**.\n` +
-                `• **International Customers (PayPal / Crypto / Card):** Please message staff in this ticket to receive payment instructions!\n` +
-                `• Once transferred, staff will approve and deliver your files / API Key / Account immediately!`
-              : `Quý khách đã chọn: **${pkg.name_vi}**\n\n` +
-                `💰 **Số tiền cần thanh toán:** \`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})\n` +
-                `🏦 **Ngân hàng:** **MBBank (Ngân Hàng TMCP Quân Đội - MB / BIN: 970422)**\n` +
-                `🔢 **Số tài khoản:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
-                `👤 **Chủ tài khoản:** **${BANK_CONFIG.ACCOUNT_NAME}**\n` +
-                `📝 **Nội dung chuyển khoản:** **\`${orderCode}\`** *(Bắt buộc ghi đúng)*\n\n` +
-                `📱 **Hướng dẫn chuyển khoản thủ công (Khi mã QR bảo trì):**\n` +
-                `• Cổng tạo ảnh QR tự động tạm thời phản hồi chậm, nhưng **Hệ thống Ngân hàng 24/7 vẫn nhận tiền bình thường 100%**!\n` +
-                `• Mở App **MBBank** hoặc bất kỳ ứng dụng ngân hàng / MoMo nào trên điện thoại.\n` +
-                `• Chọn chuyển tiền liên ngân hàng 24/7 đến MBBank -> Nhập STK \`${BANK_CONFIG.ACCOUNT_NO}\`, Số tiền \`${formatVND(pkg.price_vnd)}\`, và Nội dung \`${orderCode}\`.\n` +
-                `• Chuyển khoản xong, vui lòng đợi Staff bấm duyệt để nhận File / Key / Tài khoản ngay tại đây!`
-          );
-          invoiceEmbed.addFields(
-            {
-              name: isEn 
-                ? "⚠️ VIETQR GATEWAY TEMPORARILY OFFLINE / BẢO TRÌ MÃ QR" 
-                : "⚠️ CỔNG TẠO ẢNH VIETQR TẠM THỜI BẢO TRÌ / OFFLINE NOTICE",
-              value: isEn
-                ? "The automatic VietQR image gateway is temporarily offline or experiencing high traffic.\n**Banking transfers are 100% operational!** Please use the manual transfer details below or click **[🔗 Open VietQR Link]**."
-                : "Cổng tạo ảnh VietQR tự động tạm thời phản hồi chậm hoặc đang bảo trì đường truyền.\n**Hệ thống Ngân hàng 24/7 vẫn hoạt động bình thường!** Quý khách vui lòng chuyển khoản thủ công theo thông tin bên dưới hoặc bấm nút **[🔗 Mở mã VietQR]**:"
-            },
-            {
-              name: isEn ? "📋 MANUAL TRANSFER INSTRUCTIONS" : "📋 HƯỚNG DẪN CHUYỂN KHOẢN THỦ CÔNG",
-              value: isEn
-                ? `🏦 **Bank:** \`MBBank (Military Commercial Joint Stock Bank - BIN: 970422)\`\n` +
+          const v2Invoice = createComponentsV2Message({
+            accentColor: 0x00E676,
+            title: isEn ? `💳 PAYMENT INVOICE: ${orderCode}` : `💳 HÓA ĐƠN THANH TOÁN: ${orderCode}`,
+            description:
+              isEn 
+                ? `You selected: **${pkg.name_en}**\n\n` +
+                  `💰 **Amount Due:** \`${formatVND(pkg.price_vnd)}\` (~**${formatUSD(pkg.price_usd)}**)\n` +
+                  `🏦 **Bank:** **MBBank Vietnam (BIN: 970422)**\n` +
                   `🔢 **Account No:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
-                  `👤 **Account Name:** \`${BANK_CONFIG.ACCOUNT_NAME}\`\n` +
-                  `💰 **Amount Due:** \`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})\n` +
-                  `📝 **Required Memo / Note:** \`${orderCode}\`\n\n` +
-                  `👉 *Tap/click on Account No or Memo above to copy instantly!*`
-                : `🏦 **Ngân hàng:** \`MBBank (Ngân Hàng TMCP Quân Đội - BIN: 970422)\`\n` +
+                  `👤 **Account Name:** **${BANK_CONFIG.ACCOUNT_NAME}**\n` +
+                  `📝 **Transfer Memo / Note:** **\`${orderCode}\`** *(Required)*\n\n` +
+                  `📱 **Payment Options:**\n` +
+                  `• **Vietnam Banking / MoMo:** Scan the VietQR code below for instant transfer.\n` +
+                  `• **International Customers (PayPal / Crypto / Card):** Please message staff in this ticket to receive payment instructions!\n` +
+                  `• Once transferred, staff will approve and deliver your files / API Key / Account immediately!`
+                : `Quý khách đã chọn: **${pkg.name_vi}**\n\n` +
+                  `💰 **Số tiền cần thanh toán:** \`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})\n` +
+                  `🏦 **Ngân hàng:** **MBBank (Ngân Hàng TMCP Quân Đội - BIN: 970422)**\n` +
                   `🔢 **Số tài khoản:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
-                  `👤 **Chủ tài khoản:** \`${BANK_CONFIG.ACCOUNT_NAME}\`\n` +
-                  `💰 **Số tiền chính xác:** \`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})\n` +
-                  `📝 **Nội dung bắt buộc:** \`${orderCode}\`\n\n` +
-                  `👉 *Quý khách chạm/click vào Số tài khoản hoặc Mã đơn để sao chép nhanh!*`
-            }
-          );
-          return safeReply(interaction, { embeds: [invoiceEmbed], components: [actionRow] });
+                  `👤 **Chủ tài khoản:** **${BANK_CONFIG.ACCOUNT_NAME}**\n` +
+                  `📝 **Nội dung chuyển khoản:** **\`${orderCode}\`** *(Bắt buộc ghi đúng)*\n\n` +
+                  `📱 **Hướng dẫn quét mã nhanh:**\n` +
+                  `• Mở App **MBBank** hoặc bất kỳ ứng dụng ngân hàng / MoMo nào trên điện thoại.\n` +
+                  `• Quét mã QR bên dưới -> Số tiền và nội dung sẽ tự động điền chính xác 100%!\n` +
+                  `• Chuyển khoản xong, vui lòng đợi Staff bấm duyệt để nhận File / Key / Tài khoản ngay tại đây!`,
+            footer: `Order ID: ${orderCode} • LS STUDIO Payment System`,
+            timestamp: true,
+            actionRows: [actionRow],
+            files: [attachment]
+          });
+          if (v2Invoice.toClassic()?.embeds?.[0]) {
+            v2Invoice.toClassic().embeds[0].setImage(`attachment://vietqr_${orderCode}.png`);
+          }
+          return safeReply(interaction, v2Invoice);
+        } else {
+          const v2Invoice = createComponentsV2Message({
+            accentColor: 0xFFA500,
+            title: isEn ? `💳 PAYMENT INVOICE: ${orderCode}` : `💳 HÓA ĐƠN THANH TOÁN: ${orderCode}`,
+            description:
+              isEn 
+                ? `You selected: **${pkg.name_en}**\n\n` +
+                  `💰 **Amount Due:** \`${formatVND(pkg.price_vnd)}\` (~**${formatUSD(pkg.price_usd)}**)\n` +
+                  `🏦 **Bank:** **MBBank Vietnam (MB / BIN: 970422)**\n` +
+                  `🔢 **Account No:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
+                  `👤 **Account Name:** **${BANK_CONFIG.ACCOUNT_NAME}**\n` +
+                  `📝 **Transfer Memo / Note:** **\`${orderCode}\`** *(Required)*\n\n` +
+                  `📱 **Payment Options (VietQR Image Offline):**\n` +
+                  `• **Vietnam Banking 24/7:** Automatic QR image server is temporarily offline, but **Bank Transfers are 100% operational**! Please transfer manually using the details below or click **[🔗 Open VietQR Link]**.\n` +
+                  `• **International Customers (PayPal / Crypto / Card):** Please message staff in this ticket to receive payment instructions!\n` +
+                  `• Once transferred, staff will approve and deliver your files / API Key / Account immediately!`
+                : `Quý khách đã chọn: **${pkg.name_vi}**\n\n` +
+                  `💰 **Số tiền cần thanh toán:** \`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})\n` +
+                  `🏦 **Ngân hàng:** **MBBank (Ngân Hàng TMCP Quân Đội - MB / BIN: 970422)**\n` +
+                  `🔢 **Số tài khoản:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
+                  `👤 **Chủ tài khoản:** **${BANK_CONFIG.ACCOUNT_NAME}**\n` +
+                  `📝 **Nội dung chuyển khoản:** **\`${orderCode}\`** *(Bắt buộc ghi đúng)*\n\n` +
+                  `📱 **Hướng dẫn chuyển khoản thủ công (Khi mã QR bảo trì):**\n` +
+                  `• Cổng tạo ảnh QR tự động tạm thời phản hồi chậm, nhưng **Hệ thống Ngân hàng 24/7 vẫn nhận tiền bình thường 100%**!\n` +
+                  `• Mở App **MBBank** hoặc bất kỳ ứng dụng ngân hàng / MoMo nào trên điện thoại.\n` +
+                  `• Chọn chuyển tiền liên ngân hàng 24/7 đến MBBank -> Nhập STK \`${BANK_CONFIG.ACCOUNT_NO}\`, Số tiền \`${formatVND(pkg.price_vnd)}\`, và Nội dung \`${orderCode}\`.\n` +
+                  `• Chuyển khoản xong, vui lòng đợi Staff bấm duyệt để nhận File / Key / Tài khoản ngay tại đây!`,
+            fields: [
+              {
+                name: isEn 
+                  ? "⚠️ VIETQR GATEWAY TEMPORARILY OFFLINE / BẢO TRÌ MÃ QR" 
+                  : "⚠️ CỔNG TẠO ẢNH VIETQR TẠM THỜI BẢO TRÌ / OFFLINE NOTICE",
+                value: isEn
+                  ? "The automatic VietQR image gateway is temporarily offline or experiencing high traffic.\n**Banking transfers are 100% operational!** Please use the manual transfer details below or click **[🔗 Open VietQR Link]**."
+                  : "Cổng tạo ảnh VietQR tự động tạm thời phản hồi chậm hoặc đang bảo trì đường truyền.\n**Hệ thống Ngân hàng 24/7 vẫn hoạt động bình thường!** Quý khách vui lòng chuyển khoản thủ công theo thông tin bên dưới hoặc bấm nút **[🔗 Mở mã VietQR]**:"
+              },
+              {
+                name: isEn ? "📋 MANUAL TRANSFER INSTRUCTIONS" : "📋 HƯỚNG DẪN CHUYỂN KHOẢN THỦ CÔNG",
+                value: isEn
+                  ? `🏦 **Bank:** \`MBBank (Military Commercial Joint Stock Bank - BIN: 970422)\`\n` +
+                    `🔢 **Account No:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
+                    `👤 **Account Name:** \`${BANK_CONFIG.ACCOUNT_NAME}\`\n` +
+                    `💰 **Amount Due:** \`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})\n` +
+                    `📝 **Required Memo / Note:** \`${orderCode}\`\n\n` +
+                    `👉 *Tap/click on Account No or Memo above to copy instantly!*`
+                  : `🏦 **Ngân hàng:** \`MBBank (Ngân Hàng TMCP Quân Đội - BIN: 970422)\`\n` +
+                    `🔢 **Số tài khoản:** \`${BANK_CONFIG.ACCOUNT_NO}\`\n` +
+                    `👤 **Chủ tài khoản:** \`${BANK_CONFIG.ACCOUNT_NAME}\`\n` +
+                    `💰 **Số tiền chính xác:** \`${formatVND(pkg.price_vnd)}\` (~${formatUSD(pkg.price_usd)})\n` +
+                    `📝 **Nội dung bắt buộc:** \`${orderCode}\`\n\n` +
+                    `👉 *Quý khách chạm/click vào Số tài khoản hoặc Mã đơn để sao chép nhanh!*`
+              }
+            ],
+            footer: `Order ID: ${orderCode} • LS STUDIO Payment System`,
+            timestamp: true,
+            actionRows: [actionRow]
+          });
+          return safeReply(interaction, v2Invoice);
         }
       }
     }
@@ -5752,22 +6125,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
           // Nếu người dùng đang submit từ bên trong một kênh ticket đã có
           const isInExistingTicket = interaction.channel?.topic?.includes(`(${user.id})`);
           if (isInExistingTicket) {
-            const detailEmbed = new EmbedBuilder()
-              .setColor("#FF4500")
-              .setTitle("📝 THÔNG TIN YÊU CẦU ĐẶT CODE (CUSTOM DEV)")
-              .setDescription(
+            const v2Detail = createComponentsV2Message({
+              accentColor: 0xFF4500,
+              title: "📝 THÔNG TIN YÊU CẦU ĐẶT CODE (CUSTOM DEV)",
+              description:
                 `Khách hàng <@${user.id}> vừa cập nhật form thông tin chi tiết:\n\n` +
                 `• 📦 **Loại sản phẩm:** \`${projectType}\`\n` +
                 `• ⚙️ **Phiên bản & Nền tảng:** \`${version}\`\n` +
                 `• 💰 **Ngân sách & Thời hạn:** \`${budgetDeadline}\`\n` +
                 `• 📞 **Ghi chú / Liên hệ:** \`${contact}\`\n\n` +
                 `📋 **Chi tiết tính năng yêu cầu:**\n` +
-                `\`\`\`text\n${features}\n\`\`\``
-              )
-              .setFooter({ text: "LS STUDIO • Lead Developer sẽ phản hồi và báo giá sớm nhất!" })
-              .setTimestamp();
+                `\`\`\`text\n${features}\n\`\`\``,
+              footer: "LS STUDIO • Lead Developer sẽ phản hồi và báo giá sớm nhất!",
+              timestamp: true
+            });
 
-            await interaction.channel.send({ embeds: [detailEmbed] }).catch(() => {});
+            await interaction.channel.send(isComponentsV2Available() ? v2Detail.toV2() : v2Detail.toClassic()).catch(() => {});
 
             // Cập nhật topic kênh kèm tóm tắt yêu cầu
             try {
@@ -5794,22 +6167,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
           }
 
-          const orderEmbed = new EmbedBuilder()
-            .setColor("#FF4500")
-            .setTitle("📝 PHIẾU ĐẶT LÀM PLUGIN / MOD CUSTOM - LS STUDIO")
-            .setDescription(
-              `👋 Chào <@${user.id}>! Cảm ơn bạn đã gửi thông tin yêu cầu đặt làm dự án riêng.\n\n` +
-              `📦 **Loại sản phẩm:** \`${projectType}\`\n` +
-              `⚙️ **Phiên bản / Môi trường:** \`${version}\`\n` +
-              `💰 **Ngân sách & Thời hạn dự kiến:** \`${budgetDeadline}\`\n` +
-              `📞 **Ghi chú / Liên hệ khác:** \`${contact}\`\n\n` +
-              `📋 **Mô tả tính năng & gameplay yêu cầu:**\n` +
-              `\`\`\`text\n${features}\n\`\`\`\n` +
-              `*Lead Developer của LS STUDIO sẽ xem xét yêu cầu và trao đổi báo giá trực tiếp tại đây!*`
-            )
-            .setFooter({ text: "LS STUDIO • Uy Tín - Đúng Hẹn - Tối Ưu" })
-            .setTimestamp();
-
           const btnRow = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
               .setCustomId('btn_ticket_feedback')
@@ -5821,10 +6178,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
               .setStyle(ButtonStyle.Danger)
           );
 
+          const v2Order = createComponentsV2Message({
+            accentColor: 0xFF4500,
+            title: "📝 PHIẾU ĐẶT LÀM PLUGIN / MOD CUSTOM - LS STUDIO",
+            description:
+              `👋 Chào <@${user.id}>! Cảm ơn bạn đã gửi thông tin yêu cầu đặt làm dự án riêng.\n\n` +
+              `📦 **Loại sản phẩm:** \`${projectType}\`\n` +
+              `⚙️ **Phiên bản / Môi trường:** \`${version}\`\n` +
+              `💰 **Ngân sách & Thời hạn dự kiến:** \`${budgetDeadline}\`\n` +
+              `📞 **Ghi chú / Liên hệ khác:** \`${contact}\`\n\n` +
+              `📋 **Mô tả tính năng & gameplay yêu cầu:**\n` +
+              `\`\`\`text\n${features}\n\`\`\`\n` +
+              `*Lead Developer của LS STUDIO sẽ xem xét yêu cầu và trao đổi báo giá trực tiếp tại đây!*`,
+            footer: "LS STUDIO • Uy Tín - Đúng Hẹn - Tối Ưu",
+            timestamp: true,
+            actionRows: [btnRow]
+          });
+
+          const v2Payload = isComponentsV2Available() ? v2Order.toV2() : v2Order.toClassic();
           await ticketChannel.send({
             content: `<@${user.id}> ${staffMentionString}`,
-            embeds: [orderEmbed],
-            components: [btnRow]
+            ...v2Payload
           }).catch(() => {});
 
           return safeReply(interaction, {
@@ -5886,20 +6260,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
           // Nếu người dùng đang submit từ bên trong một kênh ticket đã có
           const isInExistingTicket = interaction.channel?.topic?.includes(`(${user.id})`);
           if (isInExistingTicket) {
-            const detailEmbed = new EmbedBuilder()
-              .setColor("#3D5AFE")
-              .setTitle("🛠️ CẬP NHẬT THÔNG TIN LỖI / TECH SUPPORT")
-              .setDescription(
+            const v2Detail = createComponentsV2Message({
+              accentColor: 0x3D5AFE,
+              title: "🛠️ CẬP NHẬT THÔNG TIN LỖI / TECH SUPPORT",
+              description:
                 `Khách hàng <@${user.id}> vừa cập nhật chi tiết vấn đề:\n\n` +
                 `• 📌 **Tiêu đề lỗi:** \`${issueTitle}\`\n` +
                 `• ⚙️ **Môi trường & Phiên bản:** \`${serverEnv}\`\n\n` +
                 `📋 **Chi tiết mô tả & Log:**\n` +
-                `\`\`\`text\n${description}\n\`\`\``
-              )
-              .setFooter({ text: "LS STUDIO Support Team" })
-              .setTimestamp();
+                `\`\`\`text\n${description}\n\`\`\``,
+              footer: "LS STUDIO Support Team",
+              timestamp: true
+            });
 
-            await interaction.channel.send({ embeds: [detailEmbed] }).catch(() => {});
+            await interaction.channel.send(isComponentsV2Available() ? v2Detail.toV2() : v2Detail.toClassic()).catch(() => {});
             return safeReply(interaction, {
               content: "✅ Đã gửi chi tiết lỗi vào kênh Ticket thành công! Kỹ thuật viên sẽ hỗ trợ ngay."
             });
@@ -5919,20 +6293,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
           }
 
-          const supportEmbed = new EmbedBuilder()
-            .setColor("#3D5AFE")
-            .setTitle("🛠️ PHIẾU HỖ TRỢ KỸ THUẬT - LS STUDIO")
-            .setDescription(
-              `👋 Chào <@${user.id}>! Đội ngũ Kỹ Thuật đã tiếp nhận yêu cầu hỗ trợ của bạn.\n\n` +
-              `📌 **Tiêu đề vấn đề:** \`${issueTitle}\`\n` +
-              `⚙️ **Môi trường & Phiên bản:** \`${serverEnv}\`\n\n` +
-              `📋 **Mô tả chi tiết & Log lỗi:**\n` +
-              `\`\`\`text\n${description}\n\`\`\`\n` +
-              `*Bạn có thể đính kèm thêm file log (\`latest.log\`) hoặc chụp ảnh màn hình trực tiếp tại kênh này.*`
-            )
-            .setFooter({ text: "LS STUDIO Support Team • Hỗ Trợ 24/7" })
-            .setTimestamp();
-
           const btnRow = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
               .setCustomId('btn_close_ticket')
@@ -5940,10 +6300,25 @@ client.on(Events.InteractionCreate, async (interaction) => {
               .setStyle(ButtonStyle.Danger)
           );
 
+          const v2Support = createComponentsV2Message({
+            accentColor: 0x3D5AFE,
+            title: "🛠️ PHIẾU HỖ TRỢ KỸ THUẬT - LS STUDIO",
+            description:
+              `👋 Chào <@${user.id}>! Đội ngũ Kỹ Thuật đã tiếp nhận yêu cầu hỗ trợ của bạn.\n\n` +
+              `📌 **Tiêu đề vấn đề:** \`${issueTitle}\`\n` +
+              `⚙️ **Môi trường & Phiên bản:** \`${serverEnv}\`\n\n` +
+              `📋 **Mô tả chi tiết & Log lỗi:**\n` +
+              `\`\`\`text\n${description}\n\`\`\`\n` +
+              `*Bạn có thể đính kèm thêm file log (\`latest.log\`) hoặc chụp ảnh màn hình trực tiếp tại kênh này.*`,
+            footer: "LS STUDIO Support Team • Hỗ Trợ 24/7",
+            timestamp: true,
+            actionRows: [btnRow]
+          });
+
+          const v2SupportPayload = isComponentsV2Available() ? v2Support.toV2() : v2Support.toClassic();
           await ticketChannel.send({
             content: `<@${user.id}> ${staffMentionString}`,
-            embeds: [supportEmbed],
-            components: [btnRow]
+            ...v2SupportPayload
           }).catch(() => {});
 
           return safeReply(interaction, {
@@ -5996,16 +6371,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         await safeDeferReply(interaction, { ephemeral: true });
 
-        const closingEmbed = new EmbedBuilder()
-          .setColor("#ED4245")
-          .setTitle("🔒 ĐANG ĐÓNG TICKET & LƯU TRANSCRIPT...")
-          .setDescription(
+        const v2Closing = createComponentsV2Message({
+          accentColor: 0xED4245,
+          title: "🔒 ĐANG ĐÓNG TICKET & LƯU TRANSCRIPT...",
+          description:
             `Ticket đang được đóng bởi <@${user.id}>.\n` +
             `📝 **Lý do / Ghi chú:** \`${closeReason}\`\n\n` +
             `Đang tạo file nhật ký hội thoại (Transcript) và lưu trữ. Kênh sẽ tự động xóa sau 5 giây...`
-          );
+        });
 
-        await channel.send({ embeds: [closingEmbed] }).catch(() => {});
+        await channel.send(isComponentsV2Available() ? v2Closing.toV2() : v2Closing.toClassic()).catch(() => {});
         await safeReply(interaction, {
           content: "✅ Đã ghi nhận lý do và tiến hành đóng ticket lưu trữ transcript thành công!"
         });
@@ -6023,17 +6398,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         const safeUserTag = sanitizeCustomerName(user.tag || user.username, 32, 'Khách Hàng');
 
-        const feedbackEmbed = new EmbedBuilder()
-          .setColor("#FFD700")
-          .setTitle("⭐ ĐÁNH GIÁ DỊCH VỤ MỚI / CUSTOMER FEEDBACK")
-          .setDescription(
+        const v2Feedback = createComponentsV2Message({
+          accentColor: 0xFFD700,
+          title: "⭐ ĐÁNH GIÁ DỊCH VỤ MỚI / CUSTOMER FEEDBACK",
+          description:
             `👤 **Khách hàng:** <@${user.id}> (\`${safeUserTag}\`)\n` +
             `🌟 **Đánh giá:** **${rating}**\n\n` +
             `💬 **Nhận xét & Trải nghiệm:**\n` +
-            `\`\`\`text\n${comment}\n\`\`\``
-          )
-          .setFooter({ text: "LS STUDIO • Customer Feedback System" })
-          .setTimestamp();
+            `\`\`\`text\n${comment}\n\`\`\``,
+          footer: "LS STUDIO • Customer Feedback System",
+          timestamp: true
+        });
 
         // Gửi vào kênh đánh giá hoặc log (hỗ trợ cả khi gửi từ DM hoặc Guild)
         try {
@@ -6065,7 +6440,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
 
             if (fbChannel) {
-              await fbChannel.send({ embeds: [feedbackEmbed] }).catch(err => {
+              const fbPayload = isComponentsV2Available() && typeof v2Feedback?.toV2 === 'function' && v2Feedback.toV2() 
+                ? v2Feedback.toV2() 
+                : (typeof v2Feedback?.toClassic === 'function' ? v2Feedback.toClassic() : v2Feedback);
+              await fbChannel.send(fbPayload).catch(err => {
                 console.error("❌ Lỗi gửi embed feedback:", err);
               });
             }
@@ -6213,6 +6591,18 @@ module.exports = {
   IGNORABLE_INTERACTION_ERROR_CODES,
   isIgnorableInteractionError,
   isInteractionExpired,
+  createComponentsV2Message,
+  isComponentsV2Available,
+  ContainerBuilder,
+  SectionBuilder,
+  TextDisplayBuilder,
+  SeparatorBuilder,
+  ThumbnailBuilder,
+  MediaGalleryBuilder,
+  MediaGalleryItemBuilder,
+  SeparatorSpacingSize,
+  ComponentType,
+  MessageFlags,
   safeReply,
   safeDeferReply,
   safeDeferUpdate,

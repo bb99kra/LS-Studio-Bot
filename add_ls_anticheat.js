@@ -107,13 +107,11 @@ client.once(Events.ClientReady, async () => {
 
     // 1. KÊNH SẢN PHẨM PLUGIN & MOD
     await refreshChannel(channels.get("1542479128534716438"), async (ch) => {
-      const embed = new EmbedBuilder()
-        .setColor("#5865F2")
-        .setTitle("💎 CÁC SẢN PHẨM & DỊCH VỤ - LS STUDIO")
-        .setDescription(
-          "Toàn bộ Plugin & Mod do LS Studio tự phát triển, tối ưu async nhẹ mượt và hỗ trợ lâu dài:"
-        )
-        .addFields(
+      const v2Products = createComponentsV2Message({
+        accentColor: 0x5865F2,
+        title: "💎 CÁC SẢN PHẨM & DỊCH VỤ - LS STUDIO",
+        description: "Toàn bộ Plugin & Mod do LS Studio tự phát triển, tối ưu async nhẹ mượt và hỗ trợ lâu dài:",
+        fields: [
           {
             name: "🛡️ 1. LS-AntiCheat (Bảo Vệ Hành Vi Tiện Ích)",
             value: 
@@ -160,19 +158,20 @@ client.once(Events.ClientReady, async () => {
               "• ⚠️ **Lưu ý:** *Chỉ nhận làm cho Minecraft Java Edition (PC), không nhận Bedrock/PE.*\n" +
               "• **Giá:** `Thỏa thuận theo ý tưởng`"
           }
-        )
-        .setFooter({ text: "Mở Ticket tại #🛒・mua-plugin để đặt mua và nhận file ngay!" });
+        ],
+        footer: "Mở Ticket tại #🛒・mua-plugin để đặt mua và nhận file ngay!"
+      });
 
-      await ch.send({ embeds: [embed] });
+      await ch.send(isComponentsV2Available() ? v2Products.toV2() : v2Products.toClassic());
     });
 
     // 2. KÊNH BẢNG GIÁ
     await refreshChannel(channels.get("1542479130900172910"), async (ch) => {
-      const embed = new EmbedBuilder()
-        .setColor("#FEE75C")
-        .setTitle("💰 BẢNG GIÁ DỊCH VỤ LS STUDIO")
-        .setDescription("Bảng giá minh bạch, hỗ trợ bảo hành và cập nhật tận tình:")
-        .addFields(
+      const v2Pricing = createComponentsV2Message({
+        accentColor: 0xFEE75C,
+        title: "💰 BẢNG GIÁ DỊCH VỤ LS STUDIO",
+        description: "Bảng giá minh bạch, hỗ trợ bảo hành và cập nhật tận tình:",
+        fields: [
           {
             name: "📦 1. Plugin Đóng Gói Sẵn (Paper / Purpur / Folia 1.16 - 1.21+)",
             value: 
@@ -201,10 +200,11 @@ client.once(Events.ClientReady, async () => {
             name: "💳 4. Thông Tin Thanh Toán",
             value: "• **Ngân hàng:** MBBank\n• **STK:** `844515133333`\n• **Tên:** `VAN HUU PHAM NGUYEN`\n• Quét mã VietQR tự động qua Ticket để nhận file ngay!"
           }
-        )
-        .setFooter({ text: "Giao dịch an toàn qua Ticket tại LS STUDIO" });
+        ],
+        footer: "Giao dịch an toàn qua Ticket tại LS STUDIO"
+      });
 
-      await ch.send({ embeds: [embed] });
+      await ch.send(isComponentsV2Available() ? v2Pricing.toV2() : v2Pricing.toClassic());
     });
 
     console.log("🎉 ĐÃ THÊM LS-ANTICHEAT (10K) XONG 100%!");
