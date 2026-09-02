@@ -1320,6 +1320,32 @@ const PACKAGES = {
     price_usd: 0.2,
     desc_vi: "Gmail mới dùng kích hoạt gói Offer/Trial GPT-5.6 (Cần thẻ PayPal)",
     desc_en: "Fresh Gmail for activating GPT-5.6 trial offer (PayPal card required)"
+  },
+
+  // 3. DỊCH VỤ NITRO & TÀI KHOẢN GIẢI TRÍ
+  "boost_nitro_2x": {
+    name_vi: "Gói 2 Boost Server Discord Nitro (1 Tháng)",
+    name_en: "Discord Server 2 Boosts Package (1 Month)",
+    price_vnd: 20000,
+    price_usd: 0.8,
+    desc_vi: "Cấp 2 Boost tăng cấp độ server, mở khóa Avatar động, Banner, 720p 60fps & 128kbps Audio",
+    desc_en: "2 Server Boosts to level up your Discord server, unlock animated icon & audio"
+  },
+  "acc_youtube_premium_1m": {
+    name_vi: "Tài Khoản YouTube Premium (1 Tháng)",
+    name_en: "YouTube Premium Account (1 Month)",
+    price_vnd: 25000,
+    price_usd: 1.0,
+    desc_vi: "Xem video không quảng cáo, phát trong nền, nghe nhạc YouTube Music Premium chất lượng cao",
+    desc_en: "Ad-free videos, background playback, high quality YouTube Music Premium"
+  },
+  "acc_netflix_1w": {
+    name_vi: "Tài Khoản Netflix Premium (1 Tuần)",
+    name_en: "Netflix Premium Account (1 Week)",
+    price_vnd: 20000,
+    price_usd: 0.8,
+    desc_vi: "Xem phim Ultra HD 4K trên TV, điện thoại, máy tính, bảo hành trọn 1 tuần",
+    desc_en: "Ultra HD 4K streaming on TV, phone, PC with full 1-week warranty"
   }
 };
 
@@ -1345,6 +1371,17 @@ const DEPRECATED_PACKAGE_ALIASES = Object.freeze({
   "link_gemini_pro": "link_gemini_pro_18m",
   "google_ai_pro": "acc_google_ai_pro_1m",
   "acc_google_ai_pro": "acc_google_ai_pro_1m",
+  "nitro_boost": "boost_nitro_2x",
+  "boost_nitro": "boost_nitro_2x",
+  "2_boost": "boost_nitro_2x",
+  "boost": "boost_nitro_2x",
+  "youtube_premium": "acc_youtube_premium_1m",
+  "yt_premium": "acc_youtube_premium_1m",
+  "acc_youtube": "acc_youtube_premium_1m",
+  "youtube": "acc_youtube_premium_1m",
+  "netflix": "acc_netflix_1w",
+  "acc_netflix": "acc_netflix_1w",
+  "netflix_1w": "acc_netflix_1w",
   "giftcode": "ls_giftcode",
   "anticheat": "ls_anticheat",
   "antifreecam": "anti_freecam",
@@ -3604,7 +3641,24 @@ function buildPackageSelectMenu(userId, lang = 'vi') {
       .setLabel(isEn ? 'ChatGPT Fresh Gmail for Offer • $0.20 (5.000 VNĐ)' : 'Tài Khoản ChatGPT New Gmail (Nhận Offer) • 5.000 VNĐ')
       .setDescription(isEn ? 'Fresh Gmail to activate GPT-5.6 offer/trial' : 'Gmail mới dùng nhận Offer GPT-5.6 Sol (Cần thẻ PayPal)')
       .setValue('acc_chatgpt_offer')
-      .setEmoji('🎁')
+      .setEmoji('🎁'),
+
+    // Dịch vụ Nitro & Giải Trí
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? '2 Discord Server Boosts • $0.80 (20.000 VNĐ)' : '2 Boost Server Discord Nitro • 20.000 VNĐ')
+      .setDescription(isEn ? '2 Boosts for your server, unlock animated icon & perks' : '2 Boost mở khóa avatar động, âm thanh 128kbps, banner')
+      .setValue('boost_nitro_2x')
+      .setEmoji('🚀'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'YouTube Premium (1 Mo) • $1.00 (25.000 VNĐ)' : 'Tài Khoản YouTube Premium (1 Tháng) • 25.000 VNĐ')
+      .setDescription(isEn ? 'Ad-free videos, background play, YouTube Music' : 'Xem không quảng cáo, chạy nền, YouTube Music bản quyền')
+      .setValue('acc_youtube_premium_1m')
+      .setEmoji('📺'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'Netflix Premium (1 Week) • $0.80 (20.000 VNĐ)' : 'Tài Khoản Netflix Premium (1 Tuần) • 20.000 VNĐ')
+      .setDescription(isEn ? 'Ultra HD 4K streaming with 1-week full warranty' : 'Xem phim Ultra HD 4K mọi thiết bị, bảo hành trọn 1 tuần')
+      .setValue('acc_netflix_1w')
+      .setEmoji('🍿')
   );
 
   return menu;
