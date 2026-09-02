@@ -63,7 +63,10 @@ Thumbs.db
 *.sublime-project
 *.sublime-workspace
 
-# 8. Archives & Packaging Artifacts (Discloud Uploads)
+# 8. Backup Files
+*.bak
+
+# 9. Archives & Packaging Artifacts (Discloud Uploads)
 *.zip
 *.tar
 *.tar.gz

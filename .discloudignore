@@ -1,0 +1,63 @@
+# =========================================================================
+# LS STUDIO BOT - DISCLOUD IGNORE CONFIGURATION
+# =========================================================================
+# Liệt kê các file/thư mục KHÔNG CẦN upload lên Discloud để giảm kích thước
+# deploy ZIP và tăng tốc thời gian khởi động.
+# =========================================================================
+
+# 1. Git & Version Control
+.git
+.gitignore
+
+# 2. Documentation & README
+README.md
+LICENSE
+
+# 3. Environment Templates (Discloud dùng .env riêng qua dashboard)
+.env.example
+
+# 4. One-off Migration & Setup Scripts (Không chạy trên Discloud)
+setup_server.js
+add_*.js
+clean_*.js
+create_*.js
+decor_*.js
+fix_*.js
+humanize_all.js
+inspect_*.js
+list_channels.js
+redecor_*.js
+remove_*.js
+reorganize_*.js
+resize_logo.js
+retry_update.js
+separate_*.js
+set_server_icon.js
+update_*.js
+composite_bg.js
+
+# 5. Test & Audit Scripts
+test_*.js
+commit_discloud.js
+
+# 6. Shell Scripts (Discloud dùng MAIN từ discloud.config)
+start.sh
+run.sh
+
+# 7. Output & Temp Artifacts
+output/
+*.log
+*.tmp
+*.bak
+
+# 8. OS Metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+._*
+
+# 9. Editor & IDE Config
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
