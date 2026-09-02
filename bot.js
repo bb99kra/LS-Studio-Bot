@@ -1354,6 +1354,56 @@ const PACKAGES = {
     price_usd: 0.3,
     desc_vi: "Acc Discord đã xác minh đầy đủ Email và Số điện thoại (SĐT), bao trâu, dùng ổn định",
     desc_en: "Fully verified Discord account with Email & Phone number, clean & ready to use"
+  },
+
+  // 4. CAPCUT PRO (CÁ NHÂN & TEAM 2TB)
+  "capcut_pro_3d": {
+    name_vi: "CapCut Pro Cá Nhân (3 Ngày)",
+    name_en: "CapCut Pro Personal (3 Days)",
+    price_vnd: 14000,
+    price_usd: 0.6,
+    desc_vi: "Tài khoản CapCut Pro cá nhân 3 ngày mở khóa toàn bộ tính năng Pro, xóa watermark, xuất 4K",
+    desc_en: "3-Day CapCut Pro personal account, full Pro features, no watermark, 4K export"
+  },
+  "capcut_pro_14d": {
+    name_vi: "CapCut Pro Cá Nhân (14 Ngày)",
+    name_en: "CapCut Pro Personal (14 Days)",
+    price_vnd: 39000,
+    price_usd: 1.6,
+    desc_vi: "Tài khoản CapCut Pro cá nhân 14 ngày, hiệu ứng VIP, kho nhạc bản quyền, AI phụ đề tự động",
+    desc_en: "14-Day CapCut Pro personal account, VIP effects, licensed music, auto AI captions"
+  },
+  "capcut_pro_1m": {
+    name_vi: "CapCut Pro Cá Nhân (1 Tháng)",
+    name_en: "CapCut Pro Personal (1 Month)",
+    price_vnd: 75000,
+    price_usd: 3.0,
+    desc_vi: "Tài khoản CapCut Pro cá nhân 1 tháng (30 ngày), dùng PC và Mobile, bảo hành trọn 30 ngày",
+    desc_en: "1-Month CapCut Pro personal account for PC & Mobile, full 30-day warranty"
+  },
+  "capcut_pro_3m": {
+    name_vi: "CapCut Pro Cá Nhân (3 Tháng)",
+    name_en: "CapCut Pro Personal (3 Months)",
+    price_vnd: 200000,
+    price_usd: 8.0,
+    desc_vi: "Tài khoản CapCut Pro cá nhân 3 tháng tiết kiệm, bảo hành 1 đổi 1 suốt 90 ngày",
+    desc_en: "3-Month CapCut Pro personal account, 90-day 1-to-1 replacement warranty"
+  },
+  "capcut_pro_6m": {
+    name_vi: "CapCut Pro Cá Nhân (6 Tháng)",
+    name_en: "CapCut Pro Personal (6 Months)",
+    price_vnd: 390000,
+    price_usd: 15.5,
+    desc_vi: "Gói CapCut Pro cá nhân 6 tháng (180 ngày) giá siêu ưu đãi, ổn định lâu dài",
+    desc_en: "6-Month CapCut Pro personal account (180 days) best value, long-term stability"
+  },
+  "capcut_pro_team_1m": {
+    name_vi: "CapCut Pro Gói Team 2TB Cloud (1 Tháng)",
+    name_en: "CapCut Pro Team 2TB Cloud (1 Month)",
+    price_vnd: 100000,
+    price_usd: 4.0,
+    desc_vi: "Nâng cấp CapCut Pro nhóm/team, kèm 2TB Cloud lưu trữ project video dung lượng khủng",
+    desc_en: "CapCut Pro Team package with 2TB high-speed cloud storage for video projects"
   }
 };
 
@@ -1395,6 +1445,15 @@ const DEPRECATED_PACKAGE_ALIASES = Object.freeze({
   "discord_ver_mail": "acc_discord_ver_mail_sdt",
   "discord_phone": "acc_discord_ver_mail_sdt",
   "acc_discord_7k": "acc_discord_ver_mail_sdt",
+  "capcut": "capcut_pro_1m",
+  "capcut_pro": "capcut_pro_1m",
+  "capcut_1m": "capcut_pro_1m",
+  "capcut_3d": "capcut_pro_3d",
+  "capcut_14d": "capcut_pro_14d",
+  "capcut_3m": "capcut_pro_3m",
+  "capcut_6m": "capcut_pro_6m",
+  "capcut_team": "capcut_pro_team_1m",
+  "capcut_2tb": "capcut_pro_team_1m",
   "giftcode": "ls_giftcode",
   "anticheat": "ls_anticheat",
   "antifreecam": "anti_freecam",
@@ -3599,13 +3658,8 @@ function buildPackageSelectMenu(userId, lang = 'vi') {
       .setValue('combo_suite')
       .setEmoji('👑'),
     new StringSelectMenuOptionBuilder()
-      .setLabel(isEn ? 'Custom Java Mod Development' : 'Đặt Làm Mod Custom Cho Minecraft Java')
-      .setDescription(isEn ? 'Forge / Fabric / NeoForge 1.16 - 1.21+ built to order' : 'Forge/Fabric/NeoForge 1.16 - 1.21+ • Tùy theo tính năng yêu cầu')
-      .setValue('custom_mod')
-      .setEmoji('🧩'),
-    new StringSelectMenuOptionBuilder()
-      .setLabel(isEn ? 'Custom Plugin Development' : 'Đặt Làm Plugin Riêng Theo Ý Tưởng')
-      .setDescription(isEn ? 'Discuss and build custom server plugins with Developer' : 'Trao đổi tính năng độc quyền trực tiếp với Developer')
+      .setLabel(isEn ? 'Custom Plugin & Mod Development' : 'Đặt Làm Plugin & Mod Java Custom')
+      .setDescription(isEn ? 'Discuss and build custom server plugins/mods with Dev' : 'Trao đổi ý tưởng làm Plugin & Mod Java theo yêu cầu')
       .setValue('custom_dev')
       .setEmoji('📝'),
 
@@ -3650,13 +3704,8 @@ function buildPackageSelectMenu(userId, lang = 'vi') {
       .setDescription(isEn ? 'Claude Sonnet 5, Opus 5, GPT-5.6 Sol, Gemini 2.5 Pro' : 'Gói Pro 3 ngày có Claude 5, GPT-5.6 Sol, Gemini 2.5 Pro')
       .setValue('acc_monica_pro_3d')
       .setEmoji('✨'),
-    new StringSelectMenuOptionBuilder()
-      .setLabel(isEn ? 'ChatGPT Fresh Gmail for Offer • $0.20 (5.000 VNĐ)' : 'Tài Khoản ChatGPT New Gmail (Nhận Offer) • 5.000 VNĐ')
-      .setDescription(isEn ? 'Fresh Gmail to activate GPT-5.6 offer/trial' : 'Gmail mới dùng nhận Offer GPT-5.6 Sol (Cần thẻ PayPal)')
-      .setValue('acc_chatgpt_offer')
-      .setEmoji('🎁'),
 
-    // Dịch vụ Nitro & Giải Trí
+    // Dịch vụ Nitro, Giải Trí & CapCut Pro
     new StringSelectMenuOptionBuilder()
       .setLabel(isEn ? '2 Discord Server Boosts • $0.80 (20.000 VNĐ)' : '2 Boost Server Discord Nitro • 20.000 VNĐ')
       .setDescription(isEn ? '2 Boosts for your server, unlock animated icon & perks' : '2 Boost mở khóa avatar động, âm thanh 128kbps, banner')
@@ -3676,7 +3725,39 @@ function buildPackageSelectMenu(userId, lang = 'vi') {
       .setLabel(isEn ? 'Discord Verified Account • $0.30 (7.000 VNĐ)' : 'Tài Khoản Discord Veri Mail + SĐT • 7.000 VNĐ')
       .setDescription(isEn ? 'Email + Phone number verified, clean & ready' : 'Đã xác minh đầy đủ Email và SĐT, bao trâu dùng ổn định')
       .setValue('acc_discord_ver_mail_sdt')
-      .setEmoji('💬')
+      .setEmoji('💬'),
+
+    // CapCut Pro
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'CapCut Pro Personal (3 Days) • $0.60 (14.000 VNĐ)' : 'CapCut Pro Cá Nhân (3 Ngày) • 14.000 VNĐ')
+      .setDescription(isEn ? 'Full Pro features, no watermark, 4K export' : 'Mở khóa tính năng Pro 3 ngày, xóa logo watermark, xuất 4K')
+      .setValue('capcut_pro_3d')
+      .setEmoji('🎬'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'CapCut Pro Personal (14 Days) • $1.60 (39.000 VNĐ)' : 'CapCut Pro Cá Nhân (14 Ngày) • 39.000 VNĐ')
+      .setDescription(isEn ? 'VIP effects, licensed music, auto AI captions' : 'Gói 14 ngày, hiệu ứng VIP, kho nhạc bản quyền, phụ đề AI')
+      .setValue('capcut_pro_14d')
+      .setEmoji('🎬'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'CapCut Pro Personal (1 Mo) • $3.00 (75.000 VNĐ)' : 'CapCut Pro Cá Nhân (1 Tháng) • 75.000 VNĐ')
+      .setDescription(isEn ? 'Full 30-day personal account, PC & Mobile' : 'CapCut Pro cá nhân 1 tháng dùng PC & Mobile, bảo hành 30 ngày')
+      .setValue('capcut_pro_1m')
+      .setEmoji('🎬'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'CapCut Pro Personal (3 Mo) • $8.00 (200.000 VNĐ)' : 'CapCut Pro Cá Nhân (3 Tháng) • 200.000 VNĐ')
+      .setDescription(isEn ? '3-Month personal pack, 90-day 1:1 replacement' : 'Gói 3 tháng tiết kiệm, bảo hành 1 đổi 1 suốt 90 ngày')
+      .setValue('capcut_pro_3m')
+      .setEmoji('🎬'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'CapCut Pro Personal (6 Mo) • $15.50 (390.000 VNĐ)' : 'CapCut Pro Cá Nhân (6 Tháng) • 390.000 VNĐ')
+      .setDescription(isEn ? '6-Month personal pack (180 days), best value' : 'Gói 6 tháng siêu ưu đãi, dùng ổn định 180 ngày')
+      .setValue('capcut_pro_6m')
+      .setEmoji('🎬'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'CapCut Pro Team 2TB (1 Mo) • $4.00 (100.000 VNĐ)' : 'CapCut Pro Team 2TB Cloud (1 Tháng) • 100.000 VNĐ')
+      .setDescription(isEn ? 'Team upgrade with 2TB high-speed cloud storage' : 'Nâng cấp CapCut Pro nhóm/team kèm 2TB Cloud lưu trữ video')
+      .setValue('capcut_pro_team_1m')
+      .setEmoji('👥')
   );
 
   return menu;
