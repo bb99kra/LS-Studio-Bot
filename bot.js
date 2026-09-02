@@ -1404,6 +1404,186 @@ const PACKAGES = {
     price_usd: 4.0,
     desc_vi: "Nâng cấp CapCut Pro nhóm/team, kèm 2TB Cloud lưu trữ project video dung lượng khủng",
     desc_en: "CapCut Pro Team package with 2TB high-speed cloud storage for video projects"
+  },
+
+  // 5. BẢN QUYỀN WINDOWS & OFFICE
+  "key_windows_pro": {
+    name_vi: "Key Bản Quyền Windows 10 / 11 Pro Vĩnh Viễn",
+    name_en: "Windows 10 / 11 Pro Lifetime License Key",
+    price_vnd: 35000,
+    price_usd: 1.5,
+    desc_vi: "Key kích hoạt bản quyền vĩnh viễn Win 10/11 Pro, update thoải mái, kích hoạt trực tiếp",
+    desc_en: "Lifetime retail license key for Windows 10/11 Pro, direct online activation"
+  },
+  "key_office_pro_plus": {
+    name_vi: "Key Bản Quyền Office 2021 / 2024 Pro Plus Vĩnh Viễn",
+    name_en: "Office 2021 / 2024 Pro Plus Lifetime License Key",
+    price_vnd: 39000,
+    price_usd: 1.6,
+    desc_vi: "Key kích hoạt vĩnh viễn Word, Excel, PowerPoint, Outlook, OneNote bản Pro Plus",
+    desc_en: "Lifetime retail key for Word, Excel, PowerPoint, Outlook, OneNote Pro Plus"
+  },
+  "acc_office_365_1m": {
+    name_vi: "Microsoft 365 Chính Chủ (1 Tháng)",
+    name_en: "Microsoft 365 Official Account Upgrade (1 Month)",
+    price_vnd: 45000,
+    price_usd: 1.8,
+    desc_vi: "Nâng cấp chính chủ tài khoản Microsoft, kèm 1TB OneDrive Cloud và full Office",
+    desc_en: "Official upgrade on your Microsoft account, 1TB OneDrive cloud & full Office apps"
+  },
+  "acc_office_365_12m": {
+    name_vi: "Microsoft 365 Chính Chủ (12 Tháng)",
+    name_en: "Microsoft 365 Official Account Upgrade (12 Months)",
+    price_vnd: 269000,
+    price_usd: 10.8,
+    desc_vi: "Gói 1 năm Microsoft 365 Family nâng chính chủ, kèm 1TB OneDrive lưu trữ an toàn",
+    desc_en: "1-Year Microsoft 365 Family upgrade, full desktop apps & 1TB OneDrive"
+  },
+  "key_vmware_pro": {
+    name_vi: "Key VMware Workstation Pro Vĩnh Viễn",
+    name_en: "VMware Workstation Pro Lifetime Key",
+    price_vnd: 39000,
+    price_usd: 1.6,
+    desc_vi: "Key kích hoạt phần mềm máy ảo VMware Workstation Pro vĩnh viễn",
+    desc_en: "Lifetime activation license key for VMware Workstation Pro"
+  },
+
+  // 6. THIẾT KẾ ĐỒ HỌA & VIDEO
+  "acc_canva_pro_1y": {
+    name_vi: "Tài Khoản Canva Pro / Edu (1 Năm)",
+    name_en: "Canva Pro / Edu Account (1 Year)",
+    price_vnd: 69000,
+    price_usd: 2.8,
+    desc_vi: "Mở khóa 100M+ mẫu thiết kế, hình ảnh Pro, công cụ AI Magic, xóa phông nền 1 click",
+    desc_en: "Unlock 100M+ templates, Pro stock, AI Magic Studio, 1-click background remover"
+  },
+  "acc_adobe_photography": {
+    name_vi: "Adobe Photoshop + Lightroom (1 Tháng)",
+    name_en: "Adobe Photoshop + Lightroom Plan (1 Month)",
+    price_vnd: 99000,
+    price_usd: 4.0,
+    desc_vi: "Bộ công cụ chỉnh sửa ảnh chuyên nghiệp Photoshop, Lightroom, Camera Raw bản quyền",
+    desc_en: "Official Photoshop & Lightroom photography plan, generative AI fill included"
+  },
+  "acc_adobe_full_app": {
+    name_vi: "Adobe Full App (Photoshop, Premiere, Illustrator) (1 Tháng)",
+    name_en: "Adobe Creative Cloud Full Apps (1 Month)",
+    price_vnd: 149000,
+    price_usd: 6.0,
+    desc_vi: "Trọn bộ hơn 20 ứng dụng Adobe: Photoshop, Premiere Pro, Illustrator, After Effects",
+    desc_en: "Full suite of 20+ Adobe creative desktop apps including Premiere Pro & After Effects"
+  },
+  "acc_meitu_vip_7d": {
+    name_vi: "Tài Khoản Meitu VIP (7 Ngày)",
+    name_en: "Meitu VIP Account (7 Days)",
+    price_vnd: 29000,
+    price_usd: 1.2,
+    desc_vi: "Mở khóa toàn bộ filter VIP, làm đẹp chân dung AI, chỉnh ảnh sắc nét",
+    desc_en: "Full VIP portrait filters, AI body & face tuning tools"
+  },
+  "acc_photoroom_pro_7d": {
+    name_vi: "Tài Khoản Photoroom Pro (7 Ngày)",
+    name_en: "Photoroom Pro Account (7 Days)",
+    price_vnd: 29000,
+    price_usd: 1.2,
+    desc_vi: "Công cụ cắt ghép ảnh sản phẩm bán hàng, xóa phông AI studio chuyên nghiệp",
+    desc_en: "AI product photography cutout and professional studio backgrounds"
+  },
+
+  // 7. MẠNG RIÊNG ẢO VPN
+  "key_hma_vpn_30d": {
+    name_vi: "Key HMA VPN (30 Ngày - 5 Thiết Bị)",
+    name_en: "HMA VPN License Key (30 Days - 5 Devices)",
+    price_vnd: 35000,
+    price_usd: 1.5,
+    desc_vi: "VPN hơn 190 quốc gia, tốc độ cao, đổi IP siêu mượt cho game thủ và dân MMO",
+    desc_en: "High-speed VPN with servers in 190+ countries, multi-device support"
+  },
+  "acc_nord_vpn_30d": {
+    name_vi: "Tài Khoản NordVPN (30 Ngày)",
+    name_en: "NordVPN Premium Account (30 Days)",
+    price_vnd: 25000,
+    price_usd: 1.0,
+    desc_vi: "Bảo mật quân đội, tốc độ tải cực nhanh, chống rò rỉ DNS và IP",
+    desc_en: "Military-grade encryption, ultra fast speed, DNS leak protection"
+  },
+  "acc_pia_vpn_7d": {
+    name_vi: "Tài Khoản PIA VPN (4-7 Ngày - 5 Thiết Bị)",
+    name_en: "Private Internet Access (PIA) VPN (7 Days)",
+    price_vnd: 25000,
+    price_usd: 1.0,
+    desc_vi: "Bảo mật ẩn danh tuyệt đối, 5 thiết bị dùng đồng thời",
+    desc_en: "Zero-logs policy VPN with high privacy and 5 simultaneous connections"
+  },
+  "acc_express_vpn_3d": {
+    name_vi: "Tài Khoản ExpressVPN (3 Ngày - 8 Thiết Bị)",
+    name_en: "ExpressVPN Account (3 Days - 8 Devices)",
+    price_vnd: 15000,
+    price_usd: 0.6,
+    desc_vi: "VPN hàng đầu thế giới, ping thấp chơi game nước ngoài",
+    desc_en: "Top tier low-ping gaming & streaming VPN across 8 devices"
+  },
+
+  // 8. ÂM NHẠC & GIẢI TRÍ
+  "acc_spotify_premium_3m": {
+    name_vi: "Spotify Premium 3 Tháng (Add Family)",
+    name_en: "Spotify Premium 3 Months (Family Invite)",
+    price_vnd: 139000,
+    price_usd: 5.6,
+    desc_vi: "Nghe nhạc không quảng cáo, chất lượng Lossless 320kbps, bảo hành trọn 3 tháng",
+    desc_en: "Ad-free streaming, high-bitrate music playback, full 90-day warranty"
+  },
+  "acc_spotify_trial_3m": {
+    name_vi: "Spotify Premium 3 Tháng (Trial)",
+    name_en: "Spotify Premium 3 Months (Trial Account)",
+    price_vnd: 79000,
+    price_usd: 3.2,
+    desc_vi: "Tài khoản Spotify Premium 3 tháng trải nghiệm giá rẻ",
+    desc_en: "3-Month budget Spotify Premium trial account"
+  },
+
+  // 9. DISCORD CỔ (AGED DISCORD)
+  "acc_discord_aged_2018_2025": {
+    name_vi: "Acc Discord Cổ Random (2018 - 2025)",
+    name_en: "Aged Discord Account (2018 - 2025)",
+    price_vnd: 49000,
+    price_usd: 2.0,
+    desc_vi: "Acc Discord tạo lâu năm, độ uy tín cực cao, chống ăn gậy checkpoint",
+    desc_en: "Aged Discord account (2018-2025), highly trusted, spam-filter resistant"
+  },
+  "acc_discord_aged_2016_2019": {
+    name_vi: "Acc Discord Cổ Siêu Trâu (2016 - 2019)",
+    name_en: "Prime Aged Discord Account (2016 - 2019)",
+    price_vnd: 65000,
+    price_usd: 2.6,
+    desc_vi: "Acc Discord cổ 2016-2019 tạo từ thời kỳ đầu, cực trâu và hiếm",
+    desc_en: "Prime vintage Discord account (2016-2019), rare and battle-tested"
+  },
+
+  // 10. HỌC TẬP & HỌP TRỰC TUYẾN
+  "acc_zoom_pro_1m": {
+    name_vi: "Bản Quyền Zoom Pro Không Giới Hạn (1 Tháng)",
+    name_en: "Zoom Pro Unlimited Meeting Account (1 Month)",
+    price_vnd: 119000,
+    price_usd: 4.8,
+    desc_vi: "Họp online không giới hạn 40 phút, phòng tới 100-300 người, ghi hình Cloud",
+    desc_en: "Unlimited meeting duration, up to 100-300 participants, cloud recording"
+  },
+  "acc_google_meet_1m": {
+    name_vi: "Gói Google Meet Không Giới Hạn (1 Tháng)",
+    name_en: "Google Meet Unlimited Calls (1 Month)",
+    price_vnd: 79000,
+    price_usd: 3.2,
+    desc_vi: "Gọi video Google Meet chất lượng cao không lo bị ngắt quãng giới hạn 60 phút",
+    desc_en: "Unlimited Google Meet video conference calls without 60-minute cutoff"
+  },
+  "acc_turnitin_1m": {
+    name_vi: "Tài Khoản Turnitin Check Đạo Văn (1 Tháng)",
+    name_en: "Turnitin Plagiarism Checker Account (1 Month)",
+    price_vnd: 199000,
+    price_usd: 8.0,
+    desc_vi: "Kiểm tra đạo văn luận văn, bài tập, báo cáo nghiên cứu không lưu kho dữ liệu",
+    desc_en: "Academic plagiarism and similarity checking without repository storage"
   }
 };
 
@@ -1454,6 +1634,35 @@ const DEPRECATED_PACKAGE_ALIASES = Object.freeze({
   "capcut_6m": "capcut_pro_6m",
   "capcut_team": "capcut_pro_team_1m",
   "capcut_2tb": "capcut_pro_team_1m",
+  "windows": "key_windows_pro",
+  "win_pro": "key_windows_pro",
+  "windows_pro": "key_windows_pro",
+  "win11": "key_windows_pro",
+  "win10": "key_windows_pro",
+  "office": "key_office_pro_plus",
+  "office_pro": "key_office_pro_plus",
+  "office_2024": "key_office_pro_plus",
+  "office_2021": "key_office_pro_plus",
+  "office_365": "acc_office_365_1m",
+  "office365": "acc_office_365_1m",
+  "office_365_12m": "acc_office_365_12m",
+  "canva": "acc_canva_pro_1y",
+  "canva_pro": "acc_canva_pro_1y",
+  "adobe": "acc_adobe_photography",
+  "photoshop": "acc_adobe_photography",
+  "adobe_full": "acc_adobe_full_app",
+  "hma_vpn": "key_hma_vpn_30d",
+  "hma": "key_hma_vpn_30d",
+  "nord_vpn": "acc_nord_vpn_30d",
+  "nord": "acc_nord_vpn_30d",
+  "spotify": "acc_spotify_premium_3m",
+  "spotify_family": "acc_spotify_premium_3m",
+  "discord_co": "acc_discord_aged_2018_2025",
+  "discord_aged": "acc_discord_aged_2018_2025",
+  "zoom": "acc_zoom_pro_1m",
+  "zoom_pro": "acc_zoom_pro_1m",
+  "google_meet": "acc_google_meet_1m",
+  "turnitin": "acc_turnitin_1m",
   "giftcode": "ls_giftcode",
   "anticheat": "ls_anticheat",
   "antifreecam": "anti_freecam",
@@ -3615,11 +3824,12 @@ async function executeTicketClosure({ channel, guild, closerUser, closeReason = 
 }
 
 // Helper: Sinh Menu chọn gói theo ngôn ngữ
+// Helper: Sinh Menu 1 (Plugin Minecraft & Dịch Vụ AI)
 function buildPackageSelectMenu(userId, lang = 'vi') {
   const isEn = lang === 'en';
   const placeholderText = isEn 
-    ? '👉 Click here to select a Plugin or AI Service...' 
-    : '👉 Bấm vào đây để chọn Plugin hoặc Dịch Vụ AI bạn muốn mua...';
+    ? '🎮 [Menu 1] Select Minecraft Plugins & AI Services...' 
+    : '🎮 [Menu 1] Chọn Plugin Minecraft & Dịch Vụ AI...';
 
   const menu = new StringSelectMenuBuilder()
     .setCustomId(`select_package_${lang}_${userId}`.slice(0, 100))
@@ -3703,9 +3913,57 @@ function buildPackageSelectMenu(userId, lang = 'vi') {
       .setLabel(isEn ? 'Monica AI Pro Claude 5 (3 Days) • $2.00 (49.000 VNĐ)' : 'Tài Khoản Monica AI Pro Claude 5 (3 Ngày) • 49.000 VNĐ')
       .setDescription(isEn ? 'Claude Sonnet 5, Opus 5, GPT-5.6 Sol, Gemini 2.5 Pro' : 'Gói Pro 3 ngày có Claude 5, GPT-5.6 Sol, Gemini 2.5 Pro')
       .setValue('acc_monica_pro_3d')
-      .setEmoji('✨'),
+      .setEmoji('✨')
+  );
 
-    // Dịch vụ Nitro, Giải Trí & CapCut Pro
+  return menu;
+}
+
+// Helper: Sinh Menu 2 (CapCut, Nitro, YouTube, Netflix, Discord, Windows, Office, VPN, Spotify, Zoom)
+function buildPackageSelectMenu2(userId, lang = 'vi') {
+  const isEn = lang === 'en';
+  const placeholderText = isEn 
+    ? '🎁 [Menu 2] CapCut, Windows, Office, VPN, Media & MMO...' 
+    : '🎁 [Menu 2] CapCut, Windows, Office, VPN, Giải Trí & MMO...';
+
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`select_package_${lang}_${userId}_2`.slice(0, 100))
+    .setPlaceholder(placeholderText.slice(0, 150));
+
+  menu.addOptions(
+    // CapCut Pro (6)
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'CapCut Pro (3 Days) • $0.60 (14.000 VNĐ)' : 'CapCut Pro Cá Nhân (3 Ngày) • 14.000 VNĐ')
+      .setDescription(isEn ? 'Full Pro features, no watermark, 4K export' : 'Mở khóa tính năng Pro 3 ngày, xóa logo watermark, xuất 4K')
+      .setValue('capcut_pro_3d')
+      .setEmoji('🎬'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'CapCut Pro (14 Days) • $1.60 (39.000 VNĐ)' : 'CapCut Pro Cá Nhân (14 Ngày) • 39.000 VNĐ')
+      .setDescription(isEn ? 'VIP effects, licensed music, auto AI captions' : 'Gói 14 ngày, hiệu ứng VIP, kho nhạc bản quyền, phụ đề AI')
+      .setValue('capcut_pro_14d')
+      .setEmoji('🎬'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'CapCut Pro (1 Mo) • $3.00 (75.000 VNĐ)' : 'CapCut Pro Cá Nhân (1 Tháng) • 75.000 VNĐ')
+      .setDescription(isEn ? 'Full 30-day personal account, PC & Mobile' : 'CapCut Pro cá nhân 1 tháng dùng PC & Mobile, bảo hành 30 ngày')
+      .setValue('capcut_pro_1m')
+      .setEmoji('🎬'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'CapCut Pro (3 Mo) • $8.00 (200.000 VNĐ)' : 'CapCut Pro Cá Nhân (3 Tháng) • 200.000 VNĐ')
+      .setDescription(isEn ? '3-Month personal pack, 90-day 1:1 replacement' : 'Gói 3 tháng tiết kiệm, bảo hành 1 đổi 1 suốt 90 ngày')
+      .setValue('capcut_pro_3m')
+      .setEmoji('🎬'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'CapCut Pro (6 Mo) • $15.50 (390.000 VNĐ)' : 'CapCut Pro Cá Nhân (6 Tháng) • 390.000 VNĐ')
+      .setDescription(isEn ? '6-Month personal pack (180 days), best value' : 'Gói 6 tháng siêu ưu đãi, dùng ổn định 180 ngày')
+      .setValue('capcut_pro_6m')
+      .setEmoji('🎬'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'CapCut Pro Team 2TB (1 Mo) • $4.00 (100.000 VNĐ)' : 'CapCut Pro Team 2TB Cloud (1 Tháng) • 100.000 VNĐ')
+      .setDescription(isEn ? 'Team upgrade with 2TB high-speed cloud storage' : 'Nâng cấp CapCut Pro nhóm/team kèm 2TB Cloud lưu trữ video')
+      .setValue('capcut_pro_team_1m')
+      .setEmoji('👥'),
+
+    // Nitro & Media (4)
     new StringSelectMenuOptionBuilder()
       .setLabel(isEn ? '2 Discord Server Boosts • $0.80 (20.000 VNĐ)' : '2 Boost Server Discord Nitro • 20.000 VNĐ')
       .setDescription(isEn ? '2 Boosts for your server, unlock animated icon & perks' : '2 Boost mở khóa avatar động, âm thanh 128kbps, banner')
@@ -3722,45 +3980,106 @@ function buildPackageSelectMenu(userId, lang = 'vi') {
       .setValue('acc_netflix_1w')
       .setEmoji('🍿'),
     new StringSelectMenuOptionBuilder()
-      .setLabel(isEn ? 'Discord Verified Account • $0.30 (7.000 VNĐ)' : 'Tài Khoản Discord Veri Mail + SĐT • 7.000 VNĐ')
+      .setLabel(isEn ? 'Spotify Premium (3 Mo Family) • $5.60 (139.000 VNĐ)' : 'Spotify Premium 3 Tháng (Add Family) • 139.000 VNĐ')
+      .setDescription(isEn ? 'Ad-free streaming, 320kbps audio, 3-month warranty' : 'Nghe nhạc Lossless 320kbps không quảng cáo, bảo hành 3 tháng')
+      .setValue('acc_spotify_premium_3m')
+      .setEmoji('🎵'),
+
+    // Discord Accounts (3)
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'Discord Verified Account • $0.30 (7.000 VNĐ)' : 'Acc Discord Veri Mail + SĐT • 7.000 VNĐ')
       .setDescription(isEn ? 'Email + Phone number verified, clean & ready' : 'Đã xác minh đầy đủ Email và SĐT, bao trâu dùng ổn định')
       .setValue('acc_discord_ver_mail_sdt')
       .setEmoji('💬'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'Aged Discord Account (2018-2025) • $2.00 (49.000 VNĐ)' : 'Acc Discord Cổ (2018 - 2025) • 49.000 VNĐ')
+      .setDescription(isEn ? 'Aged Discord account, highly trusted' : 'Acc Discord tạo lâu năm, chống checkpoint cực tốt')
+      .setValue('acc_discord_aged_2018_2025')
+      .setEmoji('📜'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'Prime Aged Discord (2016-2019) • $2.60 (65.000 VNĐ)' : 'Acc Discord Cổ Siêu Trâu (2016 - 2019) • 65.000 VNĐ')
+      .setDescription(isEn ? 'Prime vintage Discord account, battle-tested' : 'Acc Discord cổ từ 2016-2019, cực hiếm và trâu')
+      .setValue('acc_discord_aged_2016_2019')
+      .setEmoji('🏛️'),
 
-    // CapCut Pro
+    // Windows & Office (4)
     new StringSelectMenuOptionBuilder()
-      .setLabel(isEn ? 'CapCut Pro Personal (3 Days) • $0.60 (14.000 VNĐ)' : 'CapCut Pro Cá Nhân (3 Ngày) • 14.000 VNĐ')
-      .setDescription(isEn ? 'Full Pro features, no watermark, 4K export' : 'Mở khóa tính năng Pro 3 ngày, xóa logo watermark, xuất 4K')
-      .setValue('capcut_pro_3d')
-      .setEmoji('🎬'),
+      .setLabel(isEn ? 'Windows 10/11 Pro Key • $1.50 (35.000 VNĐ)' : 'Key Windows 10/11 Pro Vĩnh Viễn • 35.000 VNĐ')
+      .setDescription(isEn ? 'Lifetime retail activation key for Win 10/11 Pro' : 'Key kích hoạt vĩnh viễn Win 10/11 Pro, update thoải mái')
+      .setValue('key_windows_pro')
+      .setEmoji('💻'),
     new StringSelectMenuOptionBuilder()
-      .setLabel(isEn ? 'CapCut Pro Personal (14 Days) • $1.60 (39.000 VNĐ)' : 'CapCut Pro Cá Nhân (14 Ngày) • 39.000 VNĐ')
-      .setDescription(isEn ? 'VIP effects, licensed music, auto AI captions' : 'Gói 14 ngày, hiệu ứng VIP, kho nhạc bản quyền, phụ đề AI')
-      .setValue('capcut_pro_14d')
-      .setEmoji('🎬'),
+      .setLabel(isEn ? 'Office 2024 Pro Plus Key • $1.60 (39.000 VNĐ)' : 'Key Office 2021/2024 Pro Plus • 39.000 VNĐ')
+      .setDescription(isEn ? 'Lifetime key for Word, Excel, PowerPoint Pro Plus' : 'Key vĩnh viễn Word, Excel, PowerPoint, Outlook bản Pro Plus')
+      .setValue('key_office_pro_plus')
+      .setEmoji('📑'),
     new StringSelectMenuOptionBuilder()
-      .setLabel(isEn ? 'CapCut Pro Personal (1 Mo) • $3.00 (75.000 VNĐ)' : 'CapCut Pro Cá Nhân (1 Tháng) • 75.000 VNĐ')
-      .setDescription(isEn ? 'Full 30-day personal account, PC & Mobile' : 'CapCut Pro cá nhân 1 tháng dùng PC & Mobile, bảo hành 30 ngày')
-      .setValue('capcut_pro_1m')
-      .setEmoji('🎬'),
+      .setLabel(isEn ? 'Microsoft 365 (1 Mo) • $1.80 (45.000 VNĐ)' : 'Microsoft 365 Chính Chủ (1 Tháng) • 45.000 VNĐ')
+      .setDescription(isEn ? 'Official personal account upgrade, 1TB OneDrive' : 'Nâng chính chủ Microsoft, full ứng dụng Office + 1TB Cloud')
+      .setValue('acc_office_365_1m')
+      .setEmoji('☁️'),
     new StringSelectMenuOptionBuilder()
-      .setLabel(isEn ? 'CapCut Pro Personal (3 Mo) • $8.00 (200.000 VNĐ)' : 'CapCut Pro Cá Nhân (3 Tháng) • 200.000 VNĐ')
-      .setDescription(isEn ? '3-Month personal pack, 90-day 1:1 replacement' : 'Gói 3 tháng tiết kiệm, bảo hành 1 đổi 1 suốt 90 ngày')
-      .setValue('capcut_pro_3m')
-      .setEmoji('🎬'),
+      .setLabel(isEn ? 'Microsoft 365 (12 Mo) • $10.80 (269.000 VNĐ)' : 'Microsoft 365 Chính Chủ (1 Năm) • 269.000 VNĐ')
+      .setDescription(isEn ? '1-Year official upgrade, 1TB OneDrive cloud' : 'Gói 1 năm Microsoft 365 Family nâng chính chủ, 1TB OneDrive')
+      .setValue('acc_office_365_12m')
+      .setEmoji('👑'),
+
+    // Đồ Họa & Thiết Kế (3)
     new StringSelectMenuOptionBuilder()
-      .setLabel(isEn ? 'CapCut Pro Personal (6 Mo) • $15.50 (390.000 VNĐ)' : 'CapCut Pro Cá Nhân (6 Tháng) • 390.000 VNĐ')
-      .setDescription(isEn ? '6-Month personal pack (180 days), best value' : 'Gói 6 tháng siêu ưu đãi, dùng ổn định 180 ngày')
-      .setValue('capcut_pro_6m')
-      .setEmoji('🎬'),
+      .setLabel(isEn ? 'Canva Pro / Edu (1 Year) • $2.80 (69.000 VNĐ)' : 'Tài Khoản Canva Pro / Edu (1 Năm) • 69.000 VNĐ')
+      .setDescription(isEn ? 'Full Pro templates, Magic AI tools, 1-click cutout' : 'Mở khóa kho mẫu Pro, công cụ Magic AI, xóa phông 1 click')
+      .setValue('acc_canva_pro_1y')
+      .setEmoji('🎨'),
     new StringSelectMenuOptionBuilder()
-      .setLabel(isEn ? 'CapCut Pro Team 2TB (1 Mo) • $4.00 (100.000 VNĐ)' : 'CapCut Pro Team 2TB Cloud (1 Tháng) • 100.000 VNĐ')
-      .setDescription(isEn ? 'Team upgrade with 2TB high-speed cloud storage' : 'Nâng cấp CapCut Pro nhóm/team kèm 2TB Cloud lưu trữ video')
-      .setValue('capcut_pro_team_1m')
-      .setEmoji('👥')
+      .setLabel(isEn ? 'Adobe Photoshop + Lightroom (1 Mo) • $4.00 (99.000 VNĐ)' : 'Adobe Photoshop + Lightroom (1 Tháng) • 99.000 VNĐ')
+      .setDescription(isEn ? 'Official photography plan, generative AI fill' : 'Bản quyền Photoshop + Lightroom, tính năng Generative AI')
+      .setValue('acc_adobe_photography')
+      .setEmoji('🖌️'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'Adobe Full App (20+ Apps) • $6.00 (149.000 VNĐ)' : 'Adobe Full App (Pts, Pr, Ai, Ae) • 149.000 VNĐ')
+      .setDescription(isEn ? 'Full 20+ Creative Cloud apps for 1 month' : 'Trọn bộ 20+ app Adobe: Photoshop, Premiere, After Effects')
+      .setValue('acc_adobe_full_app')
+      .setEmoji('💎'),
+
+    // VPN (2)
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'HMA VPN (30 Days - 5 Devices) • $1.50 (35.000 VNĐ)' : 'Key HMA VPN (30 Ngày - 5 Máy) • 35.000 VNĐ')
+      .setDescription(isEn ? '190+ countries, high speed, multi-device' : 'VPN 190+ quốc gia, đổi IP siêu nhanh cho game thủ và MMO')
+      .setValue('key_hma_vpn_30d')
+      .setEmoji('🛡️'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'NordVPN (30 Days) • $1.00 (25.000 VNĐ)' : 'Tài Khoản NordVPN (30 Ngày) • 25.000 VNĐ')
+      .setDescription(isEn ? 'Military-grade encryption, ultra fast speed' : 'Bảo mật quân đội, tốc độ tải cực nhanh, chống rò rỉ IP')
+      .setValue('acc_nord_vpn_30d')
+      .setEmoji('⚡'),
+
+    // Học tập & Họp (3)
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'Zoom Pro Unlimited (1 Mo) • $4.80 (119.000 VNĐ)' : 'Zoom Pro Không Giới Hạn (1 Tháng) • 119.000 VNĐ')
+      .setDescription(isEn ? 'No 40-minute limit, 100-300 participants, cloud rec' : 'Bỏ giới hạn 40 phút, phòng 100-300 người, ghi hình Cloud')
+      .setValue('acc_zoom_pro_1m')
+      .setEmoji('📹'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'Google Meet Unlimited (1 Mo) • $3.20 (79.000 VNĐ)' : 'Google Meet Không Giới Hạn (1 Tháng) • 79.000 VNĐ')
+      .setDescription(isEn ? 'Unlimited conference calls without 60-min cutoff' : 'Gọi video Google Meet không lo ngắt quãng giới hạn 60 phút')
+      .setValue('acc_google_meet_1m')
+      .setEmoji('📞'),
+    new StringSelectMenuOptionBuilder()
+      .setLabel(isEn ? 'Turnitin Plagiarism (1 Mo) • $8.00 (199.000 VNĐ)' : 'Tài Khoản Turnitin Check Đạo Văn (1 Tháng) • 199.000 VNĐ')
+      .setDescription(isEn ? 'Plagiarism check without repository storage' : 'Check đạo văn luận văn/bài tập, không lưu kho dữ liệu')
+      .setValue('acc_turnitin_1m')
+      .setEmoji('📚')
   );
 
   return menu;
+}
+
+// Helper: Sinh 2 ActionRow chứa cả Menu 1 và Menu 2 cho Ticket
+function buildPackageSelectMenuRows(userId, lang = 'vi') {
+  return [
+    new ActionRowBuilder().addComponents(buildPackageSelectMenu(userId, lang)),
+    new ActionRowBuilder().addComponents(buildPackageSelectMenu2(userId, lang))
+  ];
 }
 
 // Helper: Khởi tạo kênh Ticket an toàn với đầy đủ phân quyền, kiểm tra trùng lặp và phục hồi lỗi giới hạn kênh Discord
@@ -5575,7 +5894,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const isEn = targetLang === 'en';
         const ticketOwnerId = parts[3] || user.id;
 
-        const menuRow = new ActionRowBuilder().addComponents(buildPackageSelectMenu(ticketOwnerId, targetLang));
+        const menuRows = buildPackageSelectMenuRows(ticketOwnerId, targetLang);
         const langSwitchRow = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
             .setCustomId(`switch_lang_vi_${ticketOwnerId}`)
@@ -5597,17 +5916,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
           description:
             isEn 
               ? `👋 Hello <@${ticketOwnerId}>! Welcome to **LS STUDIO**.\n\n` +
-                `👇 **Please select a Plugin or AI Service from the dropdown menu below**:\n` +
-                `• Premade Plugins & AI Services ➔ Automatic VietQR / Instant Order Invoice!\n` +
-                `• Custom Mod / Custom Plugin ➔ Discuss directly with our Developer to get a quote!\n\n` +
+                `👇 **Please select a product from the dropdown menus below**:\n` +
+                `• **Menu 1:** Minecraft Plugins & AI Services (Gemini, Claude, ChatGPT, Codex)\n` +
+                `• **Menu 2:** CapCut Pro, Windows, Office 365, VPN, Spotify & Entertainment\n\n` +
                 `🌐 *If you are an international buyer and need PayPal / Crypto or English support, let our staff know right here!*`
               : `👋 Chào <@${ticketOwnerId}>! Cảm ơn bạn đã lựa chọn dịch vụ từ **LS STUDIO**.\n\n` +
-                `👇 **Vui lòng chọn Plugin hoặc Dịch Vụ AI bạn muốn đặt từ Menu bên dưới**:\n` +
-                `• Mua Plugin & Dịch vụ AI có sẵn ➔ Tự tạo mã **VietQR MBBank** để bạn quét thanh toán siêu tốc!\n` +
-                `• Đặt làm **Mod Custom Java 1.16+** hoặc **Plugin riêng 1.16+** ➔ Trao đổi trực tiếp ý tưởng với Developer để nhận báo giá chi tiết!`,
+                `👇 **Vui lòng chọn sản phẩm bạn muốn đặt từ 2 Menu bên dưới**:\n` +
+                `• **Menu 1:** Plugin Minecraft & Dịch Vụ AI (Gemini, Claude, ChatGPT, Codex)\n` +
+                `• **Menu 2:** CapCut Pro, Windows, Office 365, VPN, Spotify & Giải Trí\n\n` +
+                `• Đặt mua sản phẩm có sẵn ➔ Tự tạo mã **VietQR MBBank** quét thanh toán siêu tốc!\n` +
+                `• Đặt làm **Mod & Plugin riêng** ➔ Trao đổi trực tiếp ý tưởng với Developer để nhận báo giá!`,
           footer: isEn ? "Staff will assist and deliver your files right here!" : "Sau khi chuyển khoản, Staff sẽ duyệt và giao file ngay tại đây!",
           timestamp: true,
-          actionRows: [menuRow, langSwitchRow]
+          actionRows: [...menuRows, langSwitchRow]
         });
 
         return safeUpdate(interaction, v2Lang);
@@ -5702,7 +6023,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
           }
 
-          const menuRow = new ActionRowBuilder().addComponents(buildPackageSelectMenu(user.id, 'vi'));
+          const menuRows = buildPackageSelectMenuRows(user.id, 'vi');
 
           const langSwitchRow = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
@@ -5725,13 +6046,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
             description:
               `👋 Chào <@${user.id}>! Cảm ơn bạn đã lựa chọn dịch vụ từ **LS STUDIO**.\n` +
               `*Welcome <@${user.id}>! Thank you for choosing LS STUDIO.*\n\n` +
-              `👇 **Vui lòng chọn Plugin hoặc Dịch Vụ AI từ Menu bên dưới**:\n` +
-              `*Please select a package or AI service from the dropdown menu below:*\n\n` +
+              `👇 **Vui lòng chọn sản phẩm từ 2 Menu bên dưới**:\n` +
+              `• **Menu 1:** Plugin Minecraft & Dịch Vụ AI (Gemini, Claude, ChatGPT, Codex)\n` +
+              `• **Menu 2:** CapCut Pro, Windows, Office 365, VPN, Spotify & Giải Trí\n\n` +
               `• 🇻🇳 **Tiếng Việt:** Quét mã VietQR MBBank tự động 24/7.\n` +
               `• 🇺🇸 **English:** Switch to English for PayPal / Global payment options!`,
             footer: "Staff sẽ hỗ trợ và giao file trực tiếp tại đây! / Staff will assist you here!",
             timestamp: true,
-            actionRows: [menuRow, langSwitchRow]
+            actionRows: [...menuRows, langSwitchRow]
           });
 
           const introPayload = typeof v2Intro?.toClassic === 'function' ? v2Intro.toClassic() : v2Intro;
@@ -5745,7 +6067,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             try {
               await ticketChannel.send({
                 content: `<@${user.id}> ${staffMentionString}\n**🛒 TRUNG TÂM THANH TOÁN & ĐẶT HÀNG LS STUDIO**\n*Vui lòng chọn sản phẩm từ Menu bên dưới:*`,
-                components: [menuRow, langSwitchRow]
+                components: [...menuRows, langSwitchRow]
               });
             } catch (fallbackErr) {
               console.error("❌ Lỗi gửi tin nhắn fallback vào ticket:", fallbackErr);
