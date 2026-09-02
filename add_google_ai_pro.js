@@ -164,7 +164,7 @@ client.once(Events.ClientReady, async () => {
       actionRows: [buyBtn]
     });
 
-    await chGoogle.send(isComponentsV2Available() ? v2Google.toV2() : v2Google.toClassic());
+    await chGoogle.send(v2Google.toClassic());
     console.log("✅ Đã đăng bài vào: #🚀・acc-google-ai-pro");
 
     // 2. CẬP NHẬT KÊNH #💰・bảng-giá
@@ -222,7 +222,7 @@ client.once(Events.ClientReady, async () => {
         actionRows: [buyBtn]
       });
 
-      await chPrice.send(isComponentsV2Available() ? v2Price.toV2() : v2Price.toClassic());
+      await chPrice.send(v2Price.toClassic());
       console.log("✅ Đã cập nhật lại kênh #bảng-giá!");
     }
 
@@ -280,7 +280,7 @@ client.once(Events.ClientReady, async () => {
         footer: "LS STUDIO • Lead Developer: Nguyendzvn"
       });
 
-      await chTb.send(isComponentsV2Available() ? v2Tb.toV2() : v2Tb.toClassic());
+      await chTb.send(v2Tb.toClassic());
       console.log("✅ Đã cập nhật lại kênh #thông-báo!");
     }
 

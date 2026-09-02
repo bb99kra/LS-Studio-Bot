@@ -119,7 +119,7 @@ client.once(Events.ClientReady, async () => {
         actionRows: [btnRow]
       });
 
-      await partnerChannel.send(isComponentsV2Available() ? v2Partner.toV2() : v2Partner.toClassic());
+      await partnerChannel.send(v2Partner.toClassic());
       console.log("✅ Đã đăng Embed đối tác LS STUDIO lên Nguyen SMP!");
       await sleep(500);
     }
@@ -165,7 +165,7 @@ client.once(Events.ClientReady, async () => {
         actionRows: [btnSmp]
       });
 
-      await demoChannel.send(isComponentsV2Available() ? v2Demo.toV2() : v2Demo.toClassic());
+      await demoChannel.send(v2Demo.toClassic());
       console.log("✅ Đã cập nhật Embed đối tác Nguyen SMP lên LS STUDIO!");
     }
 

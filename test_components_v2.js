@@ -900,6 +900,68 @@ async function runAllTests() {
   });
 
   // ----------------------------------------------------------------------------
+  // 11. SAFE CHANNEL SEND & PRODUCTION TICKET INTRO FALLBACK
+  // ----------------------------------------------------------------------------
+  console.log('\x1b[36m[Group 11: Safe Channel Send & Ticket Intro Fallback]\x1b[0m');
+
+  testAsync('safeChannelSend automatically converts v2 objects to classic embeds for channel stability', async () => {
+    const { safeChannelSend, createComponentsV2Message } = require('./bot.js');
+    
+    let sentPayload = null;
+    const mockChannel = {
+      name: '🛒-mua-s1mperx-1657',
+      id: '1234567890',
+      send: async (p) => {
+        sentPayload = p;
+        return { id: 'msg_999', ...p };
+      }
+    };
+
+    const v2Msg = createComponentsV2Message({
+      accentColor: 0x00E676,
+      title: "🛒 TRUNG TÂM THANH TOÁN & ĐẶT HÀNG",
+      description: "Vui lòng chọn gói sản phẩm bên dưới:"
+    });
+
+    const res = await safeChannelSend(mockChannel, v2Msg);
+    assert.ok(res);
+    assert.ok(sentPayload.embeds && sentPayload.embeds.length > 0);
+    assert.strictEqual(sentPayload.embeds[0].data.title, "🛒 TRUNG TÂM THANH TOÁN & ĐẶT HÀNG");
+    assert.strictEqual(sentPayload.flags, undefined); // No 32768 on normal channel send!
+  });
+
+  testAsync('safeChannelSend falls back to classic embed when API rejects experimental flags', async () => {
+    const { safeChannelSend, createComponentsV2Message } = require('./bot.js');
+    
+    let attempts = 0;
+    let sentPayload = null;
+    const mockChannel = {
+      name: '🛒-mua-test',
+      id: '1234567890',
+      send: async (p) => {
+        attempts++;
+        if (p.flags === MessageFlags.IsComponentsV2) {
+          const err = new Error('Invalid Form Body: components[0]: Invalid component type');
+          err.code = 50035;
+          throw err;
+        }
+        sentPayload = p;
+        return { id: 'msg_fallback_999', ...p };
+      }
+    };
+
+    const v2Msg = createComponentsV2Message({
+      accentColor: 0x00E676,
+      title: "🛒 TRUNG TÂM THANH TOÁN",
+      description: "Chọn sản phẩm:"
+    });
+
+    const res = await safeChannelSend(mockChannel, v2Msg);
+    assert.ok(res);
+    assert.ok(sentPayload.embeds && sentPayload.embeds.length > 0);
+  });
+
+  // ----------------------------------------------------------------------------
   // TEST SUMMARY REPORT
   // ----------------------------------------------------------------------------
   console.log('\n================================================================');

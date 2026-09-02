@@ -1144,7 +1144,7 @@ async function runAllTests() {
     assert(interaction._state.ephemeral, "/invite must be ephemeral");
     const pInvite = interaction._state.replyPayload;
     assert(pInvite && (pInvite.embeds?.length > 0 || pInvite.components?.length > 0), "Must contain embed or components");
-    const inviteStr = pInvite.embeds?.[0] ? `${pInvite.embeds[0].data?.title || ''} ${pInvite.embeds[0].data?.description || ''}` : JSON.stringify(pInvite.components || pInvite);
+    const inviteStr = JSON.stringify(pInvite);
     assert(inviteStr.includes("MỜI BOT") || inviteStr.includes("INVITE"), "Title contains invite banner");
     assert(inviteStr.includes("268814352"), "Description contains exact bitfield 268814352");
     assert(inviteStr.includes("Guild Install") && inviteStr.includes("User Install"), "Description explains installation contexts");

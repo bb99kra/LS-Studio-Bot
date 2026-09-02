@@ -162,7 +162,7 @@ client.once(Events.ClientReady, async () => {
         footer: "Mở Ticket tại #🛒・mua-plugin để đặt mua và nhận file ngay!"
       });
 
-      await ch.send(isComponentsV2Available() ? v2Products.toV2() : v2Products.toClassic());
+      await ch.send(v2Products.toClassic());
     });
 
     // 2. KÊNH BẢNG GIÁ
@@ -204,7 +204,7 @@ client.once(Events.ClientReady, async () => {
         footer: "Giao dịch an toàn qua Ticket tại LS STUDIO"
       });
 
-      await ch.send(isComponentsV2Available() ? v2Pricing.toV2() : v2Pricing.toClassic());
+      await ch.send(v2Pricing.toClassic());
     });
 
     console.log("🎉 ĐÃ THÊM LS-ANTICHEAT (10K) XONG 100%!");

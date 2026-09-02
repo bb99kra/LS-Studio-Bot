@@ -4179,8 +4179,8 @@ function createComponentsV2Message(options = {}) {
     };
 
     return {
-      ...v2Payload,
-      isComponentsV2: true,
+      ...classicPayload,
+      isComponentsV2: false,
       toClassic: () => classicPayload,
       toV2: () => v2Payload
     };
@@ -4193,6 +4193,46 @@ function createComponentsV2Message(options = {}) {
       toClassic: () => classicPayload,
       toV2: () => null
     };
+  }
+}
+
+/**
+ * Gửi tin nhắn vào kênh TextChannel an toàn tuyệt đối, tự động sử dụng Classic Embeds
+ * và có fallback đa tầng chống lỗi Discord API 50035 hoặc kênh bị hạn chế.
+ * 
+ * @param {TextChannel|ThreadChannel|DMChannel} channel - Kênh Discord cần gửi tin
+ * @param {Object|string} options - Nội dung tin nhắn hoặc đối tượng createComponentsV2Message
+ * @returns {Promise<Message|null>}
+ */
+async function safeChannelSend(channel, options) {
+  if (!channel || typeof channel.send !== 'function') return null;
+  try {
+    let payload = options;
+    if (typeof payload === 'string') {
+      payload = { content: payload };
+    } else if (payload && typeof payload.toClassic === 'function') {
+      payload = payload.toClassic();
+    } else if (payload && payload.isComponentsV2 && typeof payload.toClassic === 'function') {
+      payload = payload.toClassic();
+    }
+
+    return await channel.send(payload);
+  } catch (sendErr) {
+    console.warn(`⚠️ [safeChannelSend Warning] Lỗi gửi tin vào kênh ${channel.name || channel.id}:`, sendErr.message);
+    // Thử fallback gửi dạng Classic Embed hoặc Text thuần túy nếu payload phức tạp bị từ chối
+    if (options && typeof options === 'object') {
+      try {
+        if (typeof options.toClassic === 'function') {
+          return await channel.send(options.toClassic());
+        }
+        if (options.content) {
+          return await channel.send({ content: options.content, components: options.components || [] });
+        }
+      } catch (fallbackErr) {
+        console.error(`❌ [safeChannelSend Fallback Error] Kênh ${channel.name || channel.id}:`, fallbackErr.message);
+      }
+    }
+    return null;
   }
 }
 
@@ -5173,8 +5213,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             `  - 📜 \`ReadMessageHistory\` (Đọc lịch sử tin nhắn)\n` +
             `  - 😀 \`UseExternalEmojis\` (Sử dụng biểu cảm ngoài)\n\n` +
             `**🚀 HỖ TRỢ INSTALLATION CONTEXTS (MODERN DISCORD SPECS):**\n` +
-            `• 🏰 **Guild Install (Server):** Khả dụng cho toàn bộ thành viên trong máy chủ.\n` +
-            `• 👤 **User Install (Tài khoản):** Cài đặt vào tài khoản cá nhân, gọi lệnh ở mọi nơi (DM/Group DM/Server).\n\n` +
+            `• 🏰 **Guild Install (Server):** [Thêm vào Máy Chủ](${guildInviteUrl})\n` +
+            `• 👤 **User Install (Tài khoản):** [Cài vào Tài Khoản](${userInstallInviteUrl})\n\n` +
             `**🔍 APP DIRECTORY & DISCOVERY STATUS:**\n` +
             `• **Trạng thái:** ${readiness.ready ? '✅ **Đạt chuẩn Discovery (100% Ready)**' : `⚠️ **Cần hoàn thiện (${readiness.score}/${readiness.maxScore})**`}\n` +
             `• **Support Server:** [Tham gia hỗ trợ](${APP_DIRECTORY_METADATA.SUPPORT_SERVER_URL})\n` +
@@ -5541,11 +5581,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
             actionRows: [menuRow, langSwitchRow]
           });
 
+          const introPayload = typeof v2Intro?.toClassic === 'function' ? v2Intro.toClassic() : v2Intro;
           await ticketChannel.send({
             content: `<@${user.id}> ${staffMentionString}`,
-            ...(isComponentsV2Available() ? v2Intro.toV2() : v2Intro.toClassic())
-          }).catch(err => {
+            embeds: introPayload.embeds || [],
+            components: introPayload.components || [],
+            files: introPayload.files || []
+          }).catch(async (err) => {
             console.error("❌ Lỗi gửi intro embed vào ticket channel:", err);
+            try {
+              await ticketChannel.send({
+                content: `<@${user.id}> ${staffMentionString}\n**🛒 TRUNG TÂM THANH TOÁN & ĐẶT HÀNG LS STUDIO**\n*Vui lòng chọn sản phẩm từ Menu bên dưới:*`,
+                components: [menuRow, langSwitchRow]
+              });
+            } catch (fallbackErr) {
+              console.error("❌ Lỗi gửi tin nhắn fallback vào ticket:", fallbackErr);
+            }
           });
 
           return safeReply(interaction, {
@@ -5725,12 +5776,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             timestamp: true
           });
 
-          const successPayload = isComponentsV2Available() && typeof v2Success?.toV2 === 'function' && v2Success.toV2() 
-            ? v2Success.toV2() 
-            : (typeof v2Success?.toClassic === 'function' ? v2Success.toClassic() : v2Success);
-          await interaction.channel.send(successPayload).catch(err => {
-            console.error("⚠️ Không thể gửi tin nhắn xác nhận vào channel:", err.message);
-          });
+          const successPayload = typeof v2Success?.toClassic === 'function' ? v2Success.toClassic() : v2Success;
+          await safeChannelSend(interaction.channel, successPayload);
 
           const logChannel = guild?.channels.cache.find(c => 
             c.isTextBased() && (
@@ -6140,7 +6187,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
               timestamp: true
             });
 
-            await interaction.channel.send(isComponentsV2Available() ? v2Detail.toV2() : v2Detail.toClassic()).catch(() => {});
+            const detailPayload = typeof v2Detail?.toClassic === 'function' ? v2Detail.toClassic() : v2Detail;
+            await safeChannelSend(interaction.channel, detailPayload);
 
             // Cập nhật topic kênh kèm tóm tắt yêu cầu
             try {
@@ -6195,11 +6243,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
             actionRows: [btnRow]
           });
 
-          const v2Payload = isComponentsV2Available() ? v2Order.toV2() : v2Order.toClassic();
+          const v2Payload = typeof v2Order?.toClassic === 'function' ? v2Order.toClassic() : v2Order;
           await ticketChannel.send({
             content: `<@${user.id}> ${staffMentionString}`,
-            ...v2Payload
-          }).catch(() => {});
+            embeds: v2Payload.embeds || [],
+            components: v2Payload.components || [],
+            files: v2Payload.files || []
+          }).catch(async () => {
+            try {
+              await ticketChannel.send({
+                content: `<@${user.id}> ${staffMentionString}\n**📝 PHIẾU ĐẶT LÀM PLUGIN / MOD CUSTOM - LS STUDIO**`,
+                components: [btnRow]
+              });
+            } catch (_) {}
+          });
 
           return safeReply(interaction, {
             content: `✅ Ticket đặt làm Custom của bạn đã sẵn sàng tại: <#${ticketChannel.id}>`
@@ -6273,7 +6330,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
               timestamp: true
             });
 
-            await interaction.channel.send(isComponentsV2Available() ? v2Detail.toV2() : v2Detail.toClassic()).catch(() => {});
+            const detailPayload = typeof v2Detail?.toClassic === 'function' ? v2Detail.toClassic() : v2Detail;
+            await safeChannelSend(interaction.channel, detailPayload);
             return safeReply(interaction, {
               content: "✅ Đã gửi chi tiết lỗi vào kênh Ticket thành công! Kỹ thuật viên sẽ hỗ trợ ngay."
             });
@@ -6315,11 +6373,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
             actionRows: [btnRow]
           });
 
-          const v2SupportPayload = isComponentsV2Available() ? v2Support.toV2() : v2Support.toClassic();
+          const v2SupportPayload = typeof v2Support?.toClassic === 'function' ? v2Support.toClassic() : v2Support;
           await ticketChannel.send({
             content: `<@${user.id}> ${staffMentionString}`,
-            ...v2SupportPayload
-          }).catch(() => {});
+            embeds: v2SupportPayload.embeds || [],
+            components: v2SupportPayload.components || [],
+            files: v2SupportPayload.files || []
+          }).catch(async () => {
+            try {
+              await ticketChannel.send({
+                content: `<@${user.id}> ${staffMentionString}\n**🛠️ PHIẾU HỖ TRỢ KỸ THUẬT - LS STUDIO**`,
+                components: [btnRow]
+              });
+            } catch (_) {}
+          });
 
           return safeReply(interaction, {
             content: `✅ Ticket hỗ trợ kỹ thuật của bạn đã sẵn sàng tại: <#${ticketChannel.id}>`
@@ -6380,7 +6447,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             `Đang tạo file nhật ký hội thoại (Transcript) và lưu trữ. Kênh sẽ tự động xóa sau 5 giây...`
         });
 
-        await channel.send(isComponentsV2Available() ? v2Closing.toV2() : v2Closing.toClassic()).catch(() => {});
+        const closingPayload = typeof v2Closing?.toClassic === 'function' ? v2Closing.toClassic() : v2Closing;
+        await safeChannelSend(channel, closingPayload);
         await safeReply(interaction, {
           content: "✅ Đã ghi nhận lý do và tiến hành đóng ticket lưu trữ transcript thành công!"
         });
@@ -6440,12 +6508,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
 
             if (fbChannel) {
-              const fbPayload = isComponentsV2Available() && typeof v2Feedback?.toV2 === 'function' && v2Feedback.toV2() 
-                ? v2Feedback.toV2() 
-                : (typeof v2Feedback?.toClassic === 'function' ? v2Feedback.toClassic() : v2Feedback);
-              await fbChannel.send(fbPayload).catch(err => {
-                console.error("❌ Lỗi gửi embed feedback:", err);
-              });
+              const fbPayload = typeof v2Feedback?.toClassic === 'function' ? v2Feedback.toClassic() : v2Feedback;
+              await safeChannelSend(fbChannel, fbPayload);
             }
           }
         } catch (fbErr) {
@@ -6604,6 +6668,7 @@ module.exports = {
   ComponentType,
   MessageFlags,
   safeReply,
+  safeChannelSend,
   safeDeferReply,
   safeDeferUpdate,
   safeEditReply,

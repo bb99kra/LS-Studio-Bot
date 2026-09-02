@@ -194,7 +194,7 @@ client.once(Events.ClientReady, async () => {
         footer: "LS STUDIO • Lead Developer: Nguyendzvn"
       });
 
-      await ch.send(isComponentsV2Available() ? v2Notice.toV2() : v2Notice.toClassic());
+      await ch.send(v2Notice.toClassic());
     });
 
     // 2. KÊNH SẢN PHẨM (💎ᵎsảɴ-ᴘʜẩᴍ)
@@ -231,7 +231,7 @@ client.once(Events.ClientReady, async () => {
         footer: "Mở Ticket tại #🛒ᵎmua-plugin để được hỗ trợ giao dịch!"
       });
 
-      await ch.send(isComponentsV2Available() ? v2Products.toV2() : v2Products.toClassic());
+      await ch.send(v2Products.toClassic());
     });
 
     // 3. KÊNH BẢNG GIÁ (💰ᵎʙảɴɢ-ɢɪá)
@@ -260,7 +260,7 @@ client.once(Events.ClientReady, async () => {
         footer: "Giao dịch an toàn qua Ticket tại LS STUDIO"
       });
 
-      await ch.send(isComponentsV2Available() ? v2Pricing.toV2() : v2Pricing.toClassic());
+      await ch.send(v2Pricing.toClassic());
     });
 
     // 4. KÊNH MUA PLUGIN (🛒ᵎᴍᴜᴀ-ᴘʟᴜɢɪɴ)
@@ -289,7 +289,7 @@ client.once(Events.ClientReady, async () => {
         actionRows: [row]
       });
 
-      await ch.send(isComponentsV2Available() ? v2Buy.toV2() : v2Buy.toClassic());
+      await ch.send(v2Buy.toClassic());
     });
 
     // 5. KÊNH SERVER TEST DEMO (🌐ᵎsᴇʀᴠᴇʀ-ᴛᴇsᴛ)
@@ -319,7 +319,7 @@ client.once(Events.ClientReady, async () => {
         actionRows: [btn]
       });
 
-      await ch.send(isComponentsV2Available() ? v2Demo.toV2() : v2Demo.toClassic());
+      await ch.send(v2Demo.toClassic());
     });
 
     // 6. KÊNH LUẬT (📜ᵎʟᴜậᴛ-ʟệ)
@@ -340,7 +340,7 @@ client.once(Events.ClientReady, async () => {
         footer: "LS STUDIO"
       });
 
-      await ch.send(isComponentsV2Available() ? v2Rules.toV2() : v2Rules.toClassic());
+      await ch.send(v2Rules.toClassic());
     });
 
     console.log("🎉 DECOR HOÀN TẤT THEO PHONG CÁCH STUDIO LỚN 100%!");

@@ -154,7 +154,7 @@ client.once(Events.ClientReady, async () => {
         footer: "Mở Ticket tại #🛒・mua-plugin để đặt mua và nhận file ngay!"
       });
 
-      await ch.send(isComponentsV2Available() ? v2Message.toV2() : v2Message.toClassic());
+      await ch.send(v2Message.toClassic());
       console.log("✅ Kênh 💎・sản-phẩm-plugin đã cập nhật hoàn hảo!");
     }
     await cleanupAndExit(0);
