@@ -23,6 +23,10 @@ const {
   RESTEvents,
   Routes,
   SlashCommandBuilder,
+  ContextMenuCommandBuilder,
+  ApplicationCommandType,
+  ApplicationIntegrationType,
+  InteractionContextType,
   Events,
   AttachmentBuilder,
   Options
@@ -72,6 +76,180 @@ function validateBankConfig(config = BANK_CONFIG) {
 const _initialBankValidation = validateBankConfig(BANK_CONFIG);
 if (!_initialBankValidation.valid) {
   console.warn(`⚠️ [BANK_CONFIG Warning] ${_initialBankValidation.reason}`);
+}
+
+// =========================================================================
+// 0.05 QUYỀN HẠN BOT, TÍNH TOÁN BITFIELD & APP DIRECTORY DISCOVERY METADATA
+// =========================================================================
+
+/**
+ * Danh sách 7 quyền hạn cốt lõi của Bot LS Studio theo tài liệu Discord Developer
+ * (SendMessages, EmbedLinks, AttachFiles, ManageRoles, ManageChannels, ReadMessageHistory, UseExternalEmojis)
+ */
+const REQUIRED_BOT_PERMISSIONS = Object.freeze([
+  PermissionsBitField.Flags.SendMessages,
+  PermissionsBitField.Flags.EmbedLinks,
+  PermissionsBitField.Flags.AttachFiles,
+  PermissionsBitField.Flags.ManageRoles,
+  PermissionsBitField.Flags.ManageChannels,
+  PermissionsBitField.Flags.ReadMessageHistory,
+  PermissionsBitField.Flags.UseExternalEmojis
+]);
+
+/**
+ * Metadata thông tin sẵn sàng cho App Directory & Discovery theo tiêu chuẩn Discord
+ */
+const APP_DIRECTORY_METADATA = Object.freeze({
+  BOT_NAME: 'LS Studio Bot',
+  BOT_DESCRIPTION: (process.env.BOT_DESCRIPTION || 'LS STUDIO Bot - Hỗ trợ thanh toán VietQR tự động 24/7, quản lý đơn hàng, bán Plugin/Mod Minecraft và AI Gateway siêu tốc.').trim(),
+  SUPPORT_SERVER_URL: (process.env.SUPPORT_SERVER_URL || 'https://discord.gg/lsstudio').trim(),
+  TERMS_OF_SERVICE_URL: (process.env.TERMS_OF_SERVICE_URL || 'https://lsstudio.vn/terms').trim(),
+  PRIVACY_POLICY_URL: (process.env.PRIVACY_POLICY_URL || 'https://lsstudio.vn/privacy').trim(),
+  WEBSITE_URL: (process.env.WEBSITE_URL || 'https://lsstudio.vn').trim(),
+  TAGS: Object.freeze(['minecraft', 'plugins', 'anticheat', 'tickets', 'payment'])
+});
+
+/**
+ * Tính toán Permission Bitfield từ danh sách quyền hạn Discord
+ * @param {Array<bigint|string|number>|bigint|number} permissions - Danh sách hoặc bitfield quyền hạn
+ * @returns {{ bitfield: bigint, bitfieldString: string, bitfieldNumber: number, permissions: string[], has: (perm: bigint|string|number) => boolean }}
+ */
+function calculatePermissionsBitfield(permissions = REQUIRED_BOT_PERMISSIONS) {
+  let pbf;
+  try {
+    pbf = new PermissionsBitField(permissions);
+  } catch (err) {
+    pbf = new PermissionsBitField(0n);
+  }
+  return {
+    bitfield: pbf.bitfield,
+    bitfieldString: pbf.bitfield.toString(),
+    bitfieldNumber: Number(pbf.bitfield),
+    permissions: pbf.toArray(),
+    has: (permission) => {
+      try {
+        return pbf.has(permission);
+      } catch {
+        return false;
+      }
+    }
+  };
+}
+
+/**
+ * Kiểm tra tính hợp lệ & mức độ sẵn sàng cho App Directory & Discovery theo tiêu chuẩn Discord
+ * @param {Object} metadata - Metadata cần kiểm tra (mặc định APP_DIRECTORY_METADATA)
+ * @returns {{ ready: boolean, score: number, maxScore: number, checks: Array<{ name: string, passed: boolean, message: string }> }}
+ */
+function validateAppDirectoryReadiness(metadata = APP_DIRECTORY_METADATA) {
+  const checks = [];
+  let score = 0;
+  const maxScore = 5;
+
+  // 1. Kiểm tra mô tả Bot (10 - 400 ký tự)
+  const desc = metadata?.BOT_DESCRIPTION || '';
+  const descPassed = typeof desc === 'string' && desc.length >= 10 && desc.length <= 400;
+  checks.push({
+    name: 'Bot Description',
+    passed: descPassed,
+    message: descPassed 
+      ? `Hợp lệ (${desc.length}/400 ký tự)` 
+      : `Không hợp lệ: Yêu cầu từ 10 đến 400 ký tự (Hiện tại: ${desc.length})`
+  });
+  if (descPassed) score++;
+
+  // 2. Kiểm tra Link Support Server (Community Discord URL)
+  const supportUrl = metadata?.SUPPORT_SERVER_URL || '';
+  const supportPassed = typeof supportUrl === 'string' && /^(https?:\/\/)?(www\.)?(discord\.(gg|com\/invite)|dsc\.gg)\/[a-zA-Z0-9_\-\+]+$/i.test(supportUrl);
+  checks.push({
+    name: 'Support Server Link',
+    passed: supportPassed,
+    message: supportPassed 
+      ? `Hợp lệ (${supportUrl})` 
+      : `Không hợp lệ: Cần là URL Discord Invite hợp lệ (discord.gg/...)`
+  });
+  if (supportPassed) score++;
+
+  // 3. Kiểm tra Link Terms of Service (HTTPS URL)
+  const tosUrl = metadata?.TERMS_OF_SERVICE_URL || '';
+  const tosPassed = typeof tosUrl === 'string' && /^https:\/\/[^\s$.?#].[^\s]*$/i.test(tosUrl);
+  checks.push({
+    name: 'Terms of Service URL',
+    passed: tosPassed,
+    message: tosPassed 
+      ? `Hợp lệ (${tosUrl})` 
+      : `Không hợp lệ: Yêu cầu URL HTTPS công khai`
+  });
+  if (tosPassed) score++;
+
+  // 4. Kiểm tra Link Privacy Policy (HTTPS URL)
+  const privacyUrl = metadata?.PRIVACY_POLICY_URL || '';
+  const privacyPassed = typeof privacyUrl === 'string' && /^https:\/\/[^\s$.?#].[^\s]*$/i.test(privacyUrl);
+  checks.push({
+    name: 'Privacy Policy URL',
+    passed: privacyPassed,
+    message: privacyPassed 
+      ? `Hợp lệ (${privacyUrl})` 
+      : `Không hợp lệ: Yêu cầu URL HTTPS công khai`
+  });
+  if (privacyPassed) score++;
+
+  // 5. Kiểm tra Tags danh mục (1 - 5 tags, mỗi tag 2 - 20 ký tự)
+  const tags = metadata?.TAGS || [];
+  const tagsPassed = Array.isArray(tags) && tags.length >= 1 && tags.length <= 5 && tags.every(t => typeof t === 'string' && t.length >= 2 && t.length <= 20);
+  checks.push({
+    name: 'Discovery Tags',
+    passed: tagsPassed,
+    message: tagsPassed 
+      ? `Hợp lệ (${tags.length}/5 tags: ${tags.join(', ')})` 
+      : `Không hợp lệ: Yêu cầu 1-5 tags, mỗi tag 2-20 ký tự`
+  });
+  if (tagsPassed) score++;
+
+  return {
+    ready: score === maxScore,
+    score,
+    maxScore,
+    checks
+  };
+}
+
+/**
+ * Tạo link mời OAuth2 Discord Bot với Permissions Bitfield và Installation Context chuẩn
+ * @param {Object} [options] - Tùy chọn cấu hình OAuth2
+ * @param {string} [options.clientId] - Client ID của Bot
+ * @param {Array<bigint|string|number>|bigint|number} [options.permissions] - Quyền hạn cần yêu cầu
+ * @param {Array<string>} [options.scopes] - Danh sách OAuth2 Scopes
+ * @param {number} [options.integrationType] - 0: GUILD_INSTALL, 1: USER_INSTALL
+ * @param {string} [options.redirectUri] - Redirect URI tùy chọn
+ * @param {string} [options.state] - State CSRF tùy chọn
+ * @returns {string} URL mời Bot OAuth2 hoàn chỉnh
+ */
+function generateOAuth2Invite(options = {}) {
+  const cid = options.clientId || process.env.CLIENT_ID || process.env.DISCORD_CLIENT_ID || (client?.user?.id) || '1214041776483471391';
+  const perms = options.permissions !== undefined ? options.permissions : REQUIRED_BOT_PERMISSIONS;
+  const bitfield = calculatePermissionsBitfield(perms).bitfieldString;
+  const scopes = Array.isArray(options.scopes) && options.scopes.length > 0 
+    ? options.scopes 
+    : ['bot', 'applications.commands'];
+  
+  const url = new URL('https://discord.com/oauth2/authorize');
+  url.searchParams.set('client_id', cid);
+  url.searchParams.set('permissions', bitfield);
+  url.searchParams.set('scope', scopes.join(' '));
+  
+  if (options.integrationType !== undefined && (options.integrationType === 0 || options.integrationType === 1)) {
+    url.searchParams.set('integration_type', String(options.integrationType));
+  }
+  if (options.redirectUri) {
+    url.searchParams.set('redirect_uri', options.redirectUri);
+    url.searchParams.set('response_type', 'code');
+  }
+  if (options.state) {
+    url.searchParams.set('state', options.state);
+  }
+
+  return url.toString();
 }
 
 // =========================================================================
@@ -1263,8 +1441,137 @@ const client = new Client({
 });
 
 // =========================================================================
-// 2.1. DISCORD REST EVENTS & RATE LIMIT MONITORING
+// 2.1. DISCORD REST EVENTS, RATE LIMIT MONITORING & HEADER PARSING
 // =========================================================================
+
+// Telemetry & metrics cho REST API Rate-Limit
+const restRateLimitMetrics = {
+  rateLimitHits: 0,
+  globalRateLimitHits: 0,
+  invalidRequestWarnings: 0,
+  lastRateLimitRoute: null,
+  lastTimeToResetMs: 0,
+  lastHitAt: null
+};
+
+function getRestRateLimitMetrics() {
+  return {
+    ...restRateLimitMetrics,
+    timestamp: Date.now()
+  };
+}
+
+/**
+ * Phân tích và trích xuất thông tin chi tiết từ các HTTP Headers chuẩn của Discord REST API:
+ * - X-RateLimit-Limit: Số request tối đa trong bucket window
+ * - X-RateLimit-Remaining: Số request còn lại trước khi bị 429
+ * - X-RateLimit-Reset: Thời điểm reset bucket (Epoch timestamp in seconds)
+ * - X-RateLimit-Reset-After: Thời gian còn lại tính bằng giây (độ chính xác mili-giây dạng float)
+ * - X-RateLimit-Bucket: Khóa định danh duy nhất của bucket
+ * - X-RateLimit-Global: Cờ báo hiệu bị Rate Limit toàn cục (Global)
+ * - X-RateLimit-Scope: Phạm vi giới hạn ('user', 'global', 'shared')
+ * - Retry-After: Thời gian chờ thử lại khi gặp mã HTTP 429
+ */
+function parseDiscordRateLimitHeaders(rawHeaders) {
+  if (!rawHeaders || typeof rawHeaders !== 'object') {
+    return {
+      limit: null,
+      remaining: null,
+      reset: null,
+      resetAfter: null,
+      bucket: null,
+      global: false,
+      scope: 'route',
+      retryAfter: 0,
+      retryAfterMs: 0,
+      isRateLimited: false,
+      resetsAt: null
+    };
+  }
+
+  const normalized = {};
+  if (typeof rawHeaders.get === 'function') {
+    for (const key of ['x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset', 'x-ratelimit-reset-after', 'x-ratelimit-bucket', 'x-ratelimit-global', 'x-ratelimit-scope', 'retry-after']) {
+      const val = rawHeaders.get(key);
+      if (val !== null && val !== undefined) normalized[key] = val;
+    }
+  } else {
+    for (const [k, v] of Object.entries(rawHeaders)) {
+      if (k && typeof k === 'string') {
+        normalized[k.toLowerCase()] = v;
+      }
+    }
+  }
+
+  const rawLimit = normalized['x-ratelimit-limit'];
+  const rawRemaining = normalized['x-ratelimit-remaining'];
+  const rawReset = normalized['x-ratelimit-reset'];
+  const rawResetAfter = normalized['x-ratelimit-reset-after'];
+  const rawBucket = normalized['x-ratelimit-bucket'];
+  const rawGlobal = normalized['x-ratelimit-global'];
+  const rawScope = normalized['x-ratelimit-scope'];
+  const rawRetryAfter = normalized['retry-after'];
+
+  const limit = rawLimit !== undefined ? parseInt(rawLimit, 10) : null;
+  const remaining = rawRemaining !== undefined ? parseInt(rawRemaining, 10) : null;
+  const reset = rawReset !== undefined ? parseFloat(rawReset) : null;
+  const resetAfter = rawResetAfter !== undefined ? parseFloat(rawResetAfter) : null;
+  const bucket = typeof rawBucket === 'string' && rawBucket.trim() !== '' ? rawBucket.trim() : null;
+  const isGlobal = rawGlobal === 'true' || rawGlobal === true || rawGlobal === '1' || rawGlobal === 1;
+  const scope = typeof rawScope === 'string' && rawScope.trim() !== '' ? rawScope.trim() : (isGlobal ? 'global' : 'route');
+  const retryAfterNum = rawRetryAfter !== undefined ? parseFloat(rawRetryAfter) : null;
+  const hasExplicitRetryAfter = retryAfterNum !== null && !isNaN(retryAfterNum) && retryAfterNum > 0;
+
+  const isRateLimited = (remaining !== null && remaining === 0) || hasExplicitRetryAfter;
+
+  const effectiveRetryAfterSec = hasExplicitRetryAfter
+    ? retryAfterNum
+    : (isRateLimited && resetAfter !== null && !isNaN(resetAfter) ? resetAfter : 0);
+
+  const retryAfterMs = Math.max(0, Math.round(effectiveRetryAfterSec * 1000));
+
+  let resetsAt = null;
+  if (reset !== null && !isNaN(reset) && reset > 0) {
+    resetsAt = new Date(Math.round(reset * 1000));
+  } else if (resetAfter !== null && !isNaN(resetAfter) && resetAfter > 0) {
+    resetsAt = new Date(Date.now() + Math.round(resetAfter * 1000));
+  }
+
+  return {
+    limit: !isNaN(limit) ? limit : null,
+    remaining: !isNaN(remaining) ? remaining : null,
+    reset: !isNaN(reset) ? reset : null,
+    resetAfter: !isNaN(resetAfter) ? resetAfter : null,
+    bucket,
+    global: isGlobal,
+    scope,
+    retryAfter: effectiveRetryAfterSec,
+    retryAfterMs,
+    isRateLimited,
+    resetsAt
+  };
+}
+
+/**
+ * Tính toán thời gian chờ Backoff (Exponential Backoff + Full Jitter) phòng chống thundering herd
+ */
+function calculateRateLimitBackoff(retryAfterSec = 0, attempt = 1, options = {}) {
+  const minDelayMs = options.minDelayMs || 100;
+  const maxDelayMs = options.maxDelayMs || 30000;
+  const jitterMaxMs = options.jitterMaxMs || 250;
+
+  let baseDelayMs;
+  if (typeof retryAfterSec === 'number' && retryAfterSec > 0) {
+    baseDelayMs = retryAfterSec * 1000;
+  } else {
+    baseDelayMs = Math.pow(2, Math.max(1, attempt)) * 250;
+  }
+
+  const jitter = Math.random() * jitterMaxMs;
+  const totalDelay = Math.round(baseDelayMs + jitter);
+  return Math.min(maxDelayMs, Math.max(minDelayMs, totalDelay));
+}
+
 // Lắng nghe sự kiện rateLimited trên client.rest để giám sát chi tiết rate-limit của Discord API
 client.rest.on(RESTEvents.RateLimited, (rateLimitData) => {
   const {
@@ -1277,6 +1584,12 @@ client.rest.on(RESTEvents.RateLimited, (rateLimitData) => {
     majorParameter = ''
   } = rateLimitData || {};
 
+  restRateLimitMetrics.rateLimitHits++;
+  if (isGlobal) restRateLimitMetrics.globalRateLimitHits++;
+  restRateLimitMetrics.lastRateLimitRoute = route !== 'UNKNOWN' ? route : (url || 'UNKNOWN');
+  restRateLimitMetrics.lastTimeToResetMs = timeToReset;
+  restRateLimitMetrics.lastHitAt = Date.now();
+
   const routeOrUrl = route !== 'UNKNOWN' ? route : (url || 'UNKNOWN');
   console.warn(
     `⏳ [REST Rate Limit Hit] ${isGlobal ? '🌐 GLOBAL' : '📍 ROUTE'} | ` +
@@ -1288,6 +1601,7 @@ client.rest.on(RESTEvents.RateLimited, (rateLimitData) => {
 // Giám sát các yêu cầu không hợp lệ có nguy cơ bị Cloudflare tạm khóa IP (10,000 invalid requests / 10 phút)
 client.rest.on(RESTEvents.InvalidRequestWarning, (warningData) => {
   const { count = 0, remainingTime = 0 } = warningData || {};
+  restRateLimitMetrics.invalidRequestWarnings = count;
   console.warn(
     `⚠️ [REST Invalid Request Warning] Phát hiện ${count} yêu cầu không hợp lệ (401/403/429). ` +
     `Thời gian reset: ${remainingTime}ms (Cảnh báo nguy cơ Cloudflare IP Block nếu vượt ngưỡng)`
@@ -1295,10 +1609,242 @@ client.rest.on(RESTEvents.InvalidRequestWarning, (warningData) => {
 });
 
 // =========================================================================
-// 2.2. DISCORD GATEWAY RESILIENCE & WEBSOCKET EVENT HANDLERS
+// 2.2. DISCORD GATEWAY RESILIENCE, ERROR CODES & LIFECYCLE HANDLERS
 // =========================================================================
+
+/**
+ * Bảng tra cứu chuẩn toàn bộ mã lỗi đóng kết nối Discord Gateway (Gateway Close Event Codes):
+ * Tham chiếu tài liệu chính thức: https://docs.discord.com/developers/docs/topics/gateway#disconnections
+ */
+const GATEWAY_CLOSE_CODES = Object.freeze({
+  4000: Object.freeze({
+    code: 4000,
+    name: 'UNKNOWN_ERROR',
+    reconnectable: true,
+    fatal: false,
+    action: 'RESUME_OR_RECONNECT',
+    descriptionVi: 'Lỗi không xác định từ Discord Gateway. Tự động kết nối lại hoặc Resume phiên làm việc.',
+    descriptionEn: 'Unknown error occurred on Discord Gateway. Auto-reconnecting or resuming session.'
+  }),
+  4001: Object.freeze({
+    code: 4001,
+    name: 'UNKNOWN_OPCODE',
+    reconnectable: true,
+    fatal: false,
+    action: 'RECONNECT',
+    descriptionVi: 'Opcode Gateway không hợp lệ. Khởi tạo lại kết nối WebSocket.',
+    descriptionEn: 'Invalid Gateway opcode sent. Reconnecting WebSocket.'
+  }),
+  4002: Object.freeze({
+    code: 4002,
+    name: 'DECODE_ERROR',
+    reconnectable: true,
+    fatal: false,
+    action: 'RECONNECT',
+    descriptionVi: 'Không thể giải mã payload gửi tới Gateway. Khởi tạo lại kết nối.',
+    descriptionEn: 'Invalid payload encoding sent to Gateway. Reconnecting WebSocket.'
+  }),
+  4003: Object.freeze({
+    code: 4003,
+    name: 'NOT_AUTHENTICATED',
+    reconnectable: true,
+    fatal: false,
+    action: 'RECONNECT',
+    descriptionVi: 'Gửi payload trước khi xác thực Identify. Thực hiện kết nối và xác thực lại.',
+    descriptionEn: 'Payload sent prior to Identify handshake. Re-authenticating.'
+  }),
+  4004: Object.freeze({
+    code: 4004,
+    name: 'AUTHENTICATION_FAILED',
+    reconnectable: false,
+    fatal: true,
+    action: 'HALT_AND_FIX_TOKEN',
+    descriptionVi: 'Discord Token không hợp lệ hoặc đã bị thu hồi! Dừng kết nối lại ngay lập tức.',
+    descriptionEn: 'Authentication failed. Invalid bot token provided! Halting reconnect attempts.'
+  }),
+  4005: Object.freeze({
+    code: 4005,
+    name: 'ALREADY_AUTHENTICATED',
+    reconnectable: true,
+    fatal: false,
+    action: 'RECONNECT',
+    descriptionVi: 'Đã gửi payload xác thực Identify khi đã đăng nhập. Reset kết nối.',
+    descriptionEn: 'Already authenticated. Resetting session connection.'
+  }),
+  4007: Object.freeze({
+    code: 4007,
+    name: 'INVALID_SEQ',
+    reconnectable: true,
+    fatal: false,
+    action: 'RECONNECT_NEW_SESSION',
+    descriptionVi: 'Sequence number gửi khi Resume không hợp lệ. Phục hồi thất bại, bắt đầu phiên mới (Identify).',
+    descriptionEn: 'Invalid resume sequence. Session resume failed, starting fresh session.'
+  }),
+  4008: Object.freeze({
+    code: 4008,
+    name: 'RATE_LIMITED',
+    reconnectable: true,
+    fatal: false,
+    action: 'BACKOFF_AND_RECONNECT',
+    descriptionVi: 'Vượt quá giới hạn gửi payload Gateway (120 payload/phút). Chờ exponential backoff.',
+    descriptionEn: 'Gateway rate limit exceeded. Backing off before reconnecting.'
+  }),
+  4009: Object.freeze({
+    code: 4009,
+    name: 'SESSION_TIMED_OUT',
+    reconnectable: true,
+    fatal: false,
+    action: 'RECONNECT_NEW_SESSION',
+    descriptionVi: 'Phiên kết nối Gateway đã hết hạn (Session Timed Out). Khởi tạo phiên mới.',
+    descriptionEn: 'Gateway session timed out. Starting fresh session.'
+  }),
+  4010: Object.freeze({
+    code: 4010,
+    name: 'INVALID_SHARD',
+    reconnectable: false,
+    fatal: true,
+    action: 'FIX_SHARD_CONFIG',
+    descriptionVi: 'Cấu hình Shard ID hoặc Shard Count không hợp lệ. Dừng kết nối lại.',
+    descriptionEn: 'Invalid shard configuration sent during Identify. Halting reconnects.'
+  }),
+  4011: Object.freeze({
+    code: 4011,
+    name: 'SHARDING_REQUIRED',
+    reconnectable: false,
+    fatal: true,
+    action: 'ENABLE_SHARDING',
+    descriptionVi: 'Bot tham gia trên 2500 máy chủ, bắt buộc bật Sharding! Dừng kết nối lại.',
+    descriptionEn: 'Sharding required (>2500 guilds). Halting reconnects.'
+  }),
+  4012: Object.freeze({
+    code: 4012,
+    name: 'INVALID_API_VERSION',
+    reconnectable: false,
+    fatal: true,
+    action: 'UPDATE_API_VERSION',
+    descriptionVi: 'Phiên bản Gateway API không hợp lệ. Cần cập nhật discord.js hoặc cấu hình API.',
+    descriptionEn: 'Invalid Gateway API version specified.'
+  }),
+  4013: Object.freeze({
+    code: 4013,
+    name: 'INVALID_INTENTS',
+    reconnectable: false,
+    fatal: true,
+    action: 'FIX_INTENTS',
+    descriptionVi: 'Bitfield Gateway Intents không hợp lệ. Cần sửa intents trong Client options.',
+    descriptionEn: 'Invalid Gateway Intents bitfield specified.'
+  }),
+  4014: Object.freeze({
+    code: 4014,
+    name: 'DISALLOWED_INTENTS',
+    reconnectable: false,
+    fatal: true,
+    action: 'ENABLE_PRIVILEGED_INTENTS',
+    descriptionVi: 'Intents đặc quyền (GuildMembers/MessageContent/Presence) chưa được bật trong Developer Portal!',
+    descriptionEn: 'Disallowed Privileged Intents. Enable in Discord Developer Portal.'
+  })
+});
+
+/**
+ * Phân loại và giải mã mã đóng kết nối Discord Gateway / WebSocket
+ */
+function classifyGatewayCloseCode(code) {
+  const numericCode = Number(code) || 0;
+  if (GATEWAY_CLOSE_CODES[numericCode]) {
+    return {
+      ...GATEWAY_CLOSE_CODES[numericCode],
+      isDiscordGatewayCode: true,
+      isStandardWsCode: false
+    };
+  }
+
+  // Xử lý các mã WebSocket tiêu chuẩn (RFC 6455)
+  if (numericCode === 1000) {
+    return {
+      code: 1000,
+      name: 'NORMAL_CLOSURE',
+      reconnectable: true,
+      fatal: false,
+      action: 'RECONNECT',
+      descriptionVi: 'Đóng kết nối bình thường (Normal Closure).',
+      descriptionEn: 'Normal WebSocket closure. Can reconnect if needed.',
+      isDiscordGatewayCode: false,
+      isStandardWsCode: true
+    };
+  }
+  if (numericCode === 1001) {
+    return {
+      code: 1001,
+      name: 'GOING_AWAY',
+      reconnectable: true,
+      fatal: false,
+      action: 'RESUME_OR_RECONNECT',
+      descriptionVi: 'Máy chủ hoặc client đóng kết nối (Going Away).',
+      descriptionEn: 'Endpoint is going away (server restart/sleep). Auto-reconnecting.',
+      isDiscordGatewayCode: false,
+      isStandardWsCode: true
+    };
+  }
+  if (numericCode === 1006) {
+    return {
+      code: 1006,
+      name: 'ABNORMAL_CLOSURE',
+      reconnectable: true,
+      fatal: false,
+      action: 'RESUME_OR_RECONNECT',
+      descriptionVi: 'Ngắt kết nối mạng bất thường (Mất kết nối Internet/TCP reset).',
+      descriptionEn: 'Abnormal closure (network drop/TCP reset). Auto-resuming session.',
+      isDiscordGatewayCode: false,
+      isStandardWsCode: true
+    };
+  }
+
+  const isFatal = [4004, 4010, 4011, 4012, 4013, 4014].includes(numericCode);
+  return {
+    code: numericCode,
+    name: 'UNCLASSIFIED_CLOSE_CODE',
+    reconnectable: !isFatal,
+    fatal: isFatal,
+    action: isFatal ? 'HALT' : 'RECONNECT',
+    descriptionVi: `Mã đóng kết nối chưa phân loại (${numericCode}).`,
+    descriptionEn: `Unclassified close code (${numericCode}).`,
+    isDiscordGatewayCode: numericCode >= 4000 && numericCode < 5000,
+    isStandardWsCode: numericCode < 4000
+  };
+}
+
+// Bảng theo dõi trạng thái sức khỏe Gateway (Gateway Health & Diagnostics)
+const gatewayHealthMetrics = {
+  connectCount: 0,
+  disconnectCount: 0,
+  reconnectCount: 0,
+  resumeCount: 0,
+  errorCount: 0,
+  sessionInvalidatedCount: 0,
+  lastDisconnectCode: null,
+  lastDisconnectReason: null,
+  lastDisconnectAt: null,
+  lastResumeAt: null,
+  lastReplayedEvents: 0,
+  lastReadyAt: null,
+  readyCount: 0
+};
+
+function getGatewayHealthMetrics(targetClient = client) {
+  const ping = targetClient?.ws?.ping ?? -1;
+  const status = targetClient?.ws?.status ?? -1;
+  return {
+    ...gatewayHealthMetrics,
+    currentPingMs: ping,
+    wsStatus: status,
+    isOnline: status === 0,
+    timestamp: Date.now()
+  };
+}
+
 // Bắt các sự kiện lỗi và cảnh báo từ Discord Client
 client.on(Events.Error, (error) => {
+  gatewayHealthMetrics.errorCount++;
   console.error('❌ [Discord Client Error]:', error);
 });
 
@@ -1307,6 +1853,7 @@ client.on(Events.Warn, (info) => {
 });
 
 client.on(Events.ShardError, (error, shardId) => {
+  gatewayHealthMetrics.errorCount++;
   console.error(`❌ [Discord Shard ${shardId} Error]:`, error);
 });
 
@@ -1314,43 +1861,52 @@ client.on(Events.ShardError, (error, shardId) => {
 client.on(Events.ShardDisconnect, (event, shardId) => {
   const code = event?.code || 0;
   const reason = event?.reason || 'No reason provided';
-  console.warn(`🔌 [Discord Shard ${shardId} Disconnected] WebSocket closed with code ${code}: ${reason}`);
+  const classified = classifyGatewayCloseCode(code);
 
-  if (code === 4004) {
-    console.error('💥 [CRITICAL 4004] Discord Token không hợp lệ. Vui lòng kiểm tra lại DISCORD_TOKEN trong .env hoặc token.local.js!');
-  } else if (code === 4014) {
+  gatewayHealthMetrics.disconnectCount++;
+  gatewayHealthMetrics.lastDisconnectCode = code;
+  gatewayHealthMetrics.lastDisconnectReason = reason;
+  gatewayHealthMetrics.lastDisconnectAt = Date.now();
+
+  if (classified.fatal) {
     console.error(
-      '💥 [CRITICAL 4014 - Disallowed Intents] Bot yêu cầu Privileged Intents (GuildMembers / MessageContent) ' +
-      'nhưng chưa được bật trong Discord Developer Portal (Bot -> Privileged Gateway Intents)!'
+      `💥 [CRITICAL SHARD DISCONNECT] Shard ${shardId} đóng kết nối với mã FATAL ${code} (${classified.name}): ${reason}\n` +
+      `   👉 Hành động yêu cầu: ${classified.action} | VI: ${classified.descriptionVi} | EN: ${classified.descriptionEn}`
     );
-  } else if (code === 4013) {
-    console.error('💥 [CRITICAL 4013] Cấu hình Gateway Intents không hợp lệ.');
-  } else if (code === 4011) {
-    console.error('💥 [CRITICAL 4011] Sharding required: Bot tham gia trên 2500 máy chủ và bắt buộc cấu hình Sharding.');
-  } else if (code === 4010) {
-    console.error('💥 [CRITICAL 4010] Shard ID không hợp lệ.');
+  } else {
+    console.warn(
+      `🔌 [Discord Shard ${shardId} Disconnected] WebSocket closed with code ${code} (${classified.name}): ${reason}\n` +
+      `   👉 Hành động: ${classified.action} (Reconnectable: ${classified.reconnectable}) | ${classified.descriptionVi}`
+    );
   }
 });
 
 // Ghi nhận tiến trình kết nối lại WebSocket
 client.on(Events.ShardReconnecting, (shardId) => {
+  gatewayHealthMetrics.reconnectCount++;
   console.log(`🔄 [Discord Shard ${shardId} Reconnecting] Đang kết nối lại Discord Gateway WebSocket...`);
 });
 
 // Ghi nhận khi Shard phục hồi phiên làm việc thành công (Session Resume)
 client.on(Events.ShardResume, (shardId, replayedEvents) => {
+  gatewayHealthMetrics.resumeCount++;
+  gatewayHealthMetrics.lastResumeAt = Date.now();
+  gatewayHealthMetrics.lastReplayedEvents = replayedEvents || 0;
   console.log(`✅ [Discord Shard ${shardId} Resumed] Kết nối Gateway đã khôi phục thành công (Replayed ${replayedEvents} events).`);
 });
 
 // Ghi nhận khi Shard đã sẵn sàng
 client.on(Events.ShardReady, (shardId, unavailableGuilds) => {
+  gatewayHealthMetrics.readyCount++;
+  gatewayHealthMetrics.lastReadyAt = Date.now();
   const unavailCount = unavailableGuilds ? unavailableGuilds.size : 0;
   console.log(`🚀 [Discord Shard ${shardId} Ready] Shard đã sẵn sàng hoạt động${unavailCount > 0 ? ` (${unavailCount} guilds unavailable)` : ''}.`);
 });
 
 // Ghi nhận khi phiên làm việc bị vô hiệu hóa
 client.on(Events.Invalidated, () => {
-  console.error('❌ [Discord Session Invalidated] Phiên kết nối Gateway đã bị vô hiệu hóa.');
+  gatewayHealthMetrics.sessionInvalidatedCount++;
+  console.error('❌ [Discord Session Invalidated] Phiên kết nối Gateway đã bị vô hiệu hóa. Yêu cầu khởi tạo phiên mới (Re-identify).');
 });
 
 // =========================================================================
@@ -1359,7 +1915,9 @@ client.on(Events.Invalidated, () => {
 const commands = [
   new SlashCommandBuilder()
     .setName('ping')
-    .setDescription('Kiểm tra độ trễ của Bot LS Studio / Check Bot Latency'),
+    .setDescription('Kiểm tra độ trễ của Bot LS Studio / Check Bot Latency')
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall, ApplicationIntegrationType.UserInstall)
+    .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel),
   new SlashCommandBuilder()
     .setName('khachhang')
     .setDescription('Cấp role Khách Hàng cho người vừa mua Plugin/Mod/AI (Staff Only)')
@@ -1369,21 +1927,34 @@ const commands = [
         .setRequired(true)
     )
     .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageRoles)
-    .setDMPermission(false),
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall)
+    .setContexts(InteractionContextType.Guild),
   new SlashCommandBuilder()
     .setName('stk')
-    .setDescription('Lấy thông tin tài khoản ngân hàng MBBank / Bank Information'),
+    .setDescription('Lấy thông tin tài khoản ngân hàng MBBank / Bank Information')
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall, ApplicationIntegrationType.UserInstall)
+    .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel),
   new SlashCommandBuilder()
     .setName('transcript')
     .setDescription('Xuất file nhật ký tin nhắn của kênh ticket hiện tại (Staff Only)')
     .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageMessages)
-    .setDMPermission(false),
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall)
+    .setContexts(InteractionContextType.Guild),
   new SlashCommandBuilder()
     .setName('feedback')
-    .setDescription('Gửi nhận xét & đánh giá chất lượng dịch vụ / Send Feedback'),
+    .setDescription('Gửi nhận xét & đánh giá chất lượng dịch vụ / Send Feedback')
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall, ApplicationIntegrationType.UserInstall)
+    .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel),
   new SlashCommandBuilder()
     .setName('help')
-    .setDescription('Xem hướng dẫn sử dụng và danh sách lệnh Bot LS Studio / Bot Help Guide'),
+    .setDescription('Xem hướng dẫn sử dụng và danh sách lệnh Bot LS Studio / Bot Help Guide')
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall, ApplicationIntegrationType.UserInstall)
+    .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel),
+  new SlashCommandBuilder()
+    .setName('invite')
+    .setDescription('Lấy link mời Bot, tính toán Permissions Bitfield & OAuth2 Discovery')
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall, ApplicationIntegrationType.UserInstall)
+    .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel),
   new SlashCommandBuilder()
     .setName('clearmessages')
     .setDescription('Xóa số lượng tin nhắn trong kênh (1-100) (Staff Only) / Clear Messages')
@@ -1395,7 +1966,8 @@ const commands = [
         .setMaxValue(100)
     )
     .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageMessages)
-    .setDMPermission(false),
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall)
+    .setContexts(InteractionContextType.Guild),
   new SlashCommandBuilder()
     .setName('kiemtra')
     .setDescription('Tra cứu mã đơn hàng hoặc kiểm tra quyền hạn thành viên / Check status')
@@ -1410,6 +1982,20 @@ const commands = [
         .setDescription('Thành viên cần kiểm tra role & quyền lợi / Member to check')
         .setRequired(false)
     )
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall, ApplicationIntegrationType.UserInstall)
+    .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel),
+
+  // 2. CONTEXT MENU COMMANDS (User & Message Context Menus)
+  new ContextMenuCommandBuilder()
+    .setName('Tra cứu khách hàng / User Info')
+    .setType(ApplicationCommandType.User)
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall, ApplicationIntegrationType.UserInstall)
+    .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel),
+  new ContextMenuCommandBuilder()
+    .setName('Báo cáo hỗ trợ / Report Support')
+    .setType(ApplicationCommandType.Message)
+    .setIntegrationTypes(ApplicationIntegrationType.GuildInstall, ApplicationIntegrationType.UserInstall)
+    .setContexts(InteractionContextType.Guild, InteractionContextType.BotDM, InteractionContextType.PrivateChannel)
 ].map(cmd => cmd.toJSON());
 
 async function registerCommands(clientId) {
@@ -1437,39 +2023,112 @@ async function registerCommands(clientId) {
   }
 }
 
-// Presence Rotation List & Timer Handle
-const ACTIVITIES = [
-  { name: 'LS STUDIO • Plugins & AI Services ⚡', type: ActivityType.Watching },
-  { name: '🛒 /stk • MBBank VietQR 24/7', type: ActivityType.Playing },
-  { name: '🛡️ LS-AntiCheat & AI Accounts', type: ActivityType.Listening },
-  { name: '💬 Tickets & Customer Support', type: ActivityType.Watching }
-];
+// =========================================================================
+// 3.1. DYNAMIC ACTIVITY PRESENCE ROTATION & BILINGUAL STATUS
+// =========================================================================
+const ACTIVITIES = Object.freeze([
+  Object.freeze({
+    name: 'LS STUDIO • Plugins & AI Services ⚡',
+    type: ActivityType.Watching,
+    state: 'Dịch vụ Minecraft & AI bản quyền 24/7 / Official Store'
+  }),
+  Object.freeze({
+    name: '🛒 /stk • MBBank VietQR 24/7',
+    type: ActivityType.Playing,
+    state: 'Nạp tiền tự động qua VietQR / Auto Instant Payment'
+  }),
+  Object.freeze({
+    name: '🛡️ LS-AntiCheat • Top Security & Speed',
+    type: ActivityType.Competing,
+    state: 'Bảo vệ máy chủ tối đa / High Performance Security'
+  }),
+  Object.freeze({
+    name: '💬 /help • 24/7 Bilingual Customer Support',
+    type: ActivityType.Listening,
+    state: 'Hỗ trợ kỹ thuật & giải đáp thắc mắc / Help & Inquiries'
+  }),
+  Object.freeze({
+    name: '⚡ /kiemtra • Order Status & VIP Rank',
+    type: ActivityType.Watching,
+    state: 'Tra cứu đơn hàng & quyền lợi thành viên / Check Orders'
+  }),
+  Object.freeze({
+    name: '💎 LS Studio VIP Club',
+    type: ActivityType.Custom,
+    state: 'Giao hàng tự động & Hỗ trợ trọn đời / Auto Delivery'
+  })
+]);
 
 let activityInterval = null;
+let currentActivityIndex = 0;
+
+/**
+ * Cập nhật trạng thái xoay tua (Presence Rotation) cho Bot
+ */
+function rotateBotActivity(targetClient = client, forcedIndex = null) {
+  try {
+    if (!targetClient?.user || typeof targetClient.user.setPresence !== 'function') {
+      return { success: false, reason: 'Client or client.user not ready' };
+    }
+    const idx = forcedIndex !== null && !isNaN(forcedIndex)
+      ? Math.abs(Math.floor(forcedIndex)) % ACTIVITIES.length
+      : currentActivityIndex;
+
+    const act = ACTIVITIES[idx];
+    const presencePayload = {
+      activities: [{
+        name: act.name,
+        type: act.type,
+        ...(act.state ? { state: act.state } : {})
+      }],
+      status: 'online'
+    };
+
+    targetClient.user.setPresence(presencePayload);
+    currentActivityIndex = (idx + 1) % ACTIVITIES.length;
+    return { success: true, index: idx, activity: act, presence: presencePayload };
+  } catch (err) {
+    console.error('⚠️ [Presence Error] Lỗi cập nhật Presence:', err.message || err);
+    return { success: false, error: err };
+  }
+}
+
+/**
+ * Bắt đầu chu trình xoay tua Presence tự động
+ */
+function startActivityRotation(targetClient = client, intervalMs = 25000) {
+  stopActivityRotation();
+  rotateBotActivity(targetClient);
+  activityInterval = setInterval(() => {
+    rotateBotActivity(targetClient);
+  }, intervalMs);
+  if (activityInterval?.unref) {
+    activityInterval.unref();
+  }
+  return activityInterval;
+}
+
+/**
+ * Dừng chu trình xoay tua Presence
+ */
+function stopActivityRotation() {
+  if (activityInterval) {
+    clearInterval(activityInterval);
+    activityInterval = null;
+  }
+}
+
+function getCurrentActivityIndex() {
+  return currentActivityIndex;
+}
 
 client.once(Events.ClientReady, async (readyClient) => {
   console.log(`🤖 LS STUDIO BOT ONLINE: ${readyClient.user.tag}`);
+  gatewayHealthMetrics.readyCount++;
+  gatewayHealthMetrics.lastReadyAt = Date.now();
 
   // Thiết lập trạng thái hoạt động xoay tua (Presence Rotation)
-  let activityIndex = 0;
-  const updateActivity = () => {
-    try {
-      if (!readyClient?.user) return;
-      const act = ACTIVITIES[activityIndex];
-      readyClient.user.setPresence({
-        activities: [act],
-        status: 'online'
-      });
-      activityIndex = (activityIndex + 1) % ACTIVITIES.length;
-    } catch (err) {
-      console.error('Lỗi cập nhật Presence:', err);
-    }
-  };
-
-  updateActivity();
-  if (activityInterval) clearInterval(activityInterval);
-  activityInterval = setInterval(updateActivity, 25000);
-  if (activityInterval?.unref) activityInterval.unref();
+  startActivityRotation(readyClient, 25000);
 
   await registerCommands(readyClient.user.id);
 });
@@ -3645,7 +4304,156 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // 1. SLASH COMMANDS
+    // 1. CONTEXT MENU COMMANDS (User & Message Context Menus)
+    if (interaction.isUserContextMenuCommand?.()) {
+      const cooldownRemaining = getRateLimitRemaining(interaction.guildId, interaction.user.id, 3000);
+      if (cooldownRemaining > 0) {
+        return safeReply(interaction, {
+          content: `⏳ Bạn thao tác quá nhanh! Vui lòng đợi **${cooldownRemaining} giây** trước khi dùng lệnh tiếp theo.`,
+          ephemeral: true
+        });
+      }
+
+      const targetUser = interaction.targetUser || interaction.options?.getUser?.('user');
+      if (!targetUser) {
+        return safeReply(interaction, {
+          content: "❌ Không tìm thấy thông tin người dùng được chọn!",
+          ephemeral: true
+        });
+      }
+
+      // Kiểm tra nếu mục tiêu là Bot
+      if (targetUser.bot) {
+        const embedBot = new EmbedBuilder()
+          .setColor('#9E9E9E')
+          .setTitle(`🤖 THÔNG TIN BOT: ${targetUser.tag || targetUser.username}`)
+          .setThumbnail(typeof targetUser.displayAvatarURL === 'function' ? targetUser.displayAvatarURL({ dynamic: true }) : null)
+          .setDescription(
+            `• **Tài khoản:** <@${targetUser.id}> (\`${targetUser.id}\`)\n` +
+            `• **Loại tài khoản:** 🤖 Discord Bot / Ứng dụng tích hợp\n` +
+            `• **Ngày tạo bot:** <t:${Math.floor((targetUser.createdTimestamp || Date.now()) / 1000)}:F> (<t:${Math.floor((targetUser.createdTimestamp || Date.now()) / 1000)}:R>)\n` +
+            `• **Ghi chú:** Không áp dụng tra cứu đơn hàng & quyền lợi khách hàng cho tài khoản Bot.`
+          )
+          .setFooter({ text: 'LS STUDIO • Member & Bot Verification' })
+          .setTimestamp();
+        return safeReply(interaction, { embeds: [embedBot], ephemeral: true });
+      }
+
+      let member = interaction.targetMember || null;
+      if (!member && interaction.guild) {
+        member = await interaction.guild.members.fetch(targetUser.id).catch(() => null);
+      }
+
+      const isCustomer = member?.roles?.cache ? member.roles.cache.some(r => r.name.includes("Khách Hàng")) : false;
+      const isVIP = member?.roles?.cache ? member.roles.cache.some(r => r.name.includes("VIP")) : false;
+      const isStaff = member ? isStaffMember(member) : false;
+      const highestRole = member?.roles?.highest;
+
+      // Tìm đơn hàng liên quan của user trong activeOrderCodes
+      const userOrders = [];
+      for (const [code, info] of activeOrderCodes.entries()) {
+        if (info?.buyerId === targetUser.id) {
+          const isApproved = approvedOrderCodes.has(code);
+          const isProcessing = processingApprovals.has(code);
+          const pkg = info?.pkgKey ? getPackage(info.pkgKey) : null;
+          let st = '⏳ Chờ TT';
+          if (isApproved) st = '✅ Đã duyệt';
+          else if (isProcessing) st = '🔄 Đang duyệt';
+          userOrders.push(`• \`${code}\`: **${st}** (${pkg?.name || 'Gói tùy chọn'})`);
+        }
+      }
+
+      const embedUser = new EmbedBuilder()
+        .setColor(isVIP ? '#E040FB' : (isCustomer ? '#00E676' : (isStaff ? '#FFD700' : '#00E5FF')))
+        .setTitle(`👤 THÔNG TIN KHÁCH HÀNG: ${targetUser.tag || targetUser.username}`)
+        .setThumbnail(typeof targetUser.displayAvatarURL === 'function' ? targetUser.displayAvatarURL({ dynamic: true }) : null)
+        .setDescription(
+          `• **Thành viên:** <@${targetUser.id}> (\`${targetUser.id}\`)\n` +
+          (highestRole ? `• **Vai trò cao nhất:** <@&${highestRole.id}>\n` : '') +
+          `• **Khách hàng (Buyer):** ${isCustomer ? '✅ Đã kích hoạt' : '❌ Chưa có'}\n` +
+          `• **VIP Customer:** ${isVIP ? '💎 Đã kích hoạt' : '❌ Chưa có'}\n` +
+          `• **Ban Quản Trị (Staff):** ${isStaff ? '🛡️ Có' : '❌ Không'}\n` +
+          `• **Tạo tài khoản Discord:** <t:${Math.floor((targetUser.createdTimestamp || Date.now()) / 1000)}:F> (<t:${Math.floor((targetUser.createdTimestamp || Date.now()) / 1000)}:R>)\n` +
+          (member?.joinedTimestamp ? `• **Tham gia server:** <t:${Math.floor(member.joinedTimestamp / 1000)}:F> (<t:${Math.floor(member.joinedTimestamp / 1000)}:R>)\n` : '') +
+          `\n**📦 ĐƠN HÀNG TRONG PHIÊN:**\n` +
+          (userOrders.length > 0 ? userOrders.slice(0, 5).join('\n') : '• *Không có đơn hàng nào ghi nhận trong phiên hiện tại.*')
+        )
+        .setFooter({ text: 'LS STUDIO • Customer Verification' })
+        .setTimestamp();
+
+      return safeReply(interaction, { embeds: [embedUser], ephemeral: true });
+    }
+
+    if (interaction.isMessageContextMenuCommand?.()) {
+      const cooldownRemaining = getRateLimitRemaining(interaction.guildId, interaction.user.id, 4000);
+      if (cooldownRemaining > 0) {
+        return safeReply(interaction, {
+          content: `⏳ Bạn thao tác quá nhanh! Vui lòng đợi **${cooldownRemaining} giây** trước khi gửi báo cáo tiếp theo.`,
+          ephemeral: true
+        });
+      }
+
+      const targetMsg = interaction.targetMessage;
+      if (!targetMsg) {
+        return safeReply(interaction, {
+          content: "❌ Không tìm thấy thông tin tin nhắn được chọn để báo cáo!",
+          ephemeral: true
+        });
+      }
+
+      // Chuyển tiếp báo cáo vào kênh nội bộ staff nếu có
+      if (interaction.guild?.channels?.cache) {
+        const staffChannel = interaction.guild.channels.cache.find(c => 
+          c.name && (
+            c.name.includes('nội-bộ-staff') || 
+            c.name.includes('nhật-ký') || 
+            c.name.includes('mod-log') ||
+            c.name.includes('báo-cáo')
+          )
+        );
+        if (staffChannel && typeof staffChannel.send === 'function') {
+          const reportEmbed = new EmbedBuilder()
+            .setColor('#FF3D00')
+            .setTitle('🚨 BÁO CÁO TIN NHẮN / MESSAGE REPORT')
+            .setDescription(
+              `• **Người báo cáo:** <@${interaction.user.id}> (\`${interaction.user.tag || interaction.user.username}\`)\n` +
+              `• **Tác giả tin nhắn:** ${targetMsg.author ? `<@${targetMsg.author.id}> (\`${targetMsg.author.tag || targetMsg.author.username}\`)` : 'Không rõ'}\n` +
+              `• **Kênh:** <#${targetMsg.channelId || interaction.channelId}>\n` +
+              (targetMsg.url ? `• **Liên kết:** [🔗 Nhảy đến tin nhắn](${targetMsg.url})\n` : '') +
+              `• **Thời gian gửi:** <t:${Math.floor((targetMsg.createdTimestamp || Date.now()) / 1000)}:F>\n\n` +
+              `**💬 NỘI DUNG TIN NHẮN ĐƯỢC BÁO CÁO:**\n` +
+              `> ${sanitizeMarkdownForEmbed(redactSensitiveData(targetMsg.content || '*[Tin nhắn trống hoặc chỉ có file/embed]*'), 1000)}`
+            )
+            .setFooter({ text: `Report ID: ${interaction.id}` })
+            .setTimestamp();
+
+          await staffChannel.send({ embeds: [reportEmbed] }).catch(() => {});
+        }
+      }
+
+      const btnRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('ticket_support')
+          .setLabel('🛠️ Mở Ticket Hỗ Trợ / Open Ticket')
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      const ackEmbed = new EmbedBuilder()
+        .setColor('#00E676')
+        .setTitle('✅ ĐÃ GỬI BÁO CÁO THÀNH CÔNG / REPORT SUBMITTED')
+        .setDescription(
+          `Cảm ơn bạn <@${interaction.user.id}>! Báo cáo về tin nhắn của ${targetMsg.author ? `<@${targetMsg.author.id}>` : 'thành viên'} đã được chuyển đến **Ban Quản Trị LS STUDIO** để xem xét và xử lý.\n\n` +
+          `• **Mã báo cáo:** \`RPT-${interaction.id.slice(-6).toUpperCase()}\`\n` +
+          `• **Nội dung:** \`${sanitizeMarkdownForEmbed(redactSensitiveData(targetMsg.content || '*[Đính kèm/Embed]*'), 100)}\`\n\n` +
+          `*Nếu bạn cần trao đổi trực tiếp hoặc hỗ trợ kỹ thuật, vui lòng bấm nút **[🛠️ Mở Ticket Hỗ Trợ]** bên dưới để tạo phiên làm việc riêng.*`
+        )
+        .setFooter({ text: 'LS STUDIO • Fast Support & Security 24/7' })
+        .setTimestamp();
+
+      return safeReply(interaction, { embeds: [ackEmbed], components: [btnRow], ephemeral: true });
+    }
+
+    // 2. SLASH COMMANDS
     if (interaction.isChatInputCommand?.()) {
       const { commandName } = interaction;
 
@@ -3931,6 +4739,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           });
         }
 
+        const readiness = validateAppDirectoryReadiness();
         const helpEmbed = new EmbedBuilder()
           .setColor('#00E676')
           .setTitle('📖 HƯỚNG DẪN SỬ DỤNG BOT & LỆNH / LS STUDIO HELP GUIDE')
@@ -3938,6 +4747,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             `Chào mừng bạn đến với **LS STUDIO**! Dưới đây là danh sách các lệnh Slash Command khả dụng:\n\n` +
             `**🌐 LỆNH DÀNH CHO THÀNH VIÊN (PUBLIC COMMANDS):**\n` +
             `• \`/help\` — Xem menu hướng dẫn và danh sách lệnh bot này.\n` +
+            `• \`/invite\` — Lấy link mời Bot, tính toán Permissions Bitfield & OAuth2 Discovery.\n` +
             `• \`/ping\` — Kiểm tra độ trễ WebSocket và API latency của bot.\n` +
             `• \`/stk\` — Nhận thông tin tài khoản ngân hàng MBBank & mã VietQR 24/7.\n` +
             `• \`/feedback\` — Mở biểu mẫu gửi đánh giá, xếp hạng sao & góp ý dịch vụ.\n` +
@@ -3946,12 +4756,83 @@ client.on(Events.InteractionCreate, async (interaction) => {
             `• \`/khachhang\` \`@user\` — Cấp role Khách Hàng (Buyer) cho người mua.\n` +
             `• \`/transcript\` — Xuất tệp nhật ký tin nhắn kênh ticket hiện tại.\n` +
             `• \`/clearmessages\` \`amount\` — Xóa nhanh số lượng tin nhắn trong kênh (1-100).\n\n` +
+            `**🖱️ CONTEXT MENU APPS (CHUỘT PHẢI / APPS MENU):**\n` +
+            `• **User App:** \`Tra cứu khách hàng / User Info\` — Tra cứu nhanh role, quyền VIP & đơn hàng của thành viên.\n` +
+            `• **Message App:** \`Báo cáo hỗ trợ / Report Support\` — Báo cáo tin nhắn nhanh đến Staff & mở ticket hỗ trợ.\n\n` +
+            `**🔍 DISCOVERY & HỖ TRỢ CHÍNH THỨC:**\n` +
+            `• **Mô tả:** ${APP_DIRECTORY_METADATA.BOT_DESCRIPTION}\n` +
+            `• **Máy chủ hỗ trợ:** [Support Server](${APP_DIRECTORY_METADATA.SUPPORT_SERVER_URL})\n` +
+            `• **Điều khoản & Bảo mật:** [Terms of Service](${APP_DIRECTORY_METADATA.TERMS_OF_SERVICE_URL}) • [Privacy Policy](${APP_DIRECTORY_METADATA.PRIVACY_POLICY_URL})\n` +
+            `• **App Directory Readiness:** ${readiness.ready ? '✅ Đã sẵn sàng công khai' : '⚠️ Đang cập nhật'}\n\n` +
             `*Quý khách cần hỗ trợ hoặc mua plugin vui lòng mở ticket tại các kênh bán hàng!*`
           )
           .setFooter({ text: 'LS STUDIO • Minecraft & AI Solutions 24/7' })
           .setTimestamp();
 
         return safeReply(interaction, { embeds: [helpEmbed], ephemeral: true });
+      }
+
+      // /invite (Tạo link mời Bot, Bitfield Calculator & App Directory Discovery)
+      if (commandName === 'invite') {
+        const cooldownRemaining = getRateLimitRemaining(interaction.guildId, interaction.user.id, 3000);
+        if (cooldownRemaining > 0) {
+          return safeReply(interaction, {
+            content: `⏳ Bạn thao tác quá nhanh! Vui lòng đợi **${cooldownRemaining} giây** trước khi dùng lệnh tiếp theo.`,
+            ephemeral: true
+          });
+        }
+
+        const clientId = client?.user?.id || process.env.CLIENT_ID || process.env.DISCORD_CLIENT_ID || '1214041776483471391';
+        const bitfieldData = calculatePermissionsBitfield(REQUIRED_BOT_PERMISSIONS);
+        const guildInviteUrl = generateOAuth2Invite({ clientId, integrationType: 0 });
+        const userInstallInviteUrl = generateOAuth2Invite({ clientId, integrationType: 1, scopes: ['applications.commands'] });
+        const readiness = validateAppDirectoryReadiness();
+
+        const inviteEmbed = new EmbedBuilder()
+          .setColor('#00E676')
+          .setTitle('🤖 MỜI BOT LS STUDIO & THÔNG TIN OAUTH2 DISCOVERY')
+          .setDescription(
+            `Cảm ơn bạn đã tin tưởng và sử dụng **LS STUDIO Bot**!\n` +
+            `Dưới đây là liên kết mời Bot chính thức, thông số phân quyền Bitfield và kiểm tra tính sẵn sàng App Directory:\n\n` +
+            `**📋 THÔNG SỐ OAUTH2 & PERMISSIONS BITFIELD:**\n` +
+            `• **Client ID:** \`${clientId}\`\n` +
+            `• **Permission Bitfield (Integer):** \`${bitfieldData.bitfieldString}\`\n` +
+            `• **Scopes yêu cầu:** \`bot\`, \`applications.commands\`\n` +
+            `• **Các quyền hạn cốt lõi:**\n` +
+            `  - 💬 \`SendMessages\` (Gửi tin nhắn)\n` +
+            `  - 🔗 \`EmbedLinks\` (Gửi nhúng Embed)\n` +
+            `  - 📁 \`AttachFiles\` (Đính kèm tệp / QR)\n` +
+            `  - 🛡️ \`ManageRoles\` (Cấp vai trò tự động)\n` +
+            `  - 📁 \`ManageChannels\` (Tạo kênh Ticket)\n` +
+            `  - 📜 \`ReadMessageHistory\` (Đọc lịch sử tin nhắn)\n` +
+            `  - 😀 \`UseExternalEmojis\` (Sử dụng biểu cảm ngoài)\n\n` +
+            `**🚀 HỖ TRỢ INSTALLATION CONTEXTS (MODERN DISCORD SPECS):**\n` +
+            `• 🏰 **Guild Install (Server):** Khả dụng cho toàn bộ thành viên trong máy chủ.\n` +
+            `• 👤 **User Install (Tài khoản):** Cài đặt vào tài khoản cá nhân, gọi lệnh ở mọi nơi (DM/Group DM/Server).\n\n` +
+            `**🔍 APP DIRECTORY & DISCOVERY STATUS:**\n` +
+            `• **Trạng thái:** ${readiness.ready ? '✅ **Đạt chuẩn Discovery (100% Ready)**' : `⚠️ **Cần hoàn thiện (${readiness.score}/${readiness.maxScore})**`}\n` +
+            `• **Support Server:** [Tham gia hỗ trợ](${APP_DIRECTORY_METADATA.SUPPORT_SERVER_URL})\n` +
+            `• **Chính sách & Điều khoản:** [Terms](${APP_DIRECTORY_METADATA.TERMS_OF_SERVICE_URL}) • [Privacy](${APP_DIRECTORY_METADATA.PRIVACY_POLICY_URL})`
+          )
+          .setFooter({ text: 'LS STUDIO • OAuth2 & Permissions Bitfield Engine' })
+          .setTimestamp();
+
+        const btnRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setLabel('🏰 Mời vào Server (Guild Install)')
+            .setStyle(ButtonStyle.Link)
+            .setURL(guildInviteUrl),
+          new ButtonBuilder()
+            .setLabel('👤 Cài vào Tài Khoản (User Install)')
+            .setStyle(ButtonStyle.Link)
+            .setURL(userInstallInviteUrl),
+          new ButtonBuilder()
+            .setLabel('💬 Support Server')
+            .setStyle(ButtonStyle.Link)
+            .setURL(APP_DIRECTORY_METADATA.SUPPORT_SERVER_URL)
+        );
+
+        return safeReply(interaction, { embeds: [inviteEmbed], components: [btnRow], ephemeral: true });
       }
 
       // /clearmessages (Staff Only - Xóa hàng loạt tin nhắn)
@@ -5215,10 +6096,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 // =========================================================================
 function handleGracefulShutdown(signal) {
   console.log(`🛑 [Graceful Shutdown] Nhận tín hiệu ${signal}. Đang dọn dẹp tài nguyên và ngắt kết nối an toàn...`);
-  if (activityInterval) {
-    clearInterval(activityInterval);
-    activityInterval = null;
-  }
+  stopActivityRotation();
   if (cleanupInterval) {
     clearInterval(cleanupInterval);
     cleanupInterval = null;
@@ -5344,6 +6222,25 @@ module.exports = {
   safeShowModal,
   commands,
   registerCommands,
-  handleGracefulShutdown
+  REQUIRED_BOT_PERMISSIONS,
+  APP_DIRECTORY_METADATA,
+  calculatePermissionsBitfield,
+  validateAppDirectoryReadiness,
+  generateOAuth2Invite,
+  handleGracefulShutdown,
+  // Gateway Lifecycle, Activity Presence & REST API Resilience
+  GATEWAY_CLOSE_CODES,
+  classifyGatewayCloseCode,
+  gatewayHealthMetrics,
+  getGatewayHealthMetrics,
+  ACTIVITIES,
+  rotateBotActivity,
+  startActivityRotation,
+  stopActivityRotation,
+  getCurrentActivityIndex,
+  parseDiscordRateLimitHeaders,
+  calculateRateLimitBackoff,
+  restRateLimitMetrics,
+  getRestRateLimitMetrics
 };
 

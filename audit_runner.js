@@ -13,7 +13,7 @@ const suites = [
   { name: 'Memory & Lifecycle Audit', script: 'test_memory_audit.js' },
   { name: 'Financial & Payment Audit', script: 'test_financial_audit.js' },
   { name: 'Transcript & Security Audit', script: 'test_transcript_audit.js' },
-  { name: 'Full Mock Test Harness (137 Suites)', script: 'test_harness.js' }
+  { name: 'Full Mock Test Harness (169 Tests / 23 Suites)', script: 'test_harness.js' }
 ];
 
 console.log('================================================================================');

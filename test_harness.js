@@ -74,11 +74,29 @@ const {
   safeShowModal,
   commands,
   registerCommands,
-  handleGracefulShutdown
+  REQUIRED_BOT_PERMISSIONS,
+  APP_DIRECTORY_METADATA,
+  calculatePermissionsBitfield,
+  validateAppDirectoryReadiness,
+  generateOAuth2Invite,
+  handleGracefulShutdown,
+  GATEWAY_CLOSE_CODES,
+  classifyGatewayCloseCode,
+  gatewayHealthMetrics,
+  getGatewayHealthMetrics,
+  ACTIVITIES,
+  rotateBotActivity,
+  startActivityRotation,
+  stopActivityRotation,
+  getCurrentActivityIndex,
+  parseDiscordRateLimitHeaders,
+  calculateRateLimitBackoff,
+  restRateLimitMetrics,
+  getRestRateLimitMetrics
 } = require('./bot.js');
 
 const { runServerSetup } = require('./setup_server.js');
-const { PermissionsBitField, ChannelType, OverwriteType, ButtonStyle, Events, Collection, AttachmentBuilder } = require('discord.js');
+const { PermissionsBitField, ChannelType, OverwriteType, ButtonStyle, Events, Collection, AttachmentBuilder, ApplicationIntegrationType, InteractionContextType, ActivityType, RESTEvents } = require('discord.js');
 
 // ============================================================================
 // TEST RUNNER INFRASTRUCTURE
@@ -106,12 +124,18 @@ function assert(condition, message) {
 }
 
 function assertEqual(actual, expected, message) {
+  if (Array.isArray(actual) && Array.isArray(expected)) {
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      throw new Error(`Assertion Failed [${message}]: Expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+    }
+    return;
+  }
   if (actual !== expected) {
     throw new Error(`Assertion Failed [${message}]: Expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
   }
 }
 
-async function waitForInteraction(interaction, timeoutMs = 2000) {
+async function waitForInteraction(interaction, timeoutMs = 4000) {
   const start = Date.now();
   while (!interaction._state.replied && Date.now() - start < timeoutMs) {
     await new Promise(r => setTimeout(r, 10));
@@ -389,12 +413,29 @@ function createMockInteraction({
   user = null,
   member = null,
   guild = undefined,
-  channel = undefined
+  channel = undefined,
+  targetUser = null,
+  targetMember = null,
+  targetMessage = null,
+  targetId = null,
+  commandType = null
 } = {}) {
   const u = user || createMockUser();
   const g = guild === null ? null : (guild || createMockGuild());
   const m = member === null ? null : (member || (g ? createMockGuildMember({ user: u, guild: g }) : null));
   const ch = channel === null ? null : (channel || (g ? createMockChannel({ guild: g }) : null));
+
+  const tUser = targetUser || (type === 'user_context' ? options.user || createMockUser() : null);
+  const tMember = targetMember || (tUser && g ? g.members.cache.get(tUser.id) || createMockGuildMember({ user: tUser, guild: g }) : null);
+  const tMessage = targetMessage || (type === 'message_context' ? {
+    id: 'msg_' + Math.random().toString(36).substring(2, 9),
+    channel: ch,
+    channelId: ch?.id || 'ch_123',
+    content: options.content || 'Nội dung tin nhắn thử nghiệm',
+    author: options.author || createMockUser(),
+    createdTimestamp: Date.now(),
+    url: `https://discord.com/channels/${g?.id || '123'}/${ch?.id || '456'}/msg_789`
+  } : null);
 
   const state = {
     replied: false,
@@ -419,8 +460,16 @@ function createMockInteraction({
     channelId: ch?.id || null,
     customId,
     commandName,
+    commandType: commandType || (type === 'user_context' ? 2 : (type === 'message_context' ? 3 : (type === 'command' ? 1 : null))),
+    targetUser: tUser,
+    targetMember: tMember,
+    targetMessage: tMessage,
+    targetId: targetId || tUser?.id || tMessage?.id || null,
     values,
     isChatInputCommand: () => type === 'command',
+    isContextMenuCommand: () => type === 'user_context' || type === 'message_context' || type === 'context_menu',
+    isUserContextMenuCommand: () => type === 'user_context',
+    isMessageContextMenuCommand: () => type === 'message_context',
     isButton: () => type === 'button',
     isStringSelectMenu: () => type === 'select',
     isModalSubmit: () => type === 'modal',
@@ -998,30 +1047,38 @@ async function runAllTests() {
     assertEqual(Array.isArray(interaction._state.respondedAutocomplete), true, "Autocomplete must respond with array");
   });
 
-  await runTest("Suite 4", "Discord Slash Commands Specifications Audit (Names, Descriptions, Types)", async () => {
+  await runTest("Suite 4", "Discord Slash & Context Menu Commands Specifications Audit (Names, Descriptions, Types)", async () => {
     assert(Array.isArray(commands), "commands must be an array");
-    assert(commands.length >= 8, `commands must contain at least 8 commands (got ${commands.length})`);
+    assert(commands.length >= 10, `commands must contain at least 10 commands (8 slash + 2 context menus) (got ${commands.length})`);
 
-    const DISCORD_NAME_REGEX = /^[-_\p{L}\p{N}]{1,32}$/u;
+    const DISCORD_SLASH_NAME_REGEX = /^[-_\p{L}\p{N}]{1,32}$/u;
 
     for (const cmd of commands) {
-      // 1. Name verification
       assert(cmd.name && typeof cmd.name === 'string', `Command must have a name: ${JSON.stringify(cmd)}`);
-      assert(cmd.name === cmd.name.toLowerCase(), `Command name must be lowercase: ${cmd.name}`);
       assert(cmd.name.length >= 1 && cmd.name.length <= 32, `Command name length must be 1-32: ${cmd.name}`);
-      assert(DISCORD_NAME_REGEX.test(cmd.name), `Command name must match regex: ${cmd.name}`);
 
-      // 2. Description verification
+      // 1. Context Menu Commands (User = 2, Message = 3)
+      if (cmd.type === 2 || cmd.type === 3) {
+        assert(typeof cmd.type === 'number' && (cmd.type === 2 || cmd.type === 3), `Valid context command type: ${cmd.type}`);
+        assert(!cmd.description, `Context menu commands must not have description: ${cmd.name}`);
+        continue;
+      }
+
+      // 2. Slash Commands (ChatInput = 1 or undefined)
+      assert(cmd.name === cmd.name.toLowerCase(), `Slash command name must be lowercase: ${cmd.name}`);
+      assert(DISCORD_SLASH_NAME_REGEX.test(cmd.name), `Slash command name must match regex: ${cmd.name}`);
+
+      // Description verification
       assert(cmd.description && typeof cmd.description === 'string', `Command ${cmd.name} must have a description`);
       assert(cmd.description.length >= 1 && cmd.description.length <= 100, `Command ${cmd.name} description length must be 1-100 (got ${cmd.description.length})`);
 
-      // 3. Options verification
+      // Options verification
       if (cmd.options && Array.isArray(cmd.options)) {
         for (const opt of cmd.options) {
           assert(opt.name && typeof opt.name === 'string', `Option in ${cmd.name} must have name`);
           assert(opt.name === opt.name.toLowerCase(), `Option name in ${cmd.name} must be lowercase: ${opt.name}`);
           assert(opt.name.length >= 1 && opt.name.length <= 32, `Option name in ${cmd.name} length 1-32: ${opt.name}`);
-          assert(DISCORD_NAME_REGEX.test(opt.name), `Option name in ${cmd.name} must match regex: ${opt.name}`);
+          assert(DISCORD_SLASH_NAME_REGEX.test(opt.name), `Option name in ${cmd.name} must match regex: ${opt.name}`);
 
           assert(opt.description && typeof opt.description === 'string', `Option ${opt.name} in ${cmd.name} must have description`);
           assert(opt.description.length >= 1 && opt.description.length <= 100, `Option ${opt.name} description length 1-100 (got ${opt.description.length})`);
@@ -1042,6 +1099,35 @@ async function runAllTests() {
     const embed = interaction._state.replyPayload.embeds[0];
     assert(embed.data.title.includes("HƯỚNG DẪN"), "Title contains help guide");
     assert(embed.data.description.includes("/ping") && embed.data.description.includes("/stk") && embed.data.description.includes("/khachhang"), "Description lists all slash commands");
+    assert(embed.data.description.includes("/invite"), "Description includes /invite command");
+    assert(embed.data.description.includes(APP_DIRECTORY_METADATA.SUPPORT_SERVER_URL), "Embed includes support server URL");
+    assert(embed.data.description.includes(APP_DIRECTORY_METADATA.TERMS_OF_SERVICE_URL), "Embed includes Terms of Service URL");
+    assert(embed.data.description.includes(APP_DIRECTORY_METADATA.PRIVACY_POLICY_URL), "Embed includes Privacy Policy URL");
+  });
+
+  await runTest("Suite 4", "/invite slash command response & button generation", async () => {
+    const interaction = createMockInteraction({ type: 'command', commandName: 'invite' });
+    botClient.emit(Events.InteractionCreate, interaction);
+    await waitForInteraction(interaction);
+
+    assert(interaction._state.replied, "Must reply to /invite");
+    assert(interaction._state.ephemeral, "/invite must be ephemeral");
+    assert(interaction._state.replyPayload.embeds.length > 0, "Must contain embed");
+    const embed = interaction._state.replyPayload.embeds[0];
+    assert(embed.data.title.includes("MỜI BOT"), "Title contains invite banner");
+    assert(embed.data.description.includes("268814352"), "Description contains exact bitfield 268814352");
+    assert(embed.data.description.includes("Guild Install") && embed.data.description.includes("User Install"), "Description explains installation contexts");
+    assert(embed.data.description.includes("SendMessages") && embed.data.description.includes("ManageRoles"), "Description lists core permissions");
+    
+    assert(interaction._state.replyPayload.components.length > 0, "Must contain ActionRow with buttons");
+    const row = interaction._state.replyPayload.components[0];
+    assert(row.components.length === 3, `Must have 3 link buttons (got ${row.components.length})`);
+    assert(row.components[0].data.style === ButtonStyle.Link, "Button 1 must be Link style");
+    assert(row.components[0].data.url.includes("discord.com/oauth2/authorize"), "Button 1 contains OAuth2 authorize URL");
+    assert(row.components[0].data.url.includes("permissions=268814352"), "Button 1 contains exact permissions bitfield");
+    assert(row.components[0].data.url.includes("integration_type=0"), "Button 1 specifies guild installation context");
+    assert(row.components[1].data.url.includes("integration_type=1"), "Button 2 specifies user installation context");
+    assert(row.components[2].data.url === APP_DIRECTORY_METADATA.SUPPORT_SERVER_URL, "Button 3 links to support server");
   });
 
   await runTest("Suite 4", "/clearmessages: Non-staff permission rejection", async () => {
@@ -1188,6 +1274,228 @@ async function runAllTests() {
 
     assert(Array.isArray(intAuto._state.respondedAutocomplete), "Responds with choices array");
     assert(intAuto._state.respondedAutocomplete.some(c => c.value === order1), "Includes matching active order code");
+  });
+
+  // ============================================================================
+  // SUITE 4.5: Context Menu Commands (User & Message Context Menus)
+  // ============================================================================
+  console.log("\n🖱️ [SUITE 4.5: Discord Context Menu Commands (User & Message)]");
+
+  await runTest("Suite 4.5", "User Context Menu: 'Tra cứu khách hàng / User Info' on regular member", async () => {
+    const guild = createMockGuild();
+    const callerUser = createMockUser({ username: 'staff_inspector' });
+    const targetUser = createMockUser({ username: 'normal_member_check' });
+    const targetMember = createMockGuildMember({ user: targetUser, guild });
+    guild.members.cache.set(targetUser.id, targetMember);
+
+    const interaction = createMockInteraction({
+      type: 'user_context',
+      commandName: 'Tra cứu khách hàng / User Info',
+      user: callerUser,
+      targetUser,
+      targetMember,
+      guild
+    });
+
+    botClient.emit(Events.InteractionCreate, interaction);
+    await waitForInteraction(interaction);
+
+    assert(interaction._state.replied, "Must reply to User Context Menu");
+    assert(interaction._state.ephemeral, "User Context Menu must be ephemeral");
+    assert(interaction._state.replyPayload.embeds.length > 0, "Returns user embed");
+    const embed = interaction._state.replyPayload.embeds[0];
+    assert(embed.data.title.includes(targetUser.tag), "Embed title contains target user tag");
+    assert(embed.data.description.includes("Khách hàng (Buyer)") && embed.data.description.includes("Chưa có"), "Shows non-customer status");
+  });
+
+  await runTest("Suite 4.5", "User Context Menu: 'Tra cứu khách hàng / User Info' on Customer with active orders", async () => {
+    const guild = createMockGuild();
+    const customerRole = createMockRole({ name: "🛒・Khách Hàng (Buyer)", position: 10 });
+    const vipRole = createMockRole({ name: "⭐・Khách Hàng VIP", position: 15 });
+    guild.roles.cache.set(customerRole.id, customerRole);
+    guild.roles.cache.set(vipRole.id, vipRole);
+
+    const buyerUser = createMockUser({ username: 'vip_buyer_user' });
+    const buyerMember = createMockMemberWithRole(buyerUser, [customerRole, vipRole], guild);
+    guild.members.cache.set(buyerUser.id, buyerMember);
+
+    const testOrderCode = 'LS889900';
+    activeOrderCodes.set(testOrderCode, {
+      buyerId: buyerUser.id,
+      pkgKey: 'google_ai_sakayori_pro',
+      guildId: guild.id,
+      createdAt: Date.now()
+    });
+
+    const interaction = createMockInteraction({
+      type: 'user_context',
+      commandName: 'Tra cứu khách hàng / User Info',
+      targetUser: buyerUser,
+      targetMember: buyerMember,
+      guild
+    });
+
+    botClient.emit(Events.InteractionCreate, interaction);
+    await waitForInteraction(interaction);
+
+    assert(interaction._state.replied, "Must reply");
+    assert(interaction._state.ephemeral, "Must be ephemeral");
+    const embed = interaction._state.replyPayload.embeds[0];
+    assert(embed.data.description.includes("Khách hàng (Buyer)") && embed.data.description.includes("Đã kích hoạt"), "Shows Buyer role active");
+    assert(embed.data.description.includes("VIP Customer") && embed.data.description.includes("Đã kích hoạt"), "Shows VIP role active");
+    assert(embed.data.description.includes(testOrderCode), "Shows active order code in user embed");
+  });
+
+  await runTest("Suite 4.5", "User Context Menu: Target is Bot account", async () => {
+    const guild = createMockGuild();
+    const botTarget = createMockUser({ username: 'helpful_bot', bot: true });
+
+    const interaction = createMockInteraction({
+      type: 'user_context',
+      commandName: 'Tra cứu khách hàng / User Info',
+      targetUser: botTarget,
+      guild
+    });
+
+    botClient.emit(Events.InteractionCreate, interaction);
+    await waitForInteraction(interaction);
+
+    assert(interaction._state.replied, "Must reply");
+    assert(interaction._state.ephemeral, "Must be ephemeral");
+    const embed = interaction._state.replyPayload.embeds[0];
+    assert(embed.data.title.includes("THÔNG TIN BOT"), "Title indicates bot info");
+    assert(embed.data.description.includes("Discord Bot / Ứng dụng tích hợp"), "Identifies as Discord Bot");
+  });
+
+  await runTest("Suite 4.5", "User Context Menu: Invocation in DM (no guild)", async () => {
+    const targetUser = createMockUser({ username: 'dm_user' });
+
+    const interaction = createMockInteraction({
+      type: 'user_context',
+      commandName: 'Tra cứu khách hàng / User Info',
+      targetUser,
+      guild: null
+    });
+
+    botClient.emit(Events.InteractionCreate, interaction);
+    await waitForInteraction(interaction);
+
+    assert(interaction._state.replied, "Must reply in DM");
+    assert(interaction._state.replyPayload.embeds.length > 0, "Returns embed without crashing in DM");
+  });
+
+  await runTest("Suite 4.5", "Message Context Menu: 'Báo cáo hỗ trợ / Report Support' forward to staff & ticket button", async () => {
+    const guild = createMockGuild();
+    const staffChannel = createMockChannel({ name: "💬・nội-bộ-staff", guild });
+    guild.channels.cache.set(staffChannel.id, staffChannel);
+
+    const reporterUser = createMockUser({ username: 'concerned_user' });
+    const msgAuthor = createMockUser({ username: 'violating_author' });
+    const textChannel = createMockChannel({ name: "💬・chat-chung", guild });
+
+    const mockMsg = {
+      id: 'msg_987654321',
+      channelId: textChannel.id,
+      channel: textChannel,
+      content: 'Cần hỗ trợ kiểm tra đơn hàng và cài đặt plugin trên Paper 1.20.4',
+      author: msgAuthor,
+      createdTimestamp: Date.now() - 60000,
+      url: `https://discord.com/channels/${guild.id}/${textChannel.id}/msg_987654321`
+    };
+
+    const interaction = createMockInteraction({
+      type: 'message_context',
+      commandName: 'Báo cáo hỗ trợ / Report Support',
+      user: reporterUser,
+      targetMessage: mockMsg,
+      guild,
+      channel: textChannel
+    });
+
+    botClient.emit(Events.InteractionCreate, interaction);
+    await waitForInteraction(interaction);
+
+    assert(interaction._state.replied, "Must reply to Message Context Menu");
+    assert(interaction._state.ephemeral, "Message Context Menu must be ephemeral");
+    assert(interaction._state.replyPayload.embeds.length > 0, "Returns report acknowledgment embed");
+    const ackEmbed = interaction._state.replyPayload.embeds[0];
+    assert(ackEmbed.data.title.includes("ĐÃ GỬI BÁO CÁO THÀNH CÔNG"), "Ack embed title confirms submission");
+
+    // Verify ActionRow button contains ticket_support
+    assert(interaction._state.replyPayload.components.length > 0, "Must include action button row");
+    const btn = interaction._state.replyPayload.components[0].components[0];
+    assertEqual(btn.data.custom_id, "ticket_support", "Includes ticket_support button for quick ticket opening");
+
+    // Verify staff log channel received report embed
+    assert(staffChannel.messages.cache.size > 0, "Staff internal channel received report");
+    const loggedMsg = Array.from(staffChannel.messages.cache.values())[0];
+    assert(loggedMsg.embeds.length > 0, "Logged message contains embed");
+    assert(loggedMsg.embeds[0].data.title.includes("BÁO CÁO TIN NHẮN"), "Staff embed contains report title");
+    assert(loggedMsg.embeds[0].data.description.includes(msgAuthor.id), "Staff embed mentions message author");
+    assert(loggedMsg.embeds[0].data.description.includes(reporterUser.id), "Staff embed mentions reporter");
+  });
+
+  await runTest("Suite 4.5", "Message Context Menu: Sensitive Discord token redaction in reported message", async () => {
+    const guild = createMockGuild();
+    const staffChannel = createMockChannel({ name: "💬・nội-bộ-staff", guild });
+    guild.channels.cache.set(staffChannel.id, staffChannel);
+
+    const reporterUser = createMockUser();
+    const leakedToken = ["MTM0NTY3", "ODkwMTIzNDU2Nzg5MA"].join('') + '.' + ["G12345", "abcdefghijklmnopqrstuvwxyz1234567890"].join('.');
+    const rawContent = `Lộ token bot nè: ${leakedToken} hãy thu hồi nhanh!`;
+
+    const mockMsg = {
+      id: 'msg_leaked_token',
+      channelId: 'ch_leak',
+      content: rawContent,
+      author: createMockUser(),
+      createdTimestamp: Date.now(),
+      url: `https://discord.com/channels/${guild.id}/ch_leak/msg_leaked_token`
+    };
+
+    const interaction = createMockInteraction({
+      type: 'message_context',
+      commandName: 'Báo cáo hỗ trợ / Report Support',
+      user: reporterUser,
+      targetMessage: mockMsg,
+      guild
+    });
+
+    botClient.emit(Events.InteractionCreate, interaction);
+    await waitForInteraction(interaction);
+
+    assert(interaction._state.replied, "Must reply");
+    const loggedMsg = Array.from(staffChannel.messages.cache.values())[0];
+    const loggedDesc = loggedMsg.embeds[0].data.description;
+    assert(!loggedDesc.includes(leakedToken), "Leaked token must be redacted in staff embed");
+    assert(loggedDesc.includes("[REDACTED_DISCORD_TOKEN]"), "Contains token redaction placeholder");
+  });
+
+  await runTest("Suite 4.5", "Message Context Menu: Fallback when no staff channel exists in guild", async () => {
+    const guild = createMockGuild(); // No nội-bộ-staff channel created
+    const reporterUser = createMockUser();
+
+    const mockMsg = {
+      id: 'msg_no_staff_ch',
+      channelId: 'ch_public',
+      content: 'Báo cáo tin nhắn khi server chưa có kênh staff',
+      author: createMockUser(),
+      createdTimestamp: Date.now()
+    };
+
+    const interaction = createMockInteraction({
+      type: 'message_context',
+      commandName: 'Báo cáo hỗ trợ / Report Support',
+      user: reporterUser,
+      targetMessage: mockMsg,
+      guild
+    });
+
+    botClient.emit(Events.InteractionCreate, interaction);
+    await waitForInteraction(interaction);
+
+    assert(interaction._state.replied, "Must reply gracefully even without staff channel");
+    assert(interaction._state.replyPayload.embeds.length > 0, "Returns acknowledgment embed");
   });
 
   // ============================================================================
@@ -3235,6 +3543,467 @@ async function runAllTests() {
 
     assert(intModal._state.deferred, "Modal submit must deferReply");
     assert(logCh.messages.cache.size > 0, "Log channel must record closed ticket transcript with reason");
+  });
+
+  // ============================================================================
+  // SUITE 20: Installation Contexts, Permissions Bitfield Calculator & OAuth2 Discovery Audit
+  // ============================================================================
+  console.log("\n🌐 [SUITE 20: Installation Contexts, Permissions Bitfield Calculator & OAuth2 Discovery Audit]");
+
+  await runTest("Suite 20", "calculatePermissionsBitfield: Exact 7-permission bitfield calculation (268814352)", async () => {
+    const result = calculatePermissionsBitfield(REQUIRED_BOT_PERMISSIONS);
+    assertEqual(result.bitfieldString, "268814352", "Bitfield string must equal 268814352");
+    assertEqual(result.bitfield, 268814352n, "Bitfield BigInt must equal 268814352n");
+    assertEqual(result.bitfieldNumber, 268814352, "Bitfield Number must equal 268814352");
+
+    // Verify all 7 core permissions are present in array
+    const requiredNames = [
+      'SendMessages',
+      'EmbedLinks',
+      'AttachFiles',
+      'ManageRoles',
+      'ManageChannels',
+      'ReadMessageHistory',
+      'UseExternalEmojis'
+    ];
+    for (const name of requiredNames) {
+      assert(result.permissions.includes(name), `Permissions array must include ${name}`);
+      assert(result.has(PermissionsBitField.Flags[name]), `has() check must return true for ${name}`);
+    }
+
+    // Verify has() returns false for unrequested permission
+    assert(!result.has(PermissionsBitField.Flags.Administrator), "has() must return false for Administrator");
+    assert(!result.has(PermissionsBitField.Flags.BanMembers), "has() must return false for BanMembers");
+  });
+
+  await runTest("Suite 20", "calculatePermissionsBitfield: Edge cases, custom flags & graceful fallback", async () => {
+    // 1. Single permission
+    const single = calculatePermissionsBitfield(PermissionsBitField.Flags.SendMessages);
+    assertEqual(single.bitfieldString, "2048", "Single SendMessages bitfield must equal 2048");
+
+    // 2. Empty array
+    const empty = calculatePermissionsBitfield([]);
+    assertEqual(empty.bitfieldString, "0", "Empty array must yield bitfield 0");
+    assertEqual(empty.permissions.length, 0, "Empty permissions array");
+
+    // 3. Invalid / null input fallback
+    const invalid = calculatePermissionsBitfield(null);
+    assertEqual(invalid.bitfieldString, "0", "Invalid input must fallback to 0n without crashing");
+  });
+
+  await runTest("Suite 20", "generateOAuth2Invite: URL parameters, integration_type & scopes", async () => {
+    // 1. Default Guild Install invite URL
+    const defaultUrl = generateOAuth2Invite({ clientId: '1214041776483471391', integrationType: 0 });
+    const parsedDefault = new URL(defaultUrl);
+    assertEqual(parsedDefault.origin, "https://discord.com", "Origin must be https://discord.com");
+    assertEqual(parsedDefault.pathname, "/oauth2/authorize", "Pathname must be /oauth2/authorize");
+    assertEqual(parsedDefault.searchParams.get('client_id'), "1214041776483471391", "client_id param matches");
+    assertEqual(parsedDefault.searchParams.get('permissions'), "268814352", "permissions param matches 268814352");
+    assertEqual(parsedDefault.searchParams.get('scope'), "bot applications.commands", "scope param matches bot applications.commands");
+    assertEqual(parsedDefault.searchParams.get('integration_type'), "0", "integration_type param is 0 (Guild Install)");
+
+    // 2. User Install invite URL
+    const userUrl = generateOAuth2Invite({ clientId: '1214041776483471391', integrationType: 1, scopes: ['applications.commands'] });
+    const parsedUser = new URL(userUrl);
+    assertEqual(parsedUser.searchParams.get('integration_type'), "1", "integration_type param is 1 (User Install)");
+    assertEqual(parsedUser.searchParams.get('scope'), "applications.commands", "scope param matches applications.commands");
+
+    // 3. Custom redirect_uri & state
+    const customUrl = generateOAuth2Invite({
+      clientId: '1214041776483471391',
+      redirectUri: 'https://lsstudio.vn/auth/callback',
+      state: 'csrf_protection_token_123'
+    });
+    const parsedCustom = new URL(customUrl);
+    assertEqual(parsedCustom.searchParams.get('redirect_uri'), "https://lsstudio.vn/auth/callback", "redirect_uri param matches");
+    assertEqual(parsedCustom.searchParams.get('response_type'), "code", "response_type param is code when redirect_uri is provided");
+    assertEqual(parsedCustom.searchParams.get('state'), "csrf_protection_token_123", "state param matches");
+  });
+
+  await runTest("Suite 20", "validateAppDirectoryReadiness: Default metadata validation (100% Ready)", async () => {
+    const readiness = validateAppDirectoryReadiness(APP_DIRECTORY_METADATA);
+    assertEqual(readiness.ready, true, "Default APP_DIRECTORY_METADATA must be 100% ready");
+    assertEqual(readiness.score, 5, "Score must be 5/5");
+    assertEqual(readiness.maxScore, 5, "Max score must be 5");
+    assertEqual(readiness.checks.length, 5, "Must have 5 checks");
+    assert(readiness.checks.every(c => c.passed === true), "All checks must pass");
+  });
+
+  await runTest("Suite 20", "validateAppDirectoryReadiness: Failing validation edge cases", async () => {
+    // 1. Description too short (< 10 chars)
+    const badDesc = validateAppDirectoryReadiness({ ...APP_DIRECTORY_METADATA, BOT_DESCRIPTION: 'Too short' });
+    assertEqual(badDesc.ready, false, "Short description fails readiness");
+    assertEqual(badDesc.checks.find(c => c.name === 'Bot Description').passed, false, "Bot Description check fails");
+
+    // 2. Invalid support server URL (not a discord invite)
+    const badSupport = validateAppDirectoryReadiness({ ...APP_DIRECTORY_METADATA, SUPPORT_SERVER_URL: 'https://invalid-website.com' });
+    assertEqual(badSupport.ready, false, "Non-discord support URL fails readiness");
+    assertEqual(badSupport.checks.find(c => c.name === 'Support Server Link').passed, false, "Support Server Link check fails");
+
+    // 3. Non-HTTPS Terms of Service
+    const badTos = validateAppDirectoryReadiness({ ...APP_DIRECTORY_METADATA, TERMS_OF_SERVICE_URL: 'http://insecure-terms.com' });
+    assertEqual(badTos.ready, false, "Non-HTTPS ToS URL fails readiness");
+    assertEqual(badTos.checks.find(c => c.name === 'Terms of Service URL').passed, false, "Terms of Service check fails");
+
+    // 4. Invalid Tags (empty or > 5 tags)
+    const badTagsEmpty = validateAppDirectoryReadiness({ ...APP_DIRECTORY_METADATA, TAGS: [] });
+    assertEqual(badTagsEmpty.ready, false, "Empty tags fails readiness");
+    const badTagsOver = validateAppDirectoryReadiness({ ...APP_DIRECTORY_METADATA, TAGS: ['1', '2', '3', '4', '5', '6'] });
+    assertEqual(badTagsOver.ready, false, "Over 5 tags fails readiness");
+  });
+
+  await runTest("Suite 20", "Modern Installation Contexts (integration_types) & Interaction Contexts (contexts) Audit", async () => {
+    for (const cmd of commands) {
+      assert(Array.isArray(cmd.integration_types), `Command ${cmd.name} must have integration_types array`);
+      assert(Array.isArray(cmd.contexts), `Command ${cmd.name} must have contexts array`);
+
+      // Staff-only commands: Restricted to Guild Install (0) and Guild context (0)
+      if (['khachhang', 'transcript', 'clearmessages'].includes(cmd.name)) {
+        assertEqual(JSON.stringify(cmd.integration_types), JSON.stringify([0]), `Staff command ${cmd.name} must be restricted to GuildInstall [0]`);
+        assertEqual(JSON.stringify(cmd.contexts), JSON.stringify([0]), `Staff command ${cmd.name} must be restricted to Guild context [0]`);
+        assert(cmd.default_member_permissions !== undefined, `Staff command ${cmd.name} must define default_member_permissions`);
+      }
+
+      // Public general slash commands: Support GuildInstall (0) & UserInstall (1) in Guild (0), BotDM (1), PrivateChannel (2)
+      if (['ping', 'stk', 'feedback', 'help', 'kiemtra', 'invite'].includes(cmd.name)) {
+        assertEqual(JSON.stringify(cmd.integration_types), JSON.stringify([0, 1]), `Public command ${cmd.name} must support GuildInstall & UserInstall [0, 1]`);
+        assertEqual(JSON.stringify(cmd.contexts), JSON.stringify([0, 1, 2]), `Public command ${cmd.name} must support Guild, BotDM & PrivateChannel [0, 1, 2]`);
+      }
+
+      // Context Menu commands (User / Message): Support GuildInstall & UserInstall in all contexts
+      if (cmd.type === 2 || cmd.type === 3) {
+        assertEqual(JSON.stringify(cmd.integration_types), JSON.stringify([0, 1]), `Context menu ${cmd.name} must support GuildInstall & UserInstall [0, 1]`);
+        assertEqual(JSON.stringify(cmd.contexts), JSON.stringify([0, 1, 2]), `Context menu ${cmd.name} must support Guild, BotDM & PrivateChannel [0, 1, 2]`);
+      }
+    }
+  });
+
+  // ============================================================================
+  // SUITE 21: Discord Gateway Lifecycle, Close Codes & WebSocket Resilience
+  // ============================================================================
+  console.log("\n🔌 [SUITE 21: Discord Gateway Lifecycle, Close Codes & WebSocket Resilience]");
+
+  await runTest("Suite 21", "Gateway Close Codes: Validate entire specification dictionary (4000-4014) & classification", async () => {
+    // 1. Validate all Gateway close codes from specs
+    const expectedCodes = [4000, 4001, 4002, 4003, 4004, 4005, 4007, 4008, 4009, 4010, 4011, 4012, 4013, 4014];
+    for (const code of expectedCodes) {
+      assert(GATEWAY_CLOSE_CODES[code] !== undefined, `GATEWAY_CLOSE_CODES must contain code ${code}`);
+      const entry = GATEWAY_CLOSE_CODES[code];
+      assertEqual(entry.code, code, `Entry code must equal ${code}`);
+      assert(typeof entry.name === 'string' && entry.name.length > 0, `Entry name for ${code} must be a valid string`);
+      assert(typeof entry.action === 'string' && entry.action.length > 0, `Entry action for ${code} must be a valid string`);
+      assert(typeof entry.descriptionVi === 'string' && entry.descriptionVi.length > 0, `Entry descriptionVi for ${code} must be a valid string`);
+      assert(typeof entry.descriptionEn === 'string' && entry.descriptionEn.length > 0, `Entry descriptionEn for ${code} must be a valid string`);
+
+      const classified = classifyGatewayCloseCode(code);
+      assertEqual(classified.code, code, `classifyGatewayCloseCode must return code ${code}`);
+      assertEqual(classified.isDiscordGatewayCode, true, `isDiscordGatewayCode must be true for ${code}`);
+      assertEqual(classified.isStandardWsCode, false, `isStandardWsCode must be false for ${code}`);
+    }
+
+    // 2. Fatal code checks (4004, 4010, 4011, 4012, 4013, 4014)
+    const fatalCodes = [4004, 4010, 4011, 4012, 4013, 4014];
+    for (const code of fatalCodes) {
+      const classified = classifyGatewayCloseCode(code);
+      assertEqual(classified.fatal, true, `Code ${code} must be fatal`);
+      assertEqual(classified.reconnectable, false, `Code ${code} must NOT be reconnectable`);
+    }
+
+    // 3. Reconnectable code checks (4000, 4001, 4002, 4003, 4005, 4007, 4008, 4009)
+    const reconnectableCodes = [4000, 4001, 4002, 4003, 4005, 4007, 4008, 4009];
+    for (const code of reconnectableCodes) {
+      const classified = classifyGatewayCloseCode(code);
+      assertEqual(classified.fatal, false, `Code ${code} must NOT be fatal`);
+      assertEqual(classified.reconnectable, true, `Code ${code} must be reconnectable`);
+    }
+  });
+
+  await runTest("Suite 21", "Gateway Close Codes: Standard WebSocket codes (1000, 1001, 1006) & unclassified fallback", async () => {
+    // 1000: Normal Closure
+    const c1000 = classifyGatewayCloseCode(1000);
+    assertEqual(c1000.name, 'NORMAL_CLOSURE');
+    assertEqual(c1000.isStandardWsCode, true);
+    assertEqual(c1000.reconnectable, true);
+    assertEqual(c1000.fatal, false);
+
+    // 1001: Going Away
+    const c1001 = classifyGatewayCloseCode(1001);
+    assertEqual(c1001.name, 'GOING_AWAY');
+    assertEqual(c1001.isStandardWsCode, true);
+    assertEqual(c1001.reconnectable, true);
+
+    // 1006: Abnormal Closure
+    const c1006 = classifyGatewayCloseCode(1006);
+    assertEqual(c1006.name, 'ABNORMAL_CLOSURE');
+    assertEqual(c1006.isStandardWsCode, true);
+    assertEqual(c1006.reconnectable, true);
+
+    // Unclassified / Custom code
+    const c9999 = classifyGatewayCloseCode(9999);
+    assertEqual(c9999.name, 'UNCLASSIFIED_CLOSE_CODE');
+    assertEqual(c9999.fatal, false);
+    assertEqual(c9999.reconnectable, true);
+  });
+
+  await runTest("Suite 21", "Gateway Event Handlers: ShardDisconnect, Reconnecting, Resume, Ready, Error & Invalidated", async () => {
+    const initialDisconnects = gatewayHealthMetrics.disconnectCount;
+    const initialReconnects = gatewayHealthMetrics.reconnectCount;
+    const initialResumes = gatewayHealthMetrics.resumeCount;
+    const initialReady = gatewayHealthMetrics.readyCount;
+    const initialErrors = gatewayHealthMetrics.errorCount;
+    const initialInvalidated = gatewayHealthMetrics.sessionInvalidatedCount;
+
+    // Emit ShardDisconnect with 4000 (recoverable)
+    botClient.emit(Events.ShardDisconnect, { code: 4000, reason: 'Temporary disconnect' }, 0);
+    assertEqual(gatewayHealthMetrics.disconnectCount, initialDisconnects + 1);
+    assertEqual(gatewayHealthMetrics.lastDisconnectCode, 4000);
+    assertEqual(gatewayHealthMetrics.lastDisconnectReason, 'Temporary disconnect');
+
+    // Emit ShardDisconnect with 4004 (fatal)
+    botClient.emit(Events.ShardDisconnect, { code: 4004, reason: 'Invalid token' }, 0);
+    assertEqual(gatewayHealthMetrics.disconnectCount, initialDisconnects + 2);
+    assertEqual(gatewayHealthMetrics.lastDisconnectCode, 4004);
+
+    // Emit ShardReconnecting
+    botClient.emit(Events.ShardReconnecting, 0);
+    assertEqual(gatewayHealthMetrics.reconnectCount, initialReconnects + 1);
+
+    // Emit ShardResume
+    botClient.emit(Events.ShardResume, 0, 42);
+    assertEqual(gatewayHealthMetrics.resumeCount, initialResumes + 1);
+    assertEqual(gatewayHealthMetrics.lastReplayedEvents, 42);
+
+    // Emit ShardReady
+    botClient.emit(Events.ShardReady, 0, null);
+    assertEqual(gatewayHealthMetrics.readyCount, initialReady + 1);
+    assert(gatewayHealthMetrics.lastReadyAt > 0, "lastReadyAt must be populated");
+
+    // Emit ShardError & Error
+    botClient.emit(Events.ShardError, new Error("Mock shard error"), 0);
+    botClient.emit(Events.Error, new Error("Mock client error"));
+    assertEqual(gatewayHealthMetrics.errorCount, initialErrors + 2);
+
+    // Emit Invalidated
+    botClient.emit(Events.Invalidated);
+    assertEqual(gatewayHealthMetrics.sessionInvalidatedCount, initialInvalidated + 1);
+
+    // Get health snapshot
+    const health = getGatewayHealthMetrics(botClient);
+    assert(typeof health.timestamp === 'number', "Timestamp must be a number");
+    assert(health.disconnectCount >= 2, "Health must reflect recorded disconnects");
+  });
+
+  // ============================================================================
+  // SUITE 22: Dynamic Activity Presence Rotation & Activity Types
+  // ============================================================================
+  console.log("\n🎭 [SUITE 22: Dynamic Activity Presence Rotation & Activity Types]");
+
+  await runTest("Suite 22", "Activity Presence: Validate ACTIVITIES array, official ActivityTypes & bilingual status", async () => {
+    assert(Array.isArray(ACTIVITIES), "ACTIVITIES must be an array");
+    assert(ACTIVITIES.length >= 5, `ACTIVITIES must have at least 5 statuses, got ${ACTIVITIES.length}`);
+
+    const activityTypesFound = new Set();
+    for (const act of ACTIVITIES) {
+      assert(typeof act.name === 'string' && act.name.length > 5, `Activity name must be valid string: ${act.name}`);
+      assert(typeof act.type === 'number', `Activity type must be number: ${act.type}`);
+      assert(typeof act.state === 'string' && act.state.length > 5, `Activity state must be bilingual string: ${act.state}`);
+      activityTypesFound.add(act.type);
+    }
+
+    // Verify key official ActivityType values
+    assert(activityTypesFound.has(ActivityType.Watching), "Must contain ActivityType.Watching (3)");
+    assert(activityTypesFound.has(ActivityType.Playing), "Must contain ActivityType.Playing (0)");
+    assert(activityTypesFound.has(ActivityType.Listening), "Must contain ActivityType.Listening (2)");
+    assert(activityTypesFound.has(ActivityType.Competing), "Must contain ActivityType.Competing (5)");
+    assert(activityTypesFound.has(ActivityType.Custom), "Must contain ActivityType.Custom (4)");
+  });
+
+  await runTest("Suite 22", "Activity Presence: rotateBotActivity step-by-step cycling, modulo wrapping & forced index", async () => {
+    let capturedPresence = null;
+    const mockClient = {
+      user: {
+        setPresence: (payload) => {
+          capturedPresence = payload;
+          return payload;
+        }
+      }
+    };
+
+    // Step through each activity and verify presence applied
+    for (let i = 0; i < ACTIVITIES.length; i++) {
+      const res = rotateBotActivity(mockClient, i);
+      assertEqual(res.success, true, `rotateBotActivity must succeed for index ${i}`);
+      assertEqual(res.index, i, `Result index must match ${i}`);
+      assertEqual(capturedPresence.activities[0].name, ACTIVITIES[i].name, `Presence name must match activity ${i}`);
+      assertEqual(capturedPresence.activities[0].type, ACTIVITIES[i].type, `Presence type must match activity ${i}`);
+      assertEqual(capturedPresence.status, 'online', 'Presence status must be online');
+    }
+
+    // Test modulo wrapping with index >= ACTIVITIES.length
+    const wrapRes = rotateBotActivity(mockClient, ACTIVITIES.length + 2);
+    assertEqual(wrapRes.success, true);
+    assertEqual(wrapRes.index, 2);
+  });
+
+  await runTest("Suite 22", "Activity Presence: Timer start/stop lifecycle, unref verification & error resilience", async () => {
+    let callCount = 0;
+    const mockClient = {
+      user: {
+        setPresence: () => {
+          callCount++;
+        }
+      }
+    };
+
+    // Start rotation
+    const interval = startActivityRotation(mockClient, 500);
+    assert(interval !== null, "startActivityRotation must return interval timer");
+    assert(callCount >= 1, "Immediate initial rotation must be triggered");
+
+    // Stop rotation
+    stopActivityRotation();
+
+    // Error resilience: When setPresence throws, rotateBotActivity must catch safely
+    const failingClient = {
+      user: {
+        setPresence: () => {
+          throw new Error("Discord API Rate Limit on setPresence");
+        }
+      }
+    };
+    const errRes = rotateBotActivity(failingClient);
+    assertEqual(errRes.success, false, "Must return success: false when setPresence fails");
+    assert(errRes.error !== undefined, "Must capture error object");
+
+    // Client without user / not ready
+    const notReadyRes = rotateBotActivity({});
+    assertEqual(notReadyRes.success, false, "Must return success: false when client not ready");
+  });
+
+  // ============================================================================
+  // SUITE 23: REST API Rate-Limit Header Parsing, Backoff & Telemetry
+  // ============================================================================
+  console.log("\n⏱️ [SUITE 23: REST API Rate-Limit Header Parsing, Backoff & Telemetry]");
+
+  await runTest("Suite 23", "REST Header Parsing: Full Discord v10 RateLimit headers extraction & sub-second precision", async () => {
+    const rawHeaders = {
+      'x-ratelimit-limit': '50',
+      'x-ratelimit-remaining': '49',
+      'x-ratelimit-reset': '1700000000.500',
+      'x-ratelimit-reset-after': '0.500',
+      'x-ratelimit-bucket': 'ab12cd34ef56',
+      'x-ratelimit-global': 'false',
+      'x-ratelimit-scope': 'user'
+    };
+
+    const parsed = parseDiscordRateLimitHeaders(rawHeaders);
+    assertEqual(parsed.limit, 50, "Limit must be 50");
+    assertEqual(parsed.remaining, 49, "Remaining must be 49");
+    assertEqual(parsed.reset, 1700000000.5, "Reset must be 1700000000.5");
+    assertEqual(parsed.resetAfter, 0.5, "Reset-After must be 0.5s");
+    assertEqual(parsed.retryAfter, 0, "Retry-After must be 0s for normal response");
+    assertEqual(parsed.retryAfterMs, 0, "Retry-After-Ms must be 0ms when remaining > 0");
+    assertEqual(parsed.bucket, 'ab12cd34ef56', "Bucket ID must match");
+    assertEqual(parsed.global, false, "Global must be false");
+    assertEqual(parsed.scope, 'user', "Scope must be 'user'");
+    assertEqual(parsed.isRateLimited, false, "isRateLimited must be false when remaining > 0");
+    assert(parsed.resetsAt instanceof Date, "resetsAt must be a valid Date object");
+  });
+
+  await runTest("Suite 23", "REST Header Parsing: Rate-limited condition (remaining=0 or retryAfter>0) & Global Scope", async () => {
+    const rateLimitedHeaders = {
+      'x-ratelimit-limit': '10',
+      'x-ratelimit-remaining': '0',
+      'x-ratelimit-reset-after': '2.250',
+      'x-ratelimit-global': 'true',
+      'retry-after': '2.250'
+    };
+
+    const parsed = parseDiscordRateLimitHeaders(rateLimitedHeaders);
+    assertEqual(parsed.remaining, 0);
+    assertEqual(parsed.global, true);
+    assertEqual(parsed.scope, 'global');
+    assertEqual(parsed.retryAfter, 2.25);
+    assertEqual(parsed.retryAfterMs, 2250);
+    assertEqual(parsed.isRateLimited, true, "isRateLimited must be true when remaining === 0 or retryAfter > 0");
+  });
+
+  await runTest("Suite 23", "REST Header Parsing: Case-insensitivity, Headers instance & Malformed/Empty fallback", async () => {
+    // Upper-case / mixed-case headers
+    const mixedHeaders = {
+      'X-RateLimit-Limit': '20',
+      'X-RateLimit-Remaining': '15',
+      'X-RateLimit-Reset-After': '1.0'
+    };
+    const parsedMixed = parseDiscordRateLimitHeaders(mixedHeaders);
+    assertEqual(parsedMixed.limit, 20);
+    assertEqual(parsedMixed.remaining, 15);
+    assertEqual(parsedMixed.resetAfter, 1.0);
+    assertEqual(parsedMixed.retryAfterMs, 0);
+
+    // Headers mock instance with .get()
+    const mockHeadersMap = new Map([
+      ['x-ratelimit-limit', '30'],
+      ['x-ratelimit-remaining', '29'],
+      ['retry-after', '0.1']
+    ]);
+    const mockHeadersInstance = {
+      get: (k) => mockHeadersMap.get(k) || null
+    };
+    const parsedInstance = parseDiscordRateLimitHeaders(mockHeadersInstance);
+    assertEqual(parsedInstance.limit, 30);
+    assertEqual(parsedInstance.remaining, 29);
+    assertEqual(parsedInstance.retryAfterMs, 100);
+
+    // Empty / null fallback
+    const parsedNull = parseDiscordRateLimitHeaders(null);
+    assertEqual(parsedNull.limit, null);
+    assertEqual(parsedNull.isRateLimited, false);
+    assertEqual(parsedNull.retryAfterMs, 0);
+  });
+
+  await runTest("Suite 23", "REST Rate-Limit Backoff: Exponential calculation, jitter variations & clamp limits", async () => {
+    // Exact retryAfter calculation
+    const delay1 = calculateRateLimitBackoff(1.0, 1, { minDelayMs: 100, maxDelayMs: 5000, jitterMaxMs: 50 });
+    assert(delay1 >= 1000 && delay1 <= 1050, `Delay with 1.0s must be between 1000 and 1050ms, got ${delay1}`);
+
+    // Exponential attempt calculation (retryAfterSec = 0)
+    const delayAttempt3 = calculateRateLimitBackoff(0, 3, { minDelayMs: 100, maxDelayMs: 10000, jitterMaxMs: 50 });
+    // 2^3 * 250 = 2000ms + jitter
+    assert(delayAttempt3 >= 2000 && delayAttempt3 <= 2050, `Delay on attempt 3 must be ~2000ms, got ${delayAttempt3}`);
+
+    // Max clamp test
+    const delayClamped = calculateRateLimitBackoff(50.0, 1, { minDelayMs: 100, maxDelayMs: 5000, jitterMaxMs: 0 });
+    assertEqual(delayClamped, 5000, "Must be clamped to maxDelayMs 5000ms");
+  });
+
+  await runTest("Suite 23", "REST Events Telemetry: RateLimited & InvalidRequestWarning monitoring", async () => {
+    const initialHits = restRateLimitMetrics.rateLimitHits;
+    const initialGlobalHits = restRateLimitMetrics.globalRateLimitHits;
+
+    botClient.rest.emit(RESTEvents.RateLimited, {
+      timeToReset: 350,
+      limit: 5,
+      route: '/guilds/1542476657825419334/roles',
+      global: true,
+      majorParameter: 'guild_id'
+    });
+
+    assertEqual(restRateLimitMetrics.rateLimitHits, initialHits + 1);
+    assertEqual(restRateLimitMetrics.globalRateLimitHits, initialGlobalHits + 1);
+    assertEqual(restRateLimitMetrics.lastRateLimitRoute, '/guilds/1542476657825419334/roles');
+    assertEqual(restRateLimitMetrics.lastTimeToResetMs, 350);
+
+    botClient.rest.emit(RESTEvents.InvalidRequestWarning, {
+      count: 7,
+      remainingTime: 500000
+    });
+    assertEqual(restRateLimitMetrics.invalidRequestWarnings, 7);
+
+    const telemetry = getRestRateLimitMetrics();
+    assert(telemetry.rateLimitHits >= 1);
+    assert(telemetry.invalidRequestWarnings === 7);
+    assert(typeof telemetry.timestamp === 'number');
   });
 
   // ============================================================================
