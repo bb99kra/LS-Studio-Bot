@@ -68,7 +68,21 @@ let discordLoginError = null;
 
 const HEALTH_PORT = process.env.PORT || process.env.HEALTH_PORT || null;
 if (HEALTH_PORT) {
-  const healthServer = http.createServer((req, res) => {
+  const healthServer = http.createServer(async (req, res) => {
+    if (req.url === '/test-discord') {
+      try {
+        const r = await fetch('https://discord.com/api/v10/gateway/bot', {
+          headers: { Authorization: 'Bot ' + TOKEN }
+        });
+        const json = await r.json();
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ httpStatus: r.status, data: json }, null, 2));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ error: err.message, stack: err.stack }, null, 2));
+      }
+    }
+
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({
       status: 'online',
@@ -77,6 +91,7 @@ if (HEALTH_PORT) {
       loginError: discordLoginError,
       tokenLength: TOKEN ? TOKEN.length : 0,
       tokenPrefix: TOKEN ? TOKEN.slice(0, 10) : 'none',
+      tokenSuffix: TOKEN ? TOKEN.slice(-6) : 'none',
       discordReady: client.isReady(),
       botTag: client.user ? client.user.tag : null,
       guildCount: client.guilds.cache.size,
