@@ -66,8 +66,17 @@ const GUILD_ID = process.env.GUILD_ID || "1542476657825419334";
 const HEALTH_PORT = process.env.PORT || process.env.HEALTH_PORT || null;
 if (HEALTH_PORT) {
   const healthServer = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end(`LS Studio Bot is Online 24/7! (Uptime: ${Math.floor(process.uptime())}s)\n`);
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({
+      status: 'online',
+      uptimeSeconds: Math.floor(process.uptime()),
+      discordReady: client.isReady(),
+      botTag: client.user ? client.user.tag : null,
+      guildCount: client.guilds.cache.size,
+      wsPing: client.ws.ping,
+      nodeVersion: process.version,
+      ramUsageMB: (process.memoryUsage().rss / 1024 / 1024).toFixed(1)
+    }, null, 2));
   });
   healthServer.listen(HEALTH_PORT, '0.0.0.0', () => {
     console.log(`🌐 [Render/Cloud Health Server] Đang lắng nghe trên cổng ${HEALTH_PORT} (HTTP 200 OK)`);
