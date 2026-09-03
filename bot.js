@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const http = require('http');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const crypto = require('crypto');
 const axios = require('axios');
@@ -60,6 +61,18 @@ const tokenLocalPath = path.join(__dirname, 'token.local.js');
 const localConfig = fs.existsSync(tokenLocalPath) ? require(tokenLocalPath) : {};
 const TOKEN = process.env.DISCORD_TOKEN || localConfig.TOKEN || localConfig.DISCORD_TOKEN || '';
 const GUILD_ID = process.env.GUILD_ID || "1542476657825419334";
+
+// CỔNG HTTP HEALTH CHECK PHỤC VỤ RENDER / KOYEB 24/7
+const HEALTH_PORT = process.env.PORT || process.env.HEALTH_PORT || null;
+if (HEALTH_PORT) {
+  const healthServer = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end(`LS Studio Bot is Online 24/7! (Uptime: ${Math.floor(process.uptime())}s)\n`);
+  });
+  healthServer.listen(HEALTH_PORT, '0.0.0.0', () => {
+    console.log(`🌐 [Render/Cloud Health Server] Đang lắng nghe trên cổng ${HEALTH_PORT} (HTTP 200 OK)`);
+  });
+}
 
 // CẤU HÌNH NGÂN HÀNG MBBANK (Hỗ trợ cấu hình động qua Biến môi trường)
 const BANK_CONFIG = Object.freeze({
