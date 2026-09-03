@@ -63,6 +63,9 @@ const TOKEN = process.env.DISCORD_TOKEN || localConfig.TOKEN || localConfig.DISC
 const GUILD_ID = process.env.GUILD_ID || "1542476657825419334";
 
 // CỔNG HTTP HEALTH CHECK PHỤC VỤ RENDER / KOYEB 24/7
+let discordLoginStatus = 'pending';
+let discordLoginError = null;
+
 const HEALTH_PORT = process.env.PORT || process.env.HEALTH_PORT || null;
 if (HEALTH_PORT) {
   const healthServer = http.createServer((req, res) => {
@@ -70,6 +73,10 @@ if (HEALTH_PORT) {
     res.end(JSON.stringify({
       status: 'online',
       uptimeSeconds: Math.floor(process.uptime()),
+      loginStatus: discordLoginStatus,
+      loginError: discordLoginError,
+      tokenLength: TOKEN ? TOKEN.length : 0,
+      tokenPrefix: TOKEN ? TOKEN.slice(0, 10) : 'none',
       discordReady: client.isReady(),
       botTag: client.user ? client.user.tag : null,
       guildCount: client.guilds.cache.size,
@@ -7073,15 +7080,22 @@ process.on('SIGHUP', () => handleGracefulShutdown('SIGHUP'));
 // =========================================================================
 // 9. BOT LOGIN & MODULE EXPORTS
 // =========================================================================
-if (require.main === module) {
-  if (!TOKEN || TOKEN === 'YOUR_BOT_TOKEN_HERE' || TOKEN.trim() === '') {
-    console.error("❌ [LỖI KHỞI ĐỘNG]: DISCORD_TOKEN chưa được cung cấp trong biến môi trường hoặc token.local.js!");
-    process.exit(1);
-  } else {
-    client.login(TOKEN).catch((err) => {
-      console.error("❌ [LỖI ĐĂNG NHẬP DISCORD]:", err.message);
+if (!TOKEN || TOKEN === 'YOUR_BOT_TOKEN_HERE' || TOKEN.trim() === '') {
+  discordLoginStatus = 'missing_token';
+  console.error("❌ [LỖI KHỞI ĐỘNG]: DISCORD_TOKEN chưa được cung cấp trong biến môi trường hoặc token.local.js!");
+} else {
+  discordLoginStatus = 'logging_in';
+  console.log(`🔑 [Discord Gateway] Đang đăng nhập Bot (Token length: ${TOKEN.length}, prefix: ${TOKEN.slice(0, 10)}...)...`);
+  client.login(TOKEN)
+    .then(() => {
+      discordLoginStatus = 'success';
+      console.log('✅ client.login thành công!');
+    })
+    .catch((err) => {
+      discordLoginStatus = 'error: ' + err.message;
+      discordLoginError = err.stack || err.message;
+      console.error("❌ [LỖI ĐĂNG NHẬP DISCORD]:", err);
     });
-  }
 }
 
 module.exports = {
