@@ -1986,15 +1986,43 @@ if (require.main === module) {
     console.error(`❌ [Discord Shard ${shardId} Error]:`, error?.message || error);
   });
 
+  const GATEWAY_CLOSE_CODES = Object.freeze({
+    4000: { code: 4000, name: 'UNKNOWN_ERROR', fatal: false, description: 'Lỗi không xác định từ Discord Gateway' },
+    4001: { code: 4001, name: 'UNKNOWN_OPCODE', fatal: false, description: 'Opcode Gateway không hợp lệ' },
+    4002: { code: 4002, name: 'DECODE_ERROR', fatal: false, description: 'Không thể giải mã payload' },
+    4003: { code: 4003, name: 'NOT_AUTHENTICATED', fatal: false, description: 'Chưa xác thực Identify' },
+    4004: { code: 4004, name: 'AUTHENTICATION_FAILED', fatal: true, description: 'Discord Token không hợp lệ' },
+    4005: { code: 4005, name: 'ALREADY_AUTHENTICATED', fatal: false, description: 'Đã xác thực trước đó' },
+    4007: { code: 4007, name: 'INVALID_SEQ', fatal: false, description: 'Sequence number không hợp lệ' },
+    4008: { code: 4008, name: 'RATE_LIMITED', fatal: false, description: 'Bị giới hạn tốc độ gửi Gateway' },
+    4009: { code: 4009, name: 'SESSION_TIMED_OUT', fatal: false, description: 'Phiên kết nối đã hết hạn' },
+    4010: { code: 4010, name: 'INVALID_SHARD', fatal: true, description: 'Cấu hình Shard không hợp lệ' },
+    4011: { code: 4011, name: 'SHARDING_REQUIRED', fatal: true, description: 'Yêu cầu kích hoạt Sharding' },
+    4012: { code: 4012, name: 'INVALID_API_VERSION', fatal: true, description: 'Phiên bản Gateway API không hợp lệ' },
+    4013: { code: 4013, name: 'INVALID_INTENTS', fatal: true, description: 'Intents bitfield không hợp lệ' },
+    4014: { code: 4014, name: 'DISALLOWED_INTENTS', fatal: true, description: 'Intents đặc quyền chưa được cấp trong Developer Portal' }
+  });
+
+  function classifyGatewayCloseCode(code) {
+    const numericCode = Number(code) || 0;
+    if (GATEWAY_CLOSE_CODES[numericCode]) return GATEWAY_CLOSE_CODES[numericCode];
+    const isFatal = [4004, 4010, 4011, 4012, 4013, 4014].includes(numericCode);
+    return { code: numericCode, name: 'UNCLASSIFIED', fatal: isFatal, description: `Mã đóng ${numericCode}` };
+  }
+
   client.on(Events.ShardDisconnect, (event, shardId) => {
     const code = event?.code || 0;
     const reason = event?.reason || 'No reason provided';
-    console.warn(`🔌 [Discord Shard ${shardId} Disconnected] Code ${code}: ${reason}`);
-    if (code === 4004) {
-      console.error('💥 [CRITICAL 4004] Discord Token không hợp lệ. Vui lòng kiểm tra lại DISCORD_TOKEN!');
-    } else if (code === 4014) {
-      console.error('💥 [CRITICAL 4014] Disallowed Intents: Gateway intents bị từ chối.');
+    const classified = classifyGatewayCloseCode(code);
+    if (classified.fatal) {
+      console.error(`💥 [CRITICAL SHARD DISCONNECT] Shard ${shardId} đóng kết nối với mã FATAL ${code} (${classified.name}): ${classified.description} - ${reason}`);
+    } else {
+      console.warn(`🔌 [Discord Shard ${shardId} Disconnected] Code ${code} (${classified.name}): ${classified.description} - ${reason}`);
     }
+  });
+
+  client.on(Events.ShardReady, (shardId) => {
+    console.log(`🚀 [Discord Shard ${shardId} Ready] Shard đã sẵn sàng hoạt động.`);
   });
 
   client.on(Events.ShardReconnecting, (shardId) => {

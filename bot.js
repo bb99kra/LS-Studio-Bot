@@ -1955,6 +1955,71 @@ function calculateRateLimitBackoff(retryAfterSec = 0, attempt = 1, options = {})
   return Math.min(maxDelayMs, Math.max(minDelayMs, totalDelay));
 }
 
+/**
+ * Helper: Bọc hàm REST Discord API với cơ chế tự động Retry, Exponential Backoff & Jitter
+ * Bóc tách chính xác retry_after từ mọi định dạng lỗi Discord.js v14 và HTTP 429 REST API
+ * @param {Function} fn - Async function gọi Discord API
+ * @param {number} retries - Số lần thử lại tối đa (mặc định 5)
+ * @param {number} delayMs - Độ trễ cơ sở ban đầu (ms)
+ */
+async function safeApiCall(fn, retries = 5, delayMs = 1000) {
+  let lastError;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const result = await fn();
+      return result;
+    } catch (error) {
+      lastError = error;
+      const isRateLimit = 
+        error?.status === 429 || 
+        error?.code === 429 || 
+        error?.code === 'RATE_LIMIT' || 
+        error?.name === 'RateLimitError' || 
+        (error?.message && typeof error.message === 'string' && error.message.toLowerCase().includes('rate limit'));
+
+      if (isRateLimit) {
+        let retryAfterMs = 0;
+
+        if (typeof error.retryAfter === 'number' && error.retryAfter > 0) {
+          retryAfterMs = error.retryAfter > 500 ? error.retryAfter : Math.round(error.retryAfter * 1000);
+        } else if (typeof error.rawError?.retry_after === 'number' && error.rawError.retry_after > 0) {
+          const val = error.rawError.retry_after;
+          retryAfterMs = val > 500 ? val : Math.round(val * 1000);
+        } else if (typeof error.data?.retry_after === 'number' && error.data.retry_after > 0) {
+          const val = error.data.retry_after;
+          retryAfterMs = val > 500 ? val : Math.round(val * 1000);
+        } else if (typeof error.response?.data?.retry_after === 'number' && error.response.data.retry_after > 0) {
+          const val = error.response.data.retry_after;
+          retryAfterMs = val > 500 ? val : Math.round(val * 1000);
+        } else if (typeof error.timeToReset === 'number' && error.timeToReset > 0) {
+          retryAfterMs = error.timeToReset;
+        } else if (error.headers || error.response?.headers) {
+          const headers = error.headers || error.response.headers;
+          const headerVal = typeof headers.get === 'function' ? headers.get('retry-after') : headers['retry-after'];
+          if (headerVal && !isNaN(Number(headerVal))) {
+            const num = Number(headerVal);
+            retryAfterMs = num > 500 ? num : Math.round(num * 1000);
+          }
+        }
+
+        const waitMs = retryAfterMs > 0 
+          ? retryAfterMs + 500 
+          : calculateRateLimitBackoff(0, attempt, { minDelayMs: delayMs });
+
+        console.warn(`   ⏳ [safeApiCall] Rate limit (429) ở lần thử ${attempt}/${retries}. Chờ ${waitMs}ms trước khi thử lại...`);
+        await new Promise(r => setTimeout(r, waitMs));
+      } else if (attempt === retries) {
+        throw error;
+      } else {
+        const backoffMs = calculateRateLimitBackoff(0, attempt, { minDelayMs: delayMs });
+        console.warn(`   ⚠️ [safeApiCall] Warning API call failed (Lần ${attempt}/${retries}): ${error.message}. Đang thử lại sau ${backoffMs}ms...`);
+        await new Promise(r => setTimeout(r, backoffMs));
+      }
+    }
+  }
+  throw lastError || new Error(`safeApiCall: Exceeded maximum retries (${retries})`);
+}
+
 // Lắng nghe sự kiện rateLimited trên client.rest để giám sát chi tiết rate-limit của Discord API
 client.rest.on(RESTEvents.RateLimited, (rateLimitData) => {
   const {
@@ -2389,16 +2454,16 @@ async function registerCommands(clientId) {
   try {
     console.log('🔄 Đang đồng bộ Slash Commands...');
     if (GUILD_ID) {
-      await client.rest.put(
+      await safeApiCall(() => client.rest.put(
         Routes.applicationGuildCommands(clientId, GUILD_ID),
         { body: commands }
-      );
+      ));
       console.log(`✅ Guild Slash Commands đã sẵn sàng cho Guild ID: ${GUILD_ID}!`);
     } else {
-      await client.rest.put(
+      await safeApiCall(() => client.rest.put(
         Routes.applicationCommands(clientId),
         { body: commands }
-      );
+      ));
       console.log('✅ Global Slash Commands đã sẵn sàng!');
     }
   } catch (error) {
@@ -5882,8 +5947,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
           const v2User = createComponentsV2Message({
             accentColor: isVIP ? 0xE040FB : (isCustomer ? 0x00E676 : 0x00E5FF),
-            title: `👤 THÔNG TIN THÀNH VIÊN: ${member.user.tag}`,
-            thumbnailUrl: member.user.displayAvatarURL({ dynamic: true }),
+            title: `👤 THÔNG TIN THÀNH VIÊN: ${member.user?.tag || member.user?.username || member.displayName}`,
+            thumbnailUrl: typeof member.user?.displayAvatarURL === 'function' ? member.user.displayAvatarURL({ dynamic: true }) : null,
             description:
               `• **Thành viên:** <@${member.id}> (\`${member.id}\`)\n` +
               `• **Vai trò cao nhất:** <@&${highestRole.id}>\n` +
@@ -5900,7 +5965,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         return safeReply(interaction, {
-          content: `👤 Bạn là <@${userToCheck.id}> (\`${userToCheck.tag}\`). Dùng lệnh này trong server để xem chi tiết vai trò!`,
+          content: `👤 Bạn là <@${userToCheck.id}> (\`${userToCheck.tag || userToCheck.username}\`). Dùng lệnh này trong server để xem chi tiết vai trò!`,
           ephemeral: true
         });
       }
