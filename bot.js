@@ -447,39 +447,128 @@ function isValidOrderCode(code) {
 }
 
 /**
- * Kiểm tra xem mức giá có phải là dạng báo giá thỏa thuận (0 VNĐ / Custom Dev / Mod / Non-numeric) hay không
+ * Phân tích và chuẩn hóa giá trị tiền tệ an toàn từ đa dạng kiểu dữ liệu:
+ * - Hỗ trợ BigInt, Number, String (phân tách hàng nghìn dấu chấm/phẩy kiểu VN và Quốc tế)
+ * - Xử lý triệt để các edge cases: NaN, Infinity, null, undefined, boolean, object, -0, số âm, số nguyên cực lớn (>15 chữ số)
+ * @param {number|string|bigint|null|undefined} amount 
+ * @returns {{ isBigInt: boolean, bigVal: bigint|null, isNegative: boolean, isZero: boolean, num: number }|null}
+ */
+function parseFinancialAmount(amount) {
+  if (amount === null || amount === undefined || typeof amount === 'boolean' || typeof amount === 'symbol') return null;
+  if (typeof amount === 'object' && !Array.isArray(amount) && !(amount instanceof Number)) return null;
+  if (Array.isArray(amount) || typeof amount === 'function') return null;
+
+  if (typeof amount === 'bigint') {
+    return {
+      isBigInt: true,
+      bigVal: amount,
+      isNegative: amount < 0n,
+      isZero: amount === 0n,
+      num: Number(amount)
+    };
+  }
+
+  if (typeof amount === 'number') {
+    if (!Number.isFinite(amount)) return null;
+    const isZero = amount === 0 || Object.is(amount, -0);
+    return {
+      isBigInt: false,
+      bigVal: null,
+      isNegative: amount < 0,
+      isZero,
+      num: amount
+    };
+  }
+
+  if (typeof amount === 'string') {
+    const raw = amount.trim();
+    if (!raw) return null;
+    let cleaned = raw.replace(/[₫đĐ\$\s_]|vnd|vnđ|usd/gi, '');
+    if (!cleaned) return null;
+
+    const isNegative = cleaned.startsWith('-');
+    if (isNegative) cleaned = cleaned.slice(1);
+    if (!cleaned) return null;
+
+    const lastDot = cleaned.lastIndexOf('.');
+    const lastComma = cleaned.lastIndexOf(',');
+
+    if (lastDot !== -1 && lastComma !== -1) {
+      if (lastDot > lastComma) {
+        // 1,000,000.50 (Chuẩn quốc tế US: dấu phẩy hàng nghìn, dấu chấm thập phân)
+        cleaned = cleaned.replace(/,/g, '');
+      } else {
+        // 1.000.000,50 (Chuẩn Việt Nam/Châu Âu: dấu chấm hàng nghìn, dấu phẩy thập phân)
+        cleaned = cleaned.replace(/\./g, '').replace(/,/g, '.');
+      }
+    } else if (lastDot !== -1) {
+      if (/^[1-9]\d{0,2}(\.\d{3})+$/.test(cleaned)) {
+        // 30.000 hoặc 1.000.000 (Dấu chấm phân tách hàng nghìn kiểu Việt Nam)
+        cleaned = cleaned.replace(/\./g, '');
+      }
+      // Ngược lại là số thập phân kiểu 1000.5 hoặc 0.001
+    } else if (lastComma !== -1) {
+      if (/^[1-9]\d{0,2}(,\d{3})+$/.test(cleaned)) {
+        // 30,000 hoặc 1,000,000 (Dấu phẩy phân tách hàng nghìn kiểu US)
+        cleaned = cleaned.replace(/,/g, '');
+      } else {
+        // 1000,5 hoặc 0,001 -> Dấu phẩy thập phân kiểu Việt Nam
+        cleaned = cleaned.replace(/,/g, '.');
+      }
+    }
+
+    // Kiểm tra tính hợp lệ của chuỗi số
+    if (!/^\d+(\.\d+)?$/.test(cleaned)) {
+      return null;
+    }
+
+    // Xử lý chuỗi số nguyên cực lớn (> 15 chữ số) để bảo toàn độ chính xác qua BigInt
+    if (/^\d+$/.test(cleaned) && cleaned.length > 15) {
+      try {
+        const big = BigInt(isNegative ? `-${cleaned}` : cleaned);
+        return {
+          isBigInt: true,
+          bigVal: big,
+          isNegative,
+          isZero: big === 0n,
+          num: Number(cleaned) * (isNegative ? -1 : 1)
+        };
+      } catch {}
+    }
+
+    const num = Number(cleaned) * (isNegative ? -1 : 1);
+    if (!Number.isFinite(num)) return null;
+    const isZero = num === 0 || Object.is(num, -0);
+    return {
+      isBigInt: false,
+      bigVal: null,
+      isNegative,
+      isZero,
+      num
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Kiểm tra xem mức giá có phải là dạng báo giá thỏa thuận (0 VNĐ / Custom Dev / Mod / Non-numeric / Số âm) hay không
  * @param {number|string|bigint|null|undefined} amount 
  * @returns {boolean}
  */
 function isNegotiatedPrice(amount) {
-  if (amount === null || amount === undefined || typeof amount === 'boolean' || typeof amount === 'symbol') return true;
-  if (typeof amount === 'object') return true;
-  let num;
-  if (typeof amount === 'number') {
-    num = amount;
-  } else if (typeof amount === 'bigint') {
-    return amount <= 0n;
-  } else if (typeof amount === 'string') {
-    const raw = amount.trim();
-    if (!raw) return true;
-    let cleaned = raw.replace(/[₫đĐ\$\s_]|vnd|vnđ|usd/gi, '');
-    if (!cleaned) return true;
-    if (/^\d{1,3}(\.\d{3})+$/.test(cleaned)) {
-      cleaned = cleaned.replace(/\./g, '');
-    } else {
-      cleaned = cleaned.replace(/,/g, '');
-    }
-    num = Number(cleaned);
-  } else {
-    return true;
+  const parsed = parseFinancialAmount(amount);
+  if (!parsed) return true;
+  if (parsed.isBigInt) {
+    return parsed.bigVal <= 0n;
   }
-  return !Number.isFinite(num) || num <= 0;
+  return parsed.isZero || parsed.num <= 0;
 }
 
 /**
  * Chuẩn hóa chuỗi text dùng cho nội dung chuyển khoản VietQR / Banking Memo theo chuẩn NAPAS 247 / VietQR
  * - Chuẩn hóa Unicode NFKC và loại bỏ dấu tiếng Việt (Unicode NFD)
- * - Chuyển đổi các ký tự đặc biệt đ/Đ -> D, ø/Ø -> O, æ/Æ -> AE, ß -> SS, ł/Ł -> L
+ * - Chuyển đổi các ký tự đặc biệt đ/Đ -> D, ø/Ø -> O, æ/Æ -> AE, ß -> SS, ł/Ł -> L, œ/Œ -> OE, þ/Þ -> TH
  * - Loại bỏ ký tự điều khiển, BiDi overrides, zero-width chars, emoji, dấu câu
  * - Chỉ giữ lại chữ cái A-Z, số 0-9 và khoảng trắng đơn
  * - Chuyển toàn bộ sang chữ in hoa
@@ -506,9 +595,11 @@ function sanitizeVietQRText(text, maxLength = 50) {
     .replace(/[łŁ]/g, 'L')
     .replace(/[øØ]/g, 'O')
     .replace(/[æÆ]/g, 'AE')
+    .replace(/[œŒ]/g, 'OE')
+    .replace(/[þÞ]/g, 'TH')
     .replace(/ß/g, 'SS')
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '') // Bỏ dấu tiếng Việt
+    .replace(/[\u0300-\u036f\u1DC0-\u1DFF\u20D0-\u20FF]/g, '') // Bỏ dấu tiếng Việt & combining marks
     .replace(/[^a-zA-Z0-9 ]/g, ' ')   // Ký tự đặc biệt & emoji -> khoảng trắng
     .replace(/\s+/g, ' ')            // Gộp khoảng trắng liên tiếp
     .trim()
@@ -731,13 +822,13 @@ function redactSensitiveData(text) {
     .replace(/(?<=\b(?:aws_session_token|session_token)\s*[:=]\s*)[A-Za-z0-9\/+=]{100,}\b/gi, '***[REDACTED_AWS_KEY]***')
     .replace(/\b(?:sk_live|rk_live|pk_live|sk_test|pk_test)_[0-9a-zA-Z]{24,34}\b/g, '***[REDACTED_STRIPE_KEY]***')
     // 6. Database Connection Strings (PostgreSQL, MySQL, MongoDB, Redis passwords)
-    .replace(/\b((?:postgres(?:ql)?|mongodb(?:\+srv)?|mysql|redis(?:s)?):\/\/[^\s:@]+:)[^\s@]+(@[^\s\/]+)/gi, '$1***[REDACTED_DB_PASSWORD]***$2')
+    .replace(/\b((?:postgres(?:ql)?|mongodb(?:\+srv)?|mysql|redis(?:s)?):\/\/[^\s:@]*:)[^\s@]+(@[^\s\/]+)/gi, '$1***[REDACTED_DB_PASSWORD]***$2')
     // 7. URL Credentials (http://user:pass@host)
     .replace(/(https?:\/\/[^\s:@/]+:)[^\s@/]+(@[^\s\/]+)/gi, '$1***[REDACTED_URL_PASSWORD]***$2')
     // 8. Generic Bearer & Authorization Tokens
     .replace(/(?<=\b(?:bearer|authorization\s*:\s*bearer)\s+)[a-zA-Z0-9_.\-~+/]{20,}/gi, '***[REDACTED_TOKEN]***')
     // 9. Private RSA / OpenSSH / PGP / EC Keys
-    .replace(/-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/gi, '[REDACTED_PRIVATE_KEY]')
+    .replace(/-----BEGIN (?:[A-Z0-9_-]+ )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:[A-Z0-9_-]+ )?PRIVATE KEY(?: BLOCK)?-----/gi, '[REDACTED_PRIVATE_KEY]')
     // 10. Credit / Debit & Napas Bank Cards (Visa, Mastercard, Napas 9704, Amex, Discover 13-19 digits)
     .replace(/\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|2[2-7][0-9]{14}|9704[0-9]{12,15}|3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12}|(?:[0-9]{4}[ -]){3}[0-9]{4}|3[47][0-9]{2}[ -][0-9]{6}[ -][0-9]{5})\b/g, '[REDACTED_CARD_NUMBER]')
     // 11. CVV / CVC Security Codes
@@ -752,94 +843,46 @@ function redactSensitiveData(text) {
 
 // Định dạng tiền tệ VND chuẩn Việt Nam (Làm tròn số nguyên, phân tách hàng nghìn dấu chấm, chống -0 VNĐ, NaN, Huge Integers & Non-numeric)
 function formatVND(amount) {
-  if (amount === null || amount === undefined || typeof amount === 'boolean' || typeof amount === 'symbol') return '0 VNĐ';
-  if (typeof amount === 'object' && !Array.isArray(amount) && !(amount instanceof Number)) return '0 VNĐ';
-  if (Array.isArray(amount) || typeof amount === 'function') return '0 VNĐ';
+  const parsed = parseFinancialAmount(amount);
+  if (!parsed || parsed.isZero) return '0 VNĐ';
 
   // 1. Xử lý BigInt trực tiếp để bảo toàn 100% độ chính xác tuyệt đối cho số nguyên cực lớn
-  if (typeof amount === 'bigint') {
-    if (amount === 0n) return '0 VNĐ';
-    const isNegative = amount < 0n;
-    const absVal = isNegative ? -amount : amount;
+  if (parsed.isBigInt) {
+    const isNegative = parsed.isNegative;
+    const absVal = isNegative ? -parsed.bigVal : parsed.bigVal;
     const formatted = new Intl.NumberFormat('vi-VN').format(absVal);
     return isNegative ? `-${formatted} VNĐ` : `${formatted} VNĐ`;
   }
 
-  // 2. Xử lý chuỗi (String input)
-  if (typeof amount === 'string') {
-    const raw = amount.trim();
-    if (!raw) return '0 VNĐ';
-    let cleaned = raw.replace(/[₫đĐ\s_]|vnd|vnđ/gi, '');
-    if (!cleaned) return '0 VNĐ';
+  // 2. Làm tròn đến số nguyên gần nhất (theo chuẩn tiền tệ VND trong thanh toán thương mại)
+  const rounded = Math.round(parsed.num);
+  if (rounded === 0 || Object.is(rounded, -0)) return '0 VNĐ';
 
-    // Nhận diện dấu phân cách hàng nghìn kiểu Việt Nam: 30.000 hoặc 1.000.000
-    if (/^-?\d{1,3}(\.\d{3})+$/.test(cleaned)) {
-      cleaned = cleaned.replace(/\./g, '');
-    } else {
-      cleaned = cleaned.replace(/,/g, '');
-    }
-
-    // Nếu là chuỗi số nguyên thuần túy (có thể kèm dấu âm)
-    if (/^-?\d+$/.test(cleaned)) {
-      try {
-        const big = BigInt(cleaned);
-        if (big === 0n) return '0 VNĐ';
-        const isNegative = big < 0n;
-        const absVal = isNegative ? -big : big;
-        const formatted = new Intl.NumberFormat('vi-VN').format(absVal);
-        return isNegative ? `-${formatted} VNĐ` : `${formatted} VNĐ`;
-      } catch {
-        // Fallback sang Number nếu BigInt lỗi cú pháp
-      }
-    }
-
-    const num = Number(cleaned);
-    if (!Number.isFinite(num)) return '0 VNĐ';
-    const rounded = Math.round(num);
-    if (rounded === 0 || Object.is(rounded, -0)) return '0 VNĐ';
-    const absVal = Math.abs(rounded);
-    const formatted = new Intl.NumberFormat('vi-VN').format(absVal);
-    return rounded < 0 ? `-${formatted} VNĐ` : `${formatted} VNĐ`;
+  // Nếu vượt quá giới hạn an toàn Number.MAX_SAFE_INTEGER, chuyển sang BigInt
+  if (Math.abs(rounded) > Number.MAX_SAFE_INTEGER) {
+    try {
+      const big = BigInt(Math.trunc(parsed.num));
+      const isNegative = big < 0n;
+      const absVal = isNegative ? -big : big;
+      const formatted = new Intl.NumberFormat('vi-VN').format(absVal);
+      return isNegative ? `-${formatted} VNĐ` : `${formatted} VNĐ`;
+    } catch {}
   }
 
-  // 3. Xử lý kiểu số (Number input)
-  if (typeof amount === 'number') {
-    if (!Number.isFinite(amount)) return '0 VNĐ';
-    if (amount === 0 || Object.is(amount, -0)) return '0 VNĐ';
-
-    const rounded = Math.round(amount);
-    if (rounded === 0 || Object.is(rounded, -0)) return '0 VNĐ';
-
-    // Nếu vượt quá giới hạn an toàn Number.MAX_SAFE_INTEGER, chuyển sang BigInt
-    if (Math.abs(rounded) > Number.MAX_SAFE_INTEGER) {
-      try {
-        const big = BigInt(Math.trunc(amount));
-        const isNegative = big < 0n;
-        const absVal = isNegative ? -big : big;
-        const formatted = new Intl.NumberFormat('vi-VN').format(absVal);
-        return isNegative ? `-${formatted} VNĐ` : `${formatted} VNĐ`;
-      } catch {}
-    }
-
-    const absVal = Math.abs(rounded);
-    const formatted = new Intl.NumberFormat('vi-VN').format(absVal);
-    return rounded < 0 ? `-${formatted} VNĐ` : `${formatted} VNĐ`;
-  }
-
-  return '0 VNĐ';
+  const absVal = Math.abs(rounded);
+  const formatted = new Intl.NumberFormat('vi-VN').format(absVal);
+  return rounded < 0 ? `-${formatted} VNĐ` : `${formatted} VNĐ`;
 }
 
 // Định dạng tiền tệ USD chuẩn quốc tế (2 chữ số thập phân, phân tách hàng nghìn en-US, chống -$0.00 USD, NaN, Huge Numbers & Non-numeric)
 function formatUSD(amount) {
-  if (amount === null || amount === undefined || typeof amount === 'boolean' || typeof amount === 'symbol') return '$0.00 USD';
-  if (typeof amount === 'object' && !Array.isArray(amount) && !(amount instanceof Number)) return '$0.00 USD';
-  if (Array.isArray(amount) || typeof amount === 'function') return '$0.00 USD';
+  const parsed = parseFinancialAmount(amount);
+  if (!parsed || parsed.isZero) return '$0.00 USD';
 
   // 1. Xử lý BigInt trực tiếp với định dạng 2 chữ số thập phân (.00)
-  if (typeof amount === 'bigint') {
-    if (amount === 0n) return '$0.00 USD';
-    const isNegative = amount < 0n;
-    const absVal = isNegative ? -amount : amount;
+  if (parsed.isBigInt) {
+    const isNegative = parsed.isNegative;
+    const absVal = isNegative ? -parsed.bigVal : parsed.bigVal;
     const formatted = new Intl.NumberFormat('en-US', {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2
@@ -847,66 +890,33 @@ function formatUSD(amount) {
     return isNegative ? `-$${formatted} USD` : `$${formatted} USD`;
   }
 
-  // 2. Xử lý chuỗi (String input)
-  if (typeof amount === 'string') {
-    const raw = amount.trim();
-    if (!raw) return '$0.00 USD';
-    let cleaned = raw.replace(/[\$\s_]|usd/gi, '');
-    if (!cleaned) return '$0.00 USD';
-
-    // Nếu là chuỗi số nguyên thuần túy (không có phần thập phân)
-    if (/^-?\d+$/.test(cleaned)) {
-      try {
-        const big = BigInt(cleaned);
-        if (big === 0n) return '$0.00 USD';
-        const isNegative = big < 0n;
-        const absVal = isNegative ? -big : big;
-        const formatted = new Intl.NumberFormat('en-US', {
-          minimumFractionDigits: 2,
-          maximumFractionDigits: 2
-        }).format(absVal);
-        return isNegative ? `-$${formatted} USD` : `$${formatted} USD`;
-      } catch {}
-    }
-
-    // Bỏ dấu phẩy phân cách hàng nghìn kiểu US
-    cleaned = cleaned.replace(/,/g, '');
-    const num = Number(cleaned);
-    if (!Number.isFinite(num)) return '$0.00 USD';
-
-    const absVal = Math.abs(num);
-    // Nếu giá trị làm tròn ở 2 chữ số thập phân bằng 0 (ví dụ -0.001 hoặc 0.004)
-    if (Math.round(absVal * 100) === 0 || Object.is(num, -0)) {
-      return '$0.00 USD';
-    }
-
-    const formatted = new Intl.NumberFormat('en-US', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2
-    }).format(absVal);
-
-    return num < 0 ? `-$${formatted} USD` : `$${formatted} USD`;
+  // 2. Xử lý số thực / số hữu hạn
+  const absVal = Math.abs(parsed.num);
+  // Nếu giá trị làm tròn ở 2 chữ số thập phân bằng 0 (ví dụ -0.001 hoặc 0.004) -> Trả về $0.00 USD chống -$0.00 USD
+  if (Math.round(absVal * 100) === 0) {
+    return '$0.00 USD';
   }
 
-  // 3. Xử lý kiểu số (Number input)
-  if (typeof amount === 'number') {
-    if (!Number.isFinite(amount)) return '$0.00 USD';
-    if (amount === 0 || Object.is(amount, -0)) return '$0.00 USD';
-
-    const absVal = Math.abs(amount);
-    if (Math.round(absVal * 100) === 0) {
-      return '$0.00 USD';
-    }
-
-    const formatted = new Intl.NumberFormat('en-US', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2
-    }).format(absVal);
-
-    return amount < 0 ? `-$${formatted} USD` : `$${formatted} USD`;
+  // Nếu là số nguyên vượt MAX_SAFE_INTEGER, chuyển sang BigInt
+  if (absVal > Number.MAX_SAFE_INTEGER && Number.isInteger(parsed.num)) {
+    try {
+      const big = BigInt(Math.trunc(parsed.num));
+      const isNegative = big < 0n;
+      const bigAbs = isNegative ? -big : big;
+      const formatted = new Intl.NumberFormat('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      }).format(bigAbs);
+      return isNegative ? `-$${formatted} USD` : `$${formatted} USD`;
+    } catch {}
   }
 
-  return '$0.00 USD';
+  const formatted = new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(absVal);
+
+  return parsed.num < 0 ? `-$${formatted} USD` : `$${formatted} USD`;
 }
 
 // Client HTTP chuyên dụng cho VietQR & Banking với timeout 5s và giới hạn kích thước 5MB
@@ -1057,21 +1067,13 @@ function generateVietQRUrl({ bankId, accountNo, template = 'compact2', amount = 
 
   // Chỉ thêm tham số amount nếu số tiền > 0 và hợp lệ (tự động bỏ qua đối với 0 VND / báo giá thỏa thuận / non-numeric)
   if (amount !== null && amount !== undefined && !isNegotiatedPrice(amount)) {
+    const parsed = parseFinancialAmount(amount);
     let parsedAmount = null;
-    if (typeof amount === 'number' && Number.isFinite(amount) && amount > 0) {
-      parsedAmount = Math.round(amount);
-    } else if (typeof amount === 'bigint' && amount > 0n) {
-      parsedAmount = amount.toString();
-    } else if (typeof amount === 'string') {
-      let cleaned = amount.trim().replace(/[₫đĐ\$\s_]|vnd|vnđ|usd/gi, '');
-      if (/^\d{1,3}(\.\d{3})+$/.test(cleaned)) {
-        cleaned = cleaned.replace(/\./g, '');
-      } else {
-        cleaned = cleaned.replace(/,/g, '');
-      }
-      const n = Number(cleaned);
-      if (Number.isFinite(n) && n > 0) {
-        parsedAmount = Math.round(n);
+    if (parsed) {
+      if (parsed.isBigInt && parsed.bigVal > 0n) {
+        parsedAmount = parsed.bigVal.toString();
+      } else if (parsed.num > 0) {
+        parsedAmount = Math.round(parsed.num);
       }
     }
     if (parsedAmount !== null && Number(parsedAmount) > 0 && Number(parsedAmount) <= 9999999999999) {
@@ -1717,10 +1719,18 @@ const DEPRECATED_PACKAGE_ALIASES = Object.freeze({
 function getPackage(key) {
   if (!key || typeof key !== 'string') return null;
   const normalizedKey = key.trim().toLowerCase();
-  if (PACKAGES[normalizedKey]) return PACKAGES[normalizedKey];
-  const alias = DEPRECATED_PACKAGE_ALIASES[normalizedKey];
-  if (alias && PACKAGES[alias]) return PACKAGES[alias];
-  return null;
+  let pkg = PACKAGES[normalizedKey];
+  if (!pkg) {
+    const alias = DEPRECATED_PACKAGE_ALIASES[normalizedKey];
+    if (alias && PACKAGES[alias]) pkg = PACKAGES[alias];
+  }
+  if (!pkg) return null;
+  return {
+    ...pkg,
+    name: pkg.name || pkg.name_vi || pkg.name_en || '',
+    priceVND: pkg.priceVND ?? pkg.price_vnd ?? 0,
+    priceUSD: pkg.priceUSD ?? pkg.price_usd ?? 0
+  };
 }
 
 // Helper: Kiểm tra quyền Quản trị / Staff an toàn chống lỗi type hoặc cache
@@ -2585,58 +2595,60 @@ client.once(Events.ClientReady, async (readyClient) => {
 // 4. TÍNH NĂNG AUTOMOD: BẢO VỆ MÁY CHỦ, CHỐNG INVITE SPAM & PING @EVERYONE
 // =========================================================================
 
-// Bảng tra cứu ký tự Homoglyphs (Cyrillic, Greek, Armenian, IPA, Lookalikes)
+// Bảng tra cứu ký tự Homoglyphs (Cyrillic, Greek, Armenian, IPA, Small Caps, Letterlike Lookalikes)
 const HOMOGLYPH_MAP = Object.freeze({
   // a
-  'а': 'a', 'α': 'a', 'ӓ': 'a', 'ӑ': 'a', 'ā': 'a', 'à': 'a', 'á': 'a', 'â': 'a', 'ã': 'a', 'ä': 'a', 'å': 'a', 'ą': 'a',
+  'а': 'a', 'α': 'a', 'ӓ': 'a', 'ӑ': 'a', 'ā': 'a', 'à': 'a', 'á': 'a', 'â': 'a', 'ã': 'a', 'ä': 'a', 'å': 'a', 'ą': 'a', 'ᴀ': 'a',
   // b
-  'в': 'b', 'ь': 'b', 'ъ': 'b', 'β': 'b', 'ɓ': 'b', 'ḃ': 'b', 'ḅ': 'b',
+  'в': 'b', 'ь': 'b', 'ъ': 'b', 'β': 'b', 'ɓ': 'b', 'ḃ': 'b', 'ḅ': 'b', 'ʙ': 'b', 'ℬ': 'b',
   // c
-  'с': 'c', 'ƈ': 'c', 'ɕ': 'c', 'ç': 'c', 'ć': 'c', 'ĉ': 'c', 'ċ': 'c', 'č': 'c', 'ϲ': 'c', 'ᴄ': 'c',
+  'с': 'c', 'ƈ': 'c', 'ɕ': 'c', 'ç': 'c', 'ć': 'c', 'ĉ': 'c', 'ċ': 'c', 'č': 'c', 'ϲ': 'c', 'ᴄ': 'c', 'ℭ': 'c',
   // d
-  'ԁ': 'd', 'ԃ': 'd', 'ɗ': 'd', 'đ': 'd', 'ď': 'd', 'ḋ': 'd', 'ḍ': 'd', 'ḏ': 'd', 'ð': 'd',
+  'ԁ': 'd', 'ԃ': 'd', 'ɗ': 'd', 'đ': 'd', 'ď': 'd', 'ḋ': 'd', 'ḍ': 'd', 'ḏ': 'd', 'ð': 'd', 'ᴅ': 'd',
   // e
-  'е': 'e', 'ё': 'e', 'ε': 'e', 'ϵ': 'e', 'è': 'e', 'é': 'e', 'ê': 'e', 'ë': 'e', 'ē': 'e', 'ĕ': 'e', 'ė': 'e', 'ę': 'e', 'ě': 'e', 'ẹ': 'e', 'ẻ': 'e', 'ẽ': 'e',
+  'е': 'e', 'ё': 'e', 'ε': 'e', 'ϵ': 'e', 'è': 'e', 'é': 'e', 'ê': 'e', 'ë': 'e', 'ē': 'e', 'ĕ': 'e', 'ė': 'e', 'ę': 'e', 'ě': 'e', 'ẹ': 'e', 'ẻ': 'e', 'ẽ': 'e', 'ᴇ': 'e', 'ℯ': 'e', 'ℰ': 'e',
+  // f
+  'ꜰ': 'f', 'ḟ': 'f', 'ℱ': 'f',
   // g
-  'ɡ': 'g', 'ɢ': 'g', 'ԍ': 'g', 'ǥ': 'g', 'ɠ': 'g', 'ğ': 'g', 'ġ': 'g', 'ģ': 'g', 'ǧ': 'g', 'ǵ': 'g',
+  'ɡ': 'g', 'ɢ': 'g', 'ԍ': 'g', 'ǥ': 'g', 'ɠ': 'g', 'ğ': 'g', 'ġ': 'g', 'ģ': 'g', 'ǧ': 'g', 'ǵ': 'g', 'ℊ': 'g',
   // h
-  'һ': 'h', 'հ': 'h', 'ĥ': 'h', 'ħ': 'h', 'ḣ': 'h', 'ḥ': 'h', 'ḧ': 'h',
+  'һ': 'h', 'հ': 'h', 'ĥ': 'h', 'ħ': 'h', 'ḣ': 'h', 'ḥ': 'h', 'ḧ': 'h', 'ʜ': 'h', 'ℋ': 'h',
   // i
-  'і': 'i', 'ї': 'i', 'ι': 'i', 'ı': 'i', 'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ī': 'i', 'ĭ': 'i', 'į': 'i', 'ǐ': 'i', 'ỉ': 'i', 'ị': 'i', 'ɪ': 'i',
+  'і': 'i', 'ї': 'i', 'ι': 'i', 'ı': 'i', 'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i', 'ī': 'i', 'ĭ': 'i', 'į': 'i', 'ǐ': 'i', 'ỉ': 'i', 'ị': 'i', 'ɪ': 'i', 'ℑ': 'i',
   // j
-  'ј': 'j', 'ȷ': 'j', 'ĵ': 'j', 'ǰ': 'j',
+  'ј': 'j', 'ȷ': 'j', 'ĵ': 'j', 'ǰ': 'j', 'ᴊ': 'j',
   // k
-  'к': 'k', 'κ': 'k', 'ķ': 'k', 'ǩ': 'k', 'ḳ': 'k', 'ḵ': 'k',
+  'к': 'k', 'κ': 'k', 'ķ': 'k', 'ǩ': 'k', 'ḳ': 'k', 'ḵ': 'k', 'ᴋ': 'k',
   // l
-  'ℓ': 'l', 'ł': 'l', 'ĺ': 'l', 'ļ': 'l', 'ľ': 'l', 'ŀ': 'l', 'ḷ': 'l', 'ḻ': 'l',
+  'ℓ': 'l', 'ł': 'l', 'ĺ': 'l', 'ļ': 'l', 'ľ': 'l', 'ŀ': 'l', 'ḷ': 'l', 'ḻ': 'l', 'ʟ': 'l', 'ℒ': 'l',
   // m
-  'м': 'm', 'ḿ': 'm', 'ṁ': 'm', 'ṃ': 'm',
+  'м': 'm', 'ḿ': 'm', 'ṁ': 'm', 'ṃ': 'm', 'ᴍ': 'm', 'ℳ': 'm',
   // n
-  'п': 'n', 'ո': 'n', 'ñ': 'n', 'ń': 'n', 'ņ': 'n', 'ň': 'n', 'ŋ': 'n', 'ṅ': 'n', 'ṇ': 'n', 'ṉ': 'n',
+  'п': 'n', 'ո': 'n', 'ñ': 'n', 'ń': 'n', 'ņ': 'n', 'ň': 'n', 'ŋ': 'n', 'ṅ': 'n', 'ṇ': 'n', 'ṉ': 'n', 'ɴ': 'n', 'ℕ': 'n',
   // o
-  'о': 'o', 'ο': 'o', 'օ': 'o', 'ò': 'o', 'ó': 'o', 'ô': 'o', 'õ': 'o', 'ö': 'o', 'ō': 'o', 'ŏ': 'o', 'ő': 'o', 'ǒ': 'o', 'ơ': 'o', 'ọ': 'o', 'ỏ': 'o', 'ø': 'o', 'ǿ': 'o', 'ɵ': 'o', 'ᴏ': 'o',
+  'о': 'o', 'ο': 'o', 'օ': 'o', 'ò': 'o', 'ó': 'o', 'ô': 'o', 'õ': 'o', 'ö': 'o', 'ō': 'o', 'ŏ': 'o', 'ő': 'o', 'ǒ': 'o', 'ơ': 'o', 'ọ': 'o', 'ỏ': 'o', 'ø': 'o', 'ǿ': 'o', 'ɵ': 'o', 'ᴏ': 'o', 'ℴ': 'o',
   // p
-  'р': 'p', 'ρ': 'p', 'ƥ': 'p', 'ṕ': 'p', 'ṗ': 'p',
+  'р': 'p', 'ρ': 'p', 'ƥ': 'p', 'ṕ': 'p', 'ṗ': 'p', 'ᴘ': 'p', '℘': 'p', 'ℙ': 'p',
   // q
-  'ԛ': 'q', 'ɋ': 'q', 'զ': 'q',
+  'ԛ': 'q', 'ɋ': 'q', 'զ': 'q', 'ǫ': 'q', 'ℚ': 'q',
   // r
-  'г': 'r', 'ѓ': 'r', 'ґ': 'r', 'ŕ': 'r', 'ŗ': 'r', 'ř': 'r', 'ṙ': 'r', 'ṛ': 'r', 'ɼ': 'r', 'ɾ': 'r', 'ʀ': 'r',
+  'г': 'r', 'ѓ': 'r', 'ґ': 'r', 'ŕ': 'r', 'ŗ': 'r', 'ř': 'r', 'ṙ': 'r', 'ṛ': 'r', 'ɼ': 'r', 'ɾ': 'r', 'ʀ': 'r', 'ℛ': 'r', 'ℜ': 'r', 'ℝ': 'r',
   // s
   'ѕ': 's', 'ʂ': 's', 'ś': 's', 'ŝ': 's', 'ş': 's', 'š': 's', 'ș': 's', 'ṡ': 's', 'ṣ': 's', 'ꜱ': 's',
   // t
-  'т': 't', 'τ': 't', 'ţ': 't', 'ť': 't', 'ț': 't', 'ṫ': 't', 'ṭ': 't', 'ṯ': 't',
+  'т': 't', 'τ': 't', 'ţ': 't', 'ť': 't', 'ț': 't', 'ṫ': 't', 'ṭ': 't', 'ṯ': 't', 'ᴛ': 't',
   // u
-  'υ': 'u', 'μ': 'u', 'ù': 'u', 'ú': 'u', 'û': 'u', 'ü': 'u', 'ũ': 'u', 'ū': 'u', 'ŭ': 'u', 'ů': 'u', 'ű': 'u', 'ų': 'u', 'ư': 'u', 'ụ': 'u', 'ủ': 'u',
+  'υ': 'u', 'μ': 'u', 'ù': 'u', 'ú': 'u', 'û': 'u', 'ü': 'u', 'ũ': 'u', 'ū': 'u', 'ŭ': 'u', 'ů': 'u', 'ű': 'u', 'ų': 'u', 'ư': 'u', 'ụ': 'u', 'ủ': 'u', 'ᴜ': 'u',
   // v
-  'ѵ': 'v', 'ν': 'v', 'ṽ': 'v', 'ṿ': 'v',
+  'ѵ': 'v', 'ν': 'v', 'ṽ': 'v', 'ṿ': 'v', 'ᴠ': 'v',
   // w
-  'ш': 'w', 'щ': 'w', 'ŵ': 'w', 'ẁ': 'w', 'ẃ': 'w', 'ẅ': 'w', 'ẇ': 'w', 'ẉ': 'w',
+  'ш': 'w', 'щ': 'w', 'ŵ': 'w', 'ẁ': 'w', 'ẃ': 'w', 'ẅ': 'w', 'ẇ': 'w', 'ẉ': 'w', 'ᴡ': 'w',
   // x
   'х': 'x', 'χ': 'x', 'ẋ': 'x', 'ẍ': 'x',
   // y
-  'у': 'y', 'ý': 'y', 'ÿ': 'y', 'ŷ': 'y', 'ẏ': 'y', 'ỳ': 'y', 'ỵ': 'y', 'ỷ': 'y', 'ỹ': 'y', 'γ': 'y',
+  'у': 'y', 'ý': 'y', 'ÿ': 'y', 'ŷ': 'y', 'ẏ': 'y', 'ỳ': 'y', 'ỵ': 'y', 'ỷ': 'y', 'ỹ': 'y', 'γ': 'y', 'ʏ': 'y',
   // z
-  'ź': 'z', 'ż': 'z', 'ž': 'z', 'ẑ': 'z', 'ẓ': 'z', 'ẕ': 'z'
+  'ź': 'z', 'ż': 'z', 'ž': 'z', 'ẑ': 'z', 'ẓ': 'z', 'ẕ': 'z', 'ᴢ': 'z', 'ℤ': 'z', 'ℨ': 'z'
 });
 
 const HOMOGLYPH_REGEX = new RegExp(Object.keys(HOMOGLYPH_MAP).join('|'), 'gi');
@@ -2644,9 +2656,10 @@ const HOMOGLYPH_REGEX = new RegExp(Object.keys(HOMOGLYPH_MAP).join('|'), 'gi');
 /**
  * Chuẩn hóa chuỗi văn bản phòng chống spam, obfuscation & homoglyphs:
  * 1. NFKC Unicode normalization (chuyển math bold/italic, fullwidth thành ký tự chuẩn)
- * 2. Thay thế homoglyphs (Cyrillic, Greek, Armenian, Lookalikes) sang Latin tương ứng
+ * 2. Thay thế homoglyphs (Cyrillic, Greek, Armenian, Small Caps, Letterlike Lookalikes) sang Latin tương ứng
  * 3. NFD decomposition và loại bỏ combining diacritics
- * 4. Loại bỏ các ký tự ẩn, zero-width, formatting controls
+ * 4. Thay thế ký tự dot / slash homoglyphs thành dấu chấm . và dấu gạch chéo /
+ * 5. Loại bỏ các ký tự ẩn, zero-width, formatting controls, Hangul Fillers, Variation Selectors
  */
 function normalizeAntiSpamText(text) {
   if (!text || typeof text !== 'string') return '';
@@ -2663,13 +2676,14 @@ function normalizeAntiSpamText(text) {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '');
 
-  // Dot homoglyphs: U+2024, U+FF0E, U+2027, U+2022, U+00B7, U+2219, U+FE52, U+3002
-  normalized = normalized.replace(/[\u2024\uFF0E\u2027\u2022\u00B7\u2219\uFE52\u3002]/g, '.');
+  // Dot homoglyphs: U+2024, U+FF0E, U+2027, U+2022, U+00B7, U+2219, U+FE52, U+3002, U+FF61, U+0589, U+06D4
+  normalized = normalized.replace(/[\u2024\uFF0E\u2027\u2022\u00B7\u2219\uFE52\u3002\uFF61\u0589\u06D4]/g, '.');
 
   // Slash homoglyphs: U+FF0F, U+2044, U+2215, U+29F8, U+29F9, U+FF3C, backslash
   normalized = normalized.replace(/[\uFF0F\u2044\u2215\u29F8\u29F9\uFF3C\\]/g, '/');
 
-  normalized = normalized.replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2060-\u206F\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u180E]/g, '');
+  // Zero-width, Bidi controls, Hangul Fillers (U+115F, U+1160, U+3164, U+FFA0) & Variation Selectors (U+FE00-U+FE0F)
+  normalized = normalized.replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E\u2060-\u206F\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u180E\u115F\u1160\u3164\uFFA0\uFE00-\uFE0F]/g, '');
 
   return normalized;
 }
@@ -2686,7 +2700,7 @@ function extractAllLinkTargets(rawText) {
   const markdownLinkRegex = /\[([^\]]*)\]\(\s*<?([^\s>)]+)>?\s*(?:"[^"]*")?\)/gi;
   let match;
   let count = 0;
-  while ((match = markdownLinkRegex.exec(input)) !== null && count < 10) {
+  while ((match = markdownLinkRegex.exec(input)) !== null && count < 50) {
     if (match[1]) targets.push(match[1]); // Visible anchor text
     if (match[2]) targets.push(match[2]); // Hidden URL target
     count++;
@@ -2695,7 +2709,7 @@ function extractAllLinkTargets(rawText) {
   // Bóc tách URL trong dấu <url>
   const angleBracketRegex = /<\s*(https?:\/\/[^\s>]+|[a-zA-Z0-9_\-]+(?:\.[a-zA-Z0-9_\-]+)*\.[a-zA-Z]{2,}\/[^\s>]+)\s*>/gi;
   count = 0;
-  while ((match = angleBracketRegex.exec(input)) !== null && count < 10) {
+  while ((match = angleBracketRegex.exec(input)) !== null && count < 50) {
     if (match[1]) targets.push(match[1]);
     count++;
   }
@@ -2736,9 +2750,9 @@ function containsDiscordInvite(rawContent) {
 
   const targetTexts = extractAllLinkTargets(input);
 
-  const invitePatternStandard = /(?:https?:\/\/)?(?:www\s*[\.\(\[\{]\s*)?(?:(?:discord\s*(?:app)?\s*[\.\(\[\{]\s*(?:gg|com\s*[\/\\]+\s*(?:invite|servers)|io|me|li|link|gift))|(?:dsc|invite)\s*[\.\(\[\{]\s*gg|dis\s*[\.\(\[\{]\s*gd)\s*[\/\\]+\s*[a-zA-Z0-9_\-\+]+/i;
+  const invitePatternStandard = /(?:https?:\/\/)?(?:www\s*[\.\(\[\{/:\-]\s*)?(?:(?:discord\s*(?:app)?\s*[\.\(\[\{/:\-]\s*(?:gg|com\s*[\/\\]+\s*(?:invite|servers)|io|me|li|link|gift))|(?:dsc|invite)\s*[\.\(\[\{/:\-]\s*gg|dis\s*[\.\(\[\{/:\-]\s*gd)\s*[\/\\]+\s*[a-zA-Z0-9_\-\+]+/i;
   
-  const invitePatternStripped = /(?:https?:\/\/)?(?:www\.)?(?:(?:discord(?:app)?(?:\.(?:gg|com\/(?:invite|servers)|io|me|li|link|gift)|\/(?:invite|servers|channels)))|(?:dsc|invite)\.gg|dis\.gd)(?:\/[a-zA-Z0-9_\-\+]+)?/i;
+  const invitePatternStripped = /(?:https?:\/\/)?(?:www\.)?(?:(?:discord(?:app)?(?:\.(?:gg|com\/(?:invite|servers)|io|me|li|link|gift)|\/(?:gg|invite|servers|channels)))|(?:dsc|invite)\.gg|dis\.gd)(?:\/[a-zA-Z0-9_\-\+]+)?/i;
 
   for (const item of targetTexts) {
     const normalized = normalizeAntiSpamText(item);
@@ -2752,8 +2766,10 @@ function containsDiscordInvite(rawContent) {
     const stripped = normalized
       .replace(/\|\|/g, '')                          // Loại bỏ spoiler markers
       .replace(/[`*~_]/g, '')                        // Loại bỏ markdown formatters (backticks, bold, italic, strikethrough)
+      .replace(/\bdot\b/gi, '.')                    // Từ khóa độc lập "dot" -> .
       .replace(/[\(\[\{]\s*dot\s*[\)\]\}]/gi, '.')  // (dot), [dot], {dot} -> .
       .replace(/[\(\[\{]\s*\.\s*[\)\]\}]/g, '.')    // (.), [.], {.} -> .
+      .replace(/\bslash\b/gi, '/')                  // Từ khóa độc lập "slash" -> /
       .replace(/[\(\[\{]\s*slash\s*[\)\]\}]/gi, '/')// (slash), [slash] -> /
       .replace(/[\(\[\{]\s*\/\s*[\)\]\}]/g, '/')    // (/), [/], {/} -> /
       .replace(/[\[\]\(\)\{\}]/g, '')               // Loại bỏ ngoặc bao quanh từ
@@ -2769,10 +2785,10 @@ function containsDiscordInvite(rawContent) {
 
 /**
  * Nhận diện ping @everyone / @here trái phép mà KHÔNG gây false positive:
+ * - Bỏ qua URL link chứa @everyone/@here (tránh false positive từ link Twitter/YouTube/Medium...)
  * - Bỏ qua code block (```...```) và inline code (`...`)
  * - Bỏ qua escaped mention (\@everyone, \@here)
  * - Bỏ qua địa chỉ email (admin@everyone.com, contact@here.org)
- * - Bỏ qua URL link chứa @everyone/@here
  * - Bắt triệt để spoiler bypass (@||everyone||, @every||one), homoglyphs (@еveryone), zero-width
  */
 function containsEveryonePing(message) {
@@ -2790,23 +2806,27 @@ function containsEveryonePing(message) {
     text = text.slice(0, 10000);
   }
 
-  // 1. Loại bỏ code block (```...```) và inline code (`...`) TRƯỚC KHI normalize (Phòng chống false positive trong code)
+  // 1. Loại bỏ các URL liên kết (tránh false positive trên link youtube.com/@here, twitter.com/@everyone...)
+  text = text.replace(/https?:\/\/[^\s]+/gi, ' ');
+  text = text.replace(/ftp:\/\/[^\s]+/gi, ' ');
+
+  // 2. Loại bỏ code block (```...```) và inline code (`...`) TRƯỚC KHI normalize (Phòng chống false positive trong code)
   text = text.replace(/```[\s\S]*?(?:```|$)/g, ' ');
   text = text.replace(/`[^`\n]*?`/g, ' ');
 
-  // 2. Loại bỏ escaped mention (\@everyone, \@here)
+  // 3. Loại bỏ escaped mention (\@everyone, \@here)
   text = text.replace(/\\@everyone/gi, ' ');
   text = text.replace(/\\@here/gi, ' ');
 
-  // 3. Chuẩn hóa chống spam & homoglyphs
+  // 4. Chuẩn hóa chống spam & homoglyphs
   text = normalizeAntiSpamText(text);
 
-  // 4. Loại bỏ spoiler tags '||' và các ký tự phân tách nằm giữa '@' và 'everyone/here'
+  // 5. Loại bỏ spoiler tags '||' và các ký tự phân tách nằm giữa '@' và 'everyone/here'
   const cleanedMentions = text.replace(/@\s*[\|*~_]*\s*([a-zA-Z]+)/g, (match, word) => {
     return '@' + word;
   }).replace(/\|\|/g, '');
 
-  // 5. Bắt @everyone hoặc @here đứng độc lập (không thuộc email, username trong URL, hay từ ghép)
+  // 6. Bắt @everyone hoặc @here đứng độc lập (không thuộc email, username trong URL, hay từ ghép)
   const everyoneRegex = /(?<![\w@])@(everyone|here)(?![\w\.])/i;
   return everyoneRegex.test(cleanedMentions);
 }
@@ -3714,10 +3734,7 @@ function createTranscriptAttachments(transcriptText, baseFileName = 'transcript.
 async function executeTicketClosure({ channel, guild, closerUser, closeReason = null }) {
   if (!channel || !channel.isTextBased() || !channel.id) return false;
 
-  // Chống race condition: không đóng trùng kênh ticket đang xử lý
-  if (closingTicketChannels.has(channel.id)) {
-    return false;
-  }
+  // Đảm bảo kênh được đánh dấu đang trong tiến trình đóng & xuất transcript
   closingTicketChannels.add(channel.id);
 
   try {
@@ -3908,16 +3925,18 @@ async function executeTicketClosure({ channel, guild, closerUser, closeReason = 
     setTimeout(async () => {
       try {
         const ch = await guild?.channels.fetch(channel.id).catch(() => null);
-        if (ch && ch.deletable) {
+        if (ch) {
           ch.messages?.cache?.clear();
-          await ch.delete(`Ticket closed by ${closerUser.tag || closerUser.username} (${closerUser.id})`).catch(delErr => {
-            if (delErr.code !== 10003) {
+          try {
+            await ch.delete(`Ticket closed by ${closerUser.tag || closerUser.username} (${closerUser.id})`);
+          } catch (delErr) {
+            if (delErr && delErr.code !== 10003) {
               console.error("❌ Lỗi xóa kênh ticket sau khi lưu transcript:", delErr);
             }
-          });
+          }
         }
       } catch (e) {
-        if (e.code !== 10003) {
+        if (e && e.code !== 10003) {
           console.error("❌ Lỗi xóa kênh ticket sau khi lưu transcript:", e);
         }
       }
@@ -4215,6 +4234,7 @@ async function createTicketChannel({ guild, user, ticketType = '🛒-mua', custo
   const existingTicket = guild.channels.cache.find(c => 
     c && 
     !c.deleted &&
+    !closingTicketChannels.has(c.id) &&
     c.type === ChannelType.GuildText &&
     c.topic && c.topic.includes(`(${user.id})`)
   );
@@ -4848,6 +4868,17 @@ function isInteractionExpired(interaction) {
 }
 
 /**
+ * Kiểm tra xem một interaction chưa acknowledge đã vượt quá cửa sổ 3 giây (3,000 ms) của Discord hay chưa
+ * Discord API yêu cầu phản hồi ban đầu (deferReply, reply, showModal, deferUpdate) phải gửi trong vòng 3s.
+ */
+function isInitialAckExpired(interaction) {
+  if (!interaction || !interaction.createdTimestamp) return false;
+  if (interaction.deferred || interaction.replied) return false;
+  // Giới hạn 3 giây (3,000 ms). Trừ hao độ trễ mạng còn 2.85 giây (2,850 ms).
+  return (Date.now() - interaction.createdTimestamp) >= 2850;
+}
+
+/**
  * Kiểm tra xem một lỗi Discord API có phải là lỗi tương tác hết hạn / kênh đã bị xóa hay không
  */
 function isIgnorableInteractionError(err) {
@@ -4884,9 +4915,7 @@ async function safeReply(interaction, options) {
 
     // Tự động kết hợp cờ Ephemeral và Components V2
     if (payload.ephemeral) {
-      if (typeof payload.flags === 'number') {
-        payload.flags |= MessageFlags.Ephemeral;
-      }
+      payload.flags = (typeof payload.flags === 'number' ? payload.flags : 0) | MessageFlags.Ephemeral;
     }
 
     const isV2 = Boolean(
@@ -4905,11 +4934,7 @@ async function safeReply(interaction, options) {
     // 0. Kiểm tra interaction token đã hết hạn 15 phút chưa
     if (isInteractionExpired(interaction)) {
       if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
-        try {
-          return await interaction.channel.send(payload);
-        } catch (_) {
-          return null;
-        }
+        return await safeChannelSend(interaction.channel, payload);
       }
       return null;
     }
@@ -4936,9 +4961,7 @@ async function safeReply(interaction, options) {
         }
         if (editErr?.code === 10062 || editErr?.code === 10015) {
           if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
-            try {
-              return await interaction.channel.send(payload);
-            } catch (_) {}
+            return await safeChannelSend(interaction.channel, payload);
           }
           return null;
         }
@@ -4965,9 +4988,7 @@ async function safeReply(interaction, options) {
         }
         if (followErr?.code === 10062 || followErr?.code === 10015) {
           if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
-            try {
-              return await interaction.channel.send(payload);
-            } catch (_) {}
+            return await safeChannelSend(interaction.channel, payload);
           }
           return null;
         }
@@ -5004,9 +5025,7 @@ async function safeReply(interaction, options) {
       // 10062 / 10015: Unknown interaction / webhook (timeout 3s hoặc token không tồn tại)
       if (replyErr?.code === 10062 || replyErr?.code === 10015) {
         if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
-          try {
-            return await interaction.channel.send(payload);
-          } catch (_) {}
+          return await safeChannelSend(interaction.channel, payload);
         }
         return null;
       }
@@ -5028,7 +5047,7 @@ async function safeReply(interaction, options) {
 async function safeDeferReply(interaction, options = {}) {
   if (!interaction || interaction.isAutocomplete?.()) return false;
   if (interaction.deferred || interaction.replied) return true;
-  if (isInteractionExpired(interaction)) return false;
+  if (isInteractionExpired(interaction) || isInitialAckExpired(interaction)) return false;
   try {
     await interaction.deferReply(options);
     return true;
@@ -5045,7 +5064,7 @@ async function safeDeferReply(interaction, options = {}) {
 async function safeDeferUpdate(interaction) {
   if (!interaction || interaction.isAutocomplete?.()) return false;
   if (interaction.deferred || interaction.replied) return true;
-  if (isInteractionExpired(interaction)) return false;
+  if (isInteractionExpired(interaction) || isInitialAckExpired(interaction)) return false;
   try {
     if (typeof interaction.deferUpdate === 'function') {
       await interaction.deferUpdate();
@@ -5065,8 +5084,8 @@ async function safeDeferUpdate(interaction) {
 async function safeEditReply(interaction, options) {
   if (!interaction || interaction.isAutocomplete?.()) return null;
   let payload = typeof options === 'string' ? { content: options } : { ...options };
-  if (payload.ephemeral && typeof payload.flags === 'number') {
-    payload.flags |= MessageFlags.Ephemeral;
+  if (payload.ephemeral) {
+    payload.flags = (typeof payload.flags === 'number' ? payload.flags : 0) | MessageFlags.Ephemeral;
   }
   const isV2 = Boolean(
     (typeof payload.flags === 'number' && (payload.flags & MessageFlags.IsComponentsV2) !== 0) ||
@@ -5076,9 +5095,7 @@ async function safeEditReply(interaction, options) {
 
   if (isInteractionExpired(interaction)) {
     if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
-      try {
-        return await interaction.channel.send(payload);
-      } catch (_) {}
+      return await safeChannelSend(interaction.channel, payload);
     }
     return null;
   }
@@ -5091,9 +5108,7 @@ async function safeEditReply(interaction, options) {
     }
     if (err?.code === 10062 || err?.code === 10015) {
       if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
-        try {
-          return await interaction.channel.send(payload);
-        } catch (_) {}
+        return await safeChannelSend(interaction.channel, payload);
       }
       return null;
     }
@@ -5109,8 +5124,8 @@ async function safeEditReply(interaction, options) {
 async function safeFollowUp(interaction, options) {
   if (!interaction || interaction.isAutocomplete?.()) return null;
   let payload = typeof options === 'string' ? { content: options } : { ...options };
-  if (payload.ephemeral && typeof payload.flags === 'number') {
-    payload.flags |= MessageFlags.Ephemeral;
+  if (payload.ephemeral) {
+    payload.flags = (typeof payload.flags === 'number' ? payload.flags : 0) | MessageFlags.Ephemeral;
   }
   const isV2 = Boolean(
     (typeof payload.flags === 'number' && (payload.flags & MessageFlags.IsComponentsV2) !== 0) ||
@@ -5120,9 +5135,7 @@ async function safeFollowUp(interaction, options) {
 
   if (isInteractionExpired(interaction)) {
     if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
-      try {
-        return await interaction.channel.send(payload);
-      } catch (_) {}
+      return await safeChannelSend(interaction.channel, payload);
     }
     return null;
   }
@@ -5135,9 +5148,7 @@ async function safeFollowUp(interaction, options) {
     }
     if (err?.code === 10062 || err?.code === 10015) {
       if (!payload.ephemeral && interaction.channel && typeof interaction.channel.send === 'function') {
-        try {
-          return await interaction.channel.send(payload);
-        } catch (_) {}
+        return await safeChannelSend(interaction.channel, payload);
       }
       return null;
     }
@@ -5155,8 +5166,8 @@ async function safeUpdate(interaction, options) {
   if (!interaction || interaction.isAutocomplete?.()) return null;
   if (isInteractionExpired(interaction)) return null;
   let payload = typeof options === 'string' ? { content: options } : { ...options };
-  if (payload.ephemeral && typeof payload.flags === 'number') {
-    payload.flags |= MessageFlags.Ephemeral;
+  if (payload.ephemeral) {
+    payload.flags = (typeof payload.flags === 'number' ? payload.flags : 0) | MessageFlags.Ephemeral;
   }
   const isV2 = Boolean(
     (typeof payload.flags === 'number' && (payload.flags & MessageFlags.IsComponentsV2) !== 0) ||
@@ -5187,12 +5198,12 @@ async function safeUpdate(interaction, options) {
 
 /**
  * Mở modal an toàn (showModal) chống lỗi interaction already replied
- * Discord API yêu cầu showModal phải là phản hồi ban đầu (chưa deferReply/reply) và còn hạn
+ * Discord API yêu cầu showModal phải là phản hồi ban đầu (chưa deferReply/reply) và còn hạn 3 giây
  */
 async function safeShowModal(interaction, modal) {
   if (!interaction || !modal) return false;
-  if (isInteractionExpired(interaction)) {
-    console.warn("⚠️ [safeShowModal] Không thể showModal trên interaction đã hết hạn (15m).");
+  if (isInteractionExpired(interaction) || isInitialAckExpired(interaction)) {
+    console.warn("⚠️ [safeShowModal] Không thể showModal trên interaction đã hết hạn (3s/15m).");
     return false;
   }
   if (interaction.replied || interaction.deferred) {
@@ -5227,7 +5238,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           // 1. Tìm trong activeOrderCodes
           for (const [code, info] of activeOrderCodes.entries()) {
             if (!input || code.includes(input)) {
-              const pkgName = info?.pkgKey ? (getPackage(info.pkgKey)?.name || info.pkgKey) : 'Đơn hàng';
+              const pkgObj = info?.pkgKey ? getPackage(info.pkgKey) : null;
+              const pkgName = pkgObj ? (pkgObj.name_vi || pkgObj.name || info.pkgKey) : (info?.pkgKey || 'Đơn hàng');
               suggestions.push({
                 name: `[Chờ TT] ${code} - ${pkgName}`.slice(0, 100),
                 value: code
@@ -5310,7 +5322,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           let st = '⏳ Chờ TT';
           if (isApproved) st = '✅ Đã duyệt';
           else if (isProcessing) st = '🔄 Đang duyệt';
-          userOrders.push(`• \`${code}\`: **${st}** (${pkg?.name || 'Gói tùy chọn'})`);
+          const pkgName = pkg ? (pkg.name_vi || pkg.name || 'Gói tùy chọn') : 'Gói tùy chọn';
+          userOrders.push(`• \`${code}\`: **${st}** (${pkgName})`);
         }
       }
 
@@ -5917,7 +5930,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             description:
               `• **Mã đơn hàng:** \`${cleanCode}\`\n` +
               `• **Trạng thái:** ${statusText}\n` +
-              (pkgData ? `• **Sản phẩm:** **${pkgData.name}**\n• **Giá tiền:** \`${formatVND(pkgData.priceVND)}\` / \`${formatUSD(pkgData.priceUSD)}\`\n` : '') +
+              (pkgData ? `• **Sản phẩm:** **${pkgData.name_vi || pkgData.name}**\n• **Giá tiền:** \`${formatVND(pkgData.price_vnd ?? pkgData.priceVND)}\` / \`${formatUSD(pkgData.price_usd ?? pkgData.priceUSD)}\`\n` : '') +
               (orderInfo?.createdAt ? `• **Thời gian tạo:** <t:${Math.floor(orderInfo.createdAt / 1000)}:R>\n` : '') +
               (orderInfo?.buyerId ? `• **Người mua:** <@${orderInfo.buyerId}>\n` : ''),
             footer: 'LS STUDIO Order Verification',
@@ -6003,6 +6016,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const isEn = targetLang === 'en';
         const ticketOwnerId = parts[3] || user.id;
 
+        // Kiểm tra quyền tương tác: Phải là chủ Ticket hoặc Staff
+        const isStaff = isStaffMember(interaction.member);
+        if (user.id !== ticketOwnerId && !isStaff) {
+          return safeReply(interaction, {
+            content: "❌ Bạn không phải là chủ sở hữu của Ticket này! / You are not the owner of this ticket!",
+            ephemeral: true
+          });
+        }
+
         const menuRows = buildPackageSelectMenuRows(ticketOwnerId, targetLang);
         const langSwitchRow = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
@@ -6079,6 +6101,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (customId === 'btn_close_with_reason') {
         if (!guild) {
           return safeReply(interaction, { content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
+        }
+        if (closingTicketChannels.has(interaction.channel?.id)) {
+          return safeReply(interaction, { content: "⏳ Kênh ticket này đang trong tiến trình đóng & lưu transcript...", ephemeral: true });
         }
         const modal = createCloseTicketReasonModal();
         return safeShowModal(interaction, modal);
@@ -6388,7 +6413,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
             });
           }
 
-          // Ghi nhận đơn hàng đã duyệt thành công
+          // Ghi nhận đơn hàng đã duyệt thành công (kèm FIFO eviction bảo vệ RAM)
+          if (approvedOrderCodes.size >= MAX_APPROVED_ORDERS) {
+            const oldestApproved = approvedOrderCodes.values().next().value;
+            if (oldestApproved !== undefined) approvedOrderCodes.delete(oldestApproved);
+          }
           approvedOrderCodes.add(orderCode);
 
         } finally {
@@ -6401,6 +6430,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (customId === 'btn_close_ticket') {
         if (!guild) {
           return safeReply(interaction, { content: "❌ Thao tác này chỉ thực hiện được trong máy chủ!", ephemeral: true });
+        }
+        if (closingTicketChannels.has(interaction.channel?.id)) {
+          return safeReply(interaction, { content: "⏳ Kênh ticket này đang trong tiến trình đóng & lưu transcript...", ephemeral: true });
         }
         const isTicketChannel = interaction.channel?.name?.includes('mua') ||
                                 interaction.channel?.name?.includes('support') ||
@@ -6474,6 +6506,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (closingTicketChannels.has(channel.id)) {
           return safeReply(interaction, { content: "⏳ Kênh ticket này đang trong tiến trình đóng & lưu transcript...", ephemeral: true });
         }
+        closingTicketChannels.add(channel.id);
 
         const v2Closing = createComponentsV2Message({
           accentColor: 0xED4245,
@@ -6753,8 +6786,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           // Hoãn phản hồi (deferReply) chống 3-second timeout vì tạo kênh và thiết lập phân quyền mất 1-2s
           await safeDeferReply(interaction, { ephemeral: true });
 
-          // Nếu người dùng đang submit từ bên trong một kênh ticket đã có
-          const isInExistingTicket = interaction.channel?.topic?.includes(`(${user.id})`);
+          // Nếu người dùng đang submit từ bên trong một kênh ticket đã có (và không trong tiến trình đóng)
+          const isInExistingTicket = interaction.channel?.topic?.includes(`(${user.id})`) && !closingTicketChannels.has(interaction.channel?.id);
           if (isInExistingTicket) {
             const v2Detail = createComponentsV2Message({
               accentColor: 0xFF4500,
@@ -6898,8 +6931,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           // Hoãn phản hồi (deferReply) chống 3-second timeout
           await safeDeferReply(interaction, { ephemeral: true });
 
-          // Nếu người dùng đang submit từ bên trong một kênh ticket đã có
-          const isInExistingTicket = interaction.channel?.topic?.includes(`(${user.id})`);
+          // Nếu người dùng đang submit từ bên trong một kênh ticket đã có (và không trong tiến trình đóng)
+          const isInExistingTicket = interaction.channel?.topic?.includes(`(${user.id})`) && !closingTicketChannels.has(interaction.channel?.id);
           if (isInExistingTicket) {
             const v2Detail = createComponentsV2Message({
               accentColor: 0x3D5AFE,
@@ -7019,6 +7052,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (closingTicketChannels.has(channel.id)) {
           return safeReply(interaction, { content: "⏳ Kênh ticket này đang trong tiến trình đóng và lưu transcript...", ephemeral: true });
         }
+        closingTicketChannels.add(channel.id);
 
         await safeDeferReply(interaction, { ephemeral: true });
 
@@ -7197,6 +7231,7 @@ module.exports = {
   sanitizeDiscordChannelTopic,
   formatVND,
   formatUSD,
+  parseFinancialAmount,
   isNegotiatedPrice,
   paymentHttpClient,
   generateVietQRUrl,
@@ -7212,6 +7247,8 @@ module.exports = {
   createTranscriptAttachments,
   executeTicketClosure,
   buildPackageSelectMenu,
+  buildPackageSelectMenu2,
+  buildPackageSelectMenuRows,
   createCustomOrderModal,
   createSupportTicketModal,
   createCloseTicketReasonModal,

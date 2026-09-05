@@ -41,6 +41,8 @@ const {
   createTranscriptAttachments,
   redactSensitiveData,
   buildPackageSelectMenu,
+  buildPackageSelectMenu2,
+  buildPackageSelectMenuRows,
   createCustomOrderModal,
   createSupportTicketModal,
   createCloseTicketReasonModal,
@@ -643,15 +645,27 @@ async function runAllTests() {
   });
 
   await runTest("Suite 1", "buildPackageSelectMenu option counts and limits", async () => {
-    const menuVi = buildPackageSelectMenu('100000000000000001', 'vi');
-    const dataVi = menuVi.toJSON();
-    assertEqual(dataVi.custom_id, 'select_package_vi_100000000000000001', 'VI CustomId matches');
-    assert(dataVi.options.length <= 25, `Discord select menu max 25 options (got ${dataVi.options.length})`);
-    assert(dataVi.options.length >= 17, `Must present all 17 packages`);
+    const menuVi1 = buildPackageSelectMenu('100000000000000001', 'vi');
+    const dataVi1 = menuVi1.toJSON();
+    assertEqual(dataVi1.custom_id, 'select_package_vi_100000000000000001', 'VI Menu 1 CustomId matches');
+    assert(dataVi1.options.length <= 25, `Discord select menu max 25 options (got ${dataVi1.options.length})`);
+    assert(dataVi1.options.length >= 7, `Must present Minecraft & AI packages in Menu 1 (got ${dataVi1.options.length})`);
 
-    const menuEn = buildPackageSelectMenu('100000000000000001', 'en');
-    const dataEn = menuEn.toJSON();
-    assertEqual(dataEn.custom_id, 'select_package_en_100000000000000001', 'EN CustomId matches');
+    const menuEn1 = buildPackageSelectMenu('100000000000000001', 'en');
+    const dataEn1 = menuEn1.toJSON();
+    assertEqual(dataEn1.custom_id, 'select_package_en_100000000000000001', 'EN Menu 1 CustomId matches');
+
+    const menuVi2 = buildPackageSelectMenu2('100000000000000001', 'vi');
+    const dataVi2 = menuVi2.toJSON();
+    assertEqual(dataVi2.custom_id, 'select_package_vi_100000000000000001_2', 'VI Menu 2 CustomId matches');
+    assert(dataVi2.options.length <= 25, `Discord select menu max 25 options (got ${dataVi2.options.length})`);
+    assert(dataVi2.options.length >= 10, `Must present Media & Office packages in Menu 2 (got ${dataVi2.options.length})`);
+
+    const totalPackages = dataVi1.options.length + dataVi2.options.length;
+    assert(totalPackages >= 17, `Must present all packages across Menu 1 and 2 (got ${totalPackages})`);
+
+    const rows = buildPackageSelectMenuRows('100000000000000001', 'vi');
+    assertEqual(rows.length, 2, 'Must generate 2 action rows for dual menus');
   });
 
   // ============================================================================
